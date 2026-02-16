@@ -1,0 +1,87 @@
+# Build
+build/
+build-*/
+build_test/
+out/
+ffmpeg-build/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+CMakeSettings.json
+.idea/
+.claude/
+
+# Compiled
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# Rust
+rust_hrtf/target/
+
+# Dependencies not tracked (fetch manually if needed)
+external/libmysofa/
+# NOTE: external/glfw, external/imgui, external/glm are git submodules
+# NOTE: external/glad and external/pffft are vendored
+
+# FFmpeg source (clone separately, apply patches from ffmpeg-patches/)
+ffmpeg-src/
+
+# mpv source (clone separately, apply patches from mpv-patches/)
+mpv-src/
+
+# Environment (user-specific paths)
+.env
+
+# OS
+Thumbs.db
+.DS_Store
+nul
+
+# ImGui layout cache
+imgui.ini
+
+# SOFA/HRTF data files (large binary)
+assets/hrtf/*.sofa
+
+# Temporary / logs
+*.tmp
+*.log
+*.txt
+!LICENSE.txt
+
+# Test / debug artifacts
+test_*.c
+test_*.cpp
+test_*.thd
+test_*.mp4
+objcoding_*
+spatial_*
+*.bin
+*.spatial
+*.eac3
+*.thd
+*.pdf
+*.zip
+
+# Scratch scripts
+compile_test*.ps1
+compile_test*.bat
+run_*.bat
+run_*.ps1
+copy_deps.bat
+
+# FFmpeg patches (tracked, override patterns above)
+!ffmpeg-patches/
+!ffmpeg-patches/**

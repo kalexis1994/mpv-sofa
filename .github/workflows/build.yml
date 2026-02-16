@@ -1,0 +1,246 @@
+name: Build mpv-sofa
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── MSYS2 ────────────────────────────────────────────────
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-libass
+            mingw-w64-ucrt-x86_64-lcms2
+            mingw-w64-ucrt-x86_64-libjpeg-turbo
+            mingw-w64-ucrt-x86_64-libplacebo
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-vulkan-loader
+            mingw-w64-ucrt-x86_64-spirv-cross
+            mingw-w64-ucrt-x86_64-glfw
+            mingw-w64-ucrt-x86_64-glm
+            mingw-w64-ucrt-x86_64-libmysofa
+            mingw-w64-ucrt-x86_64-zlib
+            git
+            diffutils
+            patch
+
+      # ── Cache FFmpeg ─────────────────────────────────────────
+      - name: Cache FFmpeg build
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build
+          key: ffmpeg-n8.0-${{ hashFiles('ffmpeg-patches/**') }}
+
+      # ── Build FFmpeg ─────────────────────────────────────────
+      - name: Clone and build FFmpeg
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          # Clone FFmpeg n8.0
+          git clone --depth 1 --branch n8.0 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+
+          # Apply the spatial audio patch (strip CRLF — actions/checkout adds CR on Windows)
+          cd ffmpeg-src
+          sed -i 's/\r$//' ../ffmpeg-patches/ffmpeg-spatial-audio.patch
+          git apply ../ffmpeg-patches/ffmpeg-spatial-audio.patch
+
+          # Copy new source files
+          cp ../ffmpeg-patches/mlp_atmos_coeff.c libavcodec/mlp_atmos_coeff.c
+          cp ../ffmpeg-patches/spatial_ext_coeff.h libavcodec/spatial_ext_coeff.h
+
+          # Configure
+          ./configure \
+            --prefix="$(pwd)/../ffmpeg-build" \
+            --target-os=mingw32 \
+            --arch=x86_64 \
+            --cc=gcc --cxx=g++ \
+            --disable-debug \
+            --disable-doc \
+            --enable-shared \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-runtime-cpudetect \
+            --enable-zlib \
+            --enable-iconv \
+            --enable-dxva2 \
+            --enable-d3d11va
+
+          # Build and install
+          make -j$(nproc)
+          make install
+
+      # ── Clone & patch mpv ────────────────────────────────────
+      - name: Clone and patch mpv
+        run: |
+          set -euo pipefail
+
+          mkdir mpv-src && cd mpv-src && git init
+          git fetch --depth 1 https://github.com/mpv-player/mpv.git 9ccd8899ff28c4f6bdd113026d307af3d46133c5
+          git checkout FETCH_HEAD
+
+          # Copy HRTF filter sources
+          cp ../mpv-patches/af_hrtf.c        audio/filter/af_hrtf.c
+          cp ../mpv-patches/objcoding_qmf.c  audio/filter/objcoding_qmf.c
+          cp ../mpv-patches/objcoding_qmf.h  audio/filter/objcoding_qmf.h
+          cp ../mpv-patches/spatial_ext_coeff.h audio/filter/spatial_ext_coeff.h
+
+          # Copy PFFFT (bundled FFT library)
+          cp ../external/pffft/pffft.c           audio/filter/pffft.c
+          cp ../external/pffft/pffft.h           audio/filter/pffft.h
+          cp ../external/pffft/pffft_common.c    audio/filter/pffft_common.c
+          cp ../external/pffft/pffft_priv_impl.h audio/filter/pffft_priv_impl.h
+          mkdir -p audio/filter/simd
+          cp ../external/pffft/simd/*.h          audio/filter/simd/
+
+          # Patch user_filters.h — add extern declaration
+          sed -i '/extern const struct mp_user_filter_entry af_drop;/a extern const struct mp_user_filter_entry af_hrtf;' \
+            filters/user_filters.h
+
+          # Patch user_filters.c — add to af_list[]
+          sed -i '/&af_drop,/a\    \&af_hrtf,' \
+            filters/user_filters.c
+
+          # Patch meson.options — add hrtf option
+          echo "option('hrtf', type: 'feature', value: 'auto', description: 'HRTF binaural audio filter (libmysofa)')" \
+            >> meson.options
+
+          # Patch meson.build — insert HRTF block after rubberband's endif
+          python3 << 'PYEOF'
+          with open('meson.build', 'r') as f:
+              lines = f.readlines()
+          insert_at = None
+          for i, line in enumerate(lines):
+              if "af_rubberband.c" in line:
+                  for j in range(i + 1, len(lines)):
+                      if lines[j].strip() == 'endif':
+                          insert_at = j + 1
+                          break
+                  break
+          if insert_at:
+              patch = [
+                  '\n',
+                  '# HRTF binaural spatialization filter\n',
+                  "libmysofa = dependency('libmysofa', required: get_option('hrtf'))\n",
+                  "features += {'hrtf': libmysofa.found()}\n",
+                  "if features['hrtf']\n",
+                  "    dependencies += libmysofa\n",
+                  "    sources += files('audio/filter/af_hrtf.c', 'audio/filter/pffft.c', 'audio/filter/pffft_common.c', 'audio/filter/objcoding_qmf.c')\n",
+                  'endif\n',
+              ]
+              lines[insert_at:insert_at] = patch
+              with open('meson.build', 'w') as f:
+                  f.writelines(lines)
+          PYEOF
+
+      # ── Build mpv ───────────────────────────────────────────
+      - name: Build mpv
+        run: |
+          set -euo pipefail
+
+          export PKG_CONFIG_PATH="$(pwd)/ffmpeg-build/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          cd mpv-src
+          meson setup build \
+            --buildtype=release \
+            -Dlibmpv=true \
+            -Dhrtf=enabled
+
+          meson compile -C build
+
+      # ── Build GUI (host app) ─────────────────────────────────
+      - name: Build mpv-sofa GUI
+        run: |
+          set -euo pipefail
+
+          # Ensure assets dir exists (SOFA files are gitignored, dir may be absent)
+          mkdir -p assets
+
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMPV_INCLUDE_DIR="$(pwd)/mpv-src/include" \
+            -DMPV_LIBRARY="$(pwd)/mpv-src/build/libmpv.dll.a"
+
+          cmake --build build
+
+      # ── Package ──────────────────────────────────────────────
+      - name: Package
+        run: |
+          set -eu
+
+          mkdir -p package
+
+          # Main executables
+          cp build/bin/mpv-sofa.exe package/
+          cp mpv-src/build/libmpv-2.dll package/
+
+          # Copy assets (shaders etc., but not large SOFA files)
+          if [ -d build/bin/assets ]; then
+            cp -r build/bin/assets package/
+          fi
+
+          # Also copy custom FFmpeg DLLs
+          if [ -d ffmpeg-build/bin ]; then
+            for dll in ffmpeg-build/bin/*.dll; do
+              [ -f "$dll" ] && cp "$dll" package/
+            done
+          fi
+
+          # Recursively collect UCRT64 DLL dependencies
+          echo "Collecting DLL dependencies (recursive)..."
+          changed=1
+          while [ "$changed" -eq 1 ]; do
+            changed=0
+            for bin in package/*.exe package/*.dll; do
+              [ -f "$bin" ] || continue
+              ldd "$bin" 2>/dev/null | grep -i ucrt64 | awk '{print $3}' | while read -r dll; do
+                if [ -f "$dll" ] && [ ! -f "package/$(basename "$dll")" ]; then
+                  cp "$dll" package/
+                  echo "  + $(basename "$dll")"
+                fi
+              done || true
+            done
+            # Check if new DLLs were added this round
+            new_count=$(ls package/*.dll 2>/dev/null | wc -l)
+            if [ "${prev_count:-0}" != "$new_count" ]; then
+              changed=1
+              prev_count=$new_count
+            fi
+          done
+
+          echo "=== Package contents ==="
+          ls -lh package/
+
+      # ── Upload artifact ──────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpv-sofa-windows-x64
+          path: package/
+          retention-days: 30

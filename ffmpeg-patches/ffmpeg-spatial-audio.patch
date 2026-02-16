@@ -1,0 +1,2887 @@
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index fb22541..3f42786 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -208,7 +208,8 @@ OBJS-$(CONFIG_AAC_MEDIACODEC_DECODER)  += mediacodecdec.o
+ OBJS-$(CONFIG_AAC_MF_ENCODER)          += mfenc.o mf_utils.o
+ OBJS-$(CONFIG_AASC_DECODER)            += aasc.o msrledec.o
+ OBJS-$(CONFIG_AC3_DECODER)             += ac3dec_float.o ac3dec_data.o ac3.o \
+-                                          kbdwin.o ac3tab.o ac3_channel_layout_tab.o
++                                          kbdwin.o ac3tab.o ac3_channel_layout_tab.o \
++                                          mlp_atmos_coeff.o
+ OBJS-$(CONFIG_AC3_FIXED_DECODER)       += ac3dec_fixed.o ac3dec_data.o ac3.o \
+                                           kbdwin.o ac3tab.o ac3_channel_layout_tab.o
+ OBJS-$(CONFIG_AC3_ENCODER)             += ac3enc_float.o ac3enc.o ac3tab.o \
+@@ -530,7 +531,7 @@ OBJS-$(CONFIG_MJPEGB_DECODER)          += mjpegbdec.o
+ OBJS-$(CONFIG_MJPEG_CUVID_DECODER)     += cuviddec.o
+ OBJS-$(CONFIG_MJPEG_QSV_ENCODER)       += qsvenc_jpeg.o
+ OBJS-$(CONFIG_MJPEG_VAAPI_ENCODER)     += vaapi_encode_mjpeg.o
+-OBJS-$(CONFIG_MLP_DECODER)             += mlpdec.o mlpdsp.o
++OBJS-$(CONFIG_MLP_DECODER)             += mlpdec.o mlpdsp.o mlp_atmos_coeff.o
+ OBJS-$(CONFIG_MLP_ENCODER)             += mlpenc.o mlp.o
+ OBJS-$(CONFIG_MMVIDEO_DECODER)         += mmvideo.o
+ OBJS-$(CONFIG_MOBICLIP_DECODER)        += mobiclip.o
+@@ -746,7 +747,7 @@ OBJS-$(CONFIG_TIERTEXSEQVIDEO_DECODER) += tiertexseqv.o
+ OBJS-$(CONFIG_TIFF_DECODER)            += tiff.o lzw.o faxcompr.o tiff_common.o
+ OBJS-$(CONFIG_TIFF_ENCODER)            += tiffenc.o rle.o lzwenc.o
+ OBJS-$(CONFIG_TMV_DECODER)             += tmv.o cga_data.o
+-OBJS-$(CONFIG_TRUEHD_DECODER)          += mlpdec.o mlpdsp.o
++OBJS-$(CONFIG_TRUEHD_DECODER)          += mlpdec.o mlpdsp.o mlp_atmos_coeff.o
+ OBJS-$(CONFIG_TRUEHD_ENCODER)          += mlpenc.o mlp.o
+ OBJS-$(CONFIG_TRUEMOTION1_DECODER)     += truemotion1.o
+ OBJS-$(CONFIG_TRUEMOTION2_DECODER)     += truemotion2.o
+diff --git a/libavcodec/ac3_parser.c b/libavcodec/ac3_parser.c
+index a8bc3af..881ec72 100644
+--- a/libavcodec/ac3_parser.c
++++ b/libavcodec/ac3_parser.c
+@@ -22,6 +22,7 @@
+ 
+ #include "config_components.h"
+ 
++#include <stdio.h>
+ #include "libavutil/channel_layout.h"
+ #include "libavutil/mem.h"
+ #include "parser.h"
+@@ -32,6 +33,9 @@
+ #include "aac_ac3_parser.h"
+ #include "get_bits.h"
+ 
++/* Enable JOC addbsi dumping for reverse-engineering DD+ Atmos */
++#define JOC_DUMP_ADDBSI 1
++
+ 
+ #define AC3_HEADER_SIZE 7
+ 
+@@ -265,7 +269,12 @@ static int eac3_parse_header(GetBitContext *gbc, AC3HeaderInfo *hdr)
+     /* additional bitstream info */
+     if (get_bits1(gbc)) {
+         int addbsil = get_bits(gbc, 6);
+-        for (int i = 0; i < addbsil + 1; i++) {
++        int addbsi_bytes = addbsil + 1;
++#if JOC_DUMP_ADDBSI
++        /* Save bit position before parsing addbsi, for raw dump */
++        int addbsi_bit_start = get_bits_count(gbc);
++#endif
++        for (int i = 0; i < addbsi_bytes; i++) {
+             if (i == 0) {
+                 /* In this 8 bit chunk, the LSB is equal to flag_ec3_extension_type_a
+                    which can be used to detect Atmos presence */
+@@ -279,6 +288,40 @@ static int eac3_parse_header(GetBitContext *gbc, AC3HeaderInfo *hdr)
+                 skip_bits(gbc, 8); // skip additional bit stream info
+             }
+         }
++#if JOC_DUMP_ADDBSI
++        if (hdr->eac3_extension_type_a && addbsi_bytes > 2) {
++            static FILE *addbsi_dump = NULL;
++            static int addbsi_count = 0;
++            if (!addbsi_dump) {
++                addbsi_dump = fopen("joc_addbsi.bin", "wb");
++                if (addbsi_dump) {
++                    const char magic[] = "ABSI";
++                    fwrite(magic, 1, 4, addbsi_dump);
++                }
++            }
++            if (addbsi_dump && addbsi_count < 100) {
++                /* Record: frame_type(1) addbsi_bytes(1) complexity(1) raw_bytes(N) */
++                uint8_t rec[3];
++                rec[0] = (uint8_t)hdr->frame_type;
++                rec[1] = (uint8_t)addbsi_bytes;
++                rec[2] = (uint8_t)hdr->complexity_index_type_a;
++                fwrite(rec, 1, 3, addbsi_dump);
++
++                const uint8_t *buf = gbc->buffer;
++                uint8_t abuf[64];
++                for (int i = 0; i < addbsi_bytes && i < 64; i++) {
++                    int bp = addbsi_bit_start + i * 8;
++                    int byte_off = bp >> 3;
++                    int bit_off  = bp & 7;
++                    abuf[i] = (buf[byte_off] << bit_off) |
++                              (buf[byte_off + 1] >> (8 - bit_off));
++                }
++                fwrite(abuf, 1, addbsi_bytes > 64 ? 64 : addbsi_bytes, addbsi_dump);
++                fflush(addbsi_dump);
++                addbsi_count++;
++            }
++        }
++#endif
+     }
+ 
+     return 0;
+diff --git a/libavcodec/ac3dec.c b/libavcodec/ac3dec.c
+index 2f0e7f5..30b6c8b 100644
+--- a/libavcodec/ac3dec.c
++++ b/libavcodec/ac3dec.c
+@@ -46,6 +46,11 @@
+ #include "decode.h"
+ #include "kbdwin.h"
+ 
++/* E-AC-3 object coding (DD+ spatial) EMDF/object metadata extraction.
++ * Parses EMDF containers within skip fields to extract object positions
++ * and writes them to g_spatial_ext_objmeta for the HRTF spatializer. */
++#include "spatial_ext_coeff.h"
++
+ #if (!USE_FIXED)
+ /** dynamic range table. converts codes to scale factors. */
+ static float dynamic_range_tab[256];
+@@ -944,6 +949,814 @@ static inline int coupling_coordinates(AC3DecodeContext *s, int blk)
+     return 0;
+ }
+ 
++/* ======================================================================
++ * E-AC-3 object coding EMDF/object metadata Parser
++ * Extracts object positions from EMDF containers within E-AC-3 frames
++ * per ETSI TS 102 366 (EMDF) and ETSI TS 103 420 (object metadata/object coding).
++ * ====================================================================== */
++
++/* Bit reader for EMDF parsing (operates on raw byte buffer at bit level) */
++typedef struct {
++    const uint8_t *buf;
++    int size;
++    int bit_pos;
++} EmdfBitReader;
++
++static void emdf_br_init(EmdfBitReader *br, const uint8_t *buf, int size) {
++    br->buf = buf; br->size = size; br->bit_pos = 0;
++}
++
++static int emdf_br_left(const EmdfBitReader *br) {
++    return br->size * 8 - br->bit_pos;
++}
++
++static uint32_t emdf_br_read(EmdfBitReader *br, int n) {
++    uint32_t val = 0;
++    for (int i = 0; i < n; i++) {
++        int byte_idx = br->bit_pos >> 3;
++        int bit_idx  = 7 - (br->bit_pos & 7);
++        if (byte_idx < br->size)
++            val = (val << 1) | ((br->buf[byte_idx] >> bit_idx) & 1);
++        else
++            val <<= 1;
++        br->bit_pos++;
++    }
++    return val;
++}
++
++static int32_t emdf_br_read_signed(EmdfBitReader *br, int n) {
++    uint32_t val = emdf_br_read(br, n);
++    if (val & (1u << (n - 1)))
++        val |= ~((1u << n) - 1);
++    return (int32_t)val;
++}
++
++static void emdf_br_skip(EmdfBitReader *br, int n) { br->bit_pos += n; }
++
++static uint32_t emdf_variable_bits(EmdfBitReader *br, int n_bits) {
++    uint32_t value = 0;
++    int read_more;
++    do {
++        value += emdf_br_read(br, n_bits);
++        read_more = emdf_br_read(br, 1);
++        if (read_more) {
++            value <<= n_bits;
++            value += (1 << n_bits);
++        }
++    } while (read_more);
++    return value;
++}
++
++static uint32_t emdf_variable_bits_max(EmdfBitReader *br, int n_bits, int max_groups) {
++    uint32_t value = 0;
++    int num_group = 1;
++    value += emdf_br_read(br, n_bits);
++    int read_more = emdf_br_read(br, 1);
++    if (max_groups > num_group && read_more) {
++        value <<= n_bits;
++        value += (1u << n_bits);
++        while (read_more) {
++            value += emdf_br_read(br, n_bits);
++            read_more = emdf_br_read(br, 1);
++            num_group++;
++            if (num_group >= max_groups) break;
++            if (read_more) {
++                value <<= n_bits;
++                value += (1u << n_bits);
++            }
++        }
++    }
++    return value;
++}
++
++/* Parse emdf_payload_config per ETSI TS 102 366 Annex H */
++static void emdf_parse_payload_config(EmdfBitReader *br) {
++    int smploffste = emdf_br_read(br, 1);
++    if (smploffste) {
++        emdf_br_read(br, 11); /* smploffst */
++        emdf_br_read(br, 1);  /* reserved */
++    }
++    int duratione = emdf_br_read(br, 1);
++    if (duratione) emdf_variable_bits(br, 11);
++    int groupide = emdf_br_read(br, 1);
++    if (groupide) emdf_variable_bits(br, 2);
++    int codecdatae = emdf_br_read(br, 1);
++    if (codecdatae) emdf_br_read(br, 8);
++    int discard = emdf_br_read(br, 1);
++    if (!discard) {
++        int payload_frame_aligned = 0;
++        if (!smploffste) {
++            payload_frame_aligned = emdf_br_read(br, 1);
++            if (payload_frame_aligned) {
++                emdf_br_read(br, 1); /* create_duplicate */
++                emdf_br_read(br, 1); /* remove_duplicate */
++            }
++        }
++        if (smploffste || payload_frame_aligned) {
++            emdf_br_read(br, 5); /* priority */
++            emdf_br_read(br, 2); /* proc_allowed */
++        }
++    }
++}
++
++/* Parse object metadata program_assignment */
++static void objmeta_parse_program_assignment(EmdfBitReader *br, int *b_dyn_only,
++                                           int *b_lfe) {
++    *b_dyn_only = emdf_br_read(br, 1);
++    if (*b_dyn_only) {
++        *b_lfe = emdf_br_read(br, 1);
++    } else {
++        uint32_t mask = emdf_br_read(br, 4);
++        if (mask & 0x8) { /* bed instances */
++            uint32_t n = emdf_br_read(br, 3) + 1;
++            for (uint32_t i = 0; i < n; i++) {
++                if (!emdf_br_read(br, 1)) {
++                    uint32_t ch_count = emdf_br_read(br, 4) + 1;
++                    emdf_br_skip(br, ch_count * 8);
++                }
++            }
++        }
++        if (mask & 0x4) { /* ISF objects */
++            uint32_t n = emdf_br_read(br, 3) + 1;
++            emdf_br_skip(br, n * 4);
++        }
++        if (mask & 0x2) { /* dynamic objects */
++            uint32_t n = emdf_br_read(br, 5);
++            if (n == 0x1F) n += emdf_br_read(br, 7);
++        }
++        *b_lfe = emdf_br_read(br, 1);
++    }
++}
++
++/* Parse object metadata object_render_info and update positions */
++static void objmeta_parse_render_info(EmdfBitReader *br, SpatialExtObjectPos *obj,
++                                    int blk, int status_idx) {
++    int ri[4] = {1, 1, 1, 1};
++    if (status_idx != 1) {
++        for (int i = 0; i < 4; i++) ri[i] = emdf_br_read(br, 1);
++    }
++
++    if (ri[3]) { /* position */
++        int b_diff = (blk > 0) ? emdf_br_read(br, 1) : 0;
++        if (b_diff) {
++            int32_t dx = emdf_br_read_signed(br, 3);
++            int32_t dy = emdf_br_read_signed(br, 3);
++            int32_t dz = emdf_br_read_signed(br, 3);
++            obj->x += (float)dx / 64.0f;
++            obj->y += (float)dy / 64.0f;
++            obj->z += (float)dz / 16.0f;
++            if (obj->x < 0) obj->x = 0; if (obj->x > 1) obj->x = 1;
++            if (obj->y < 0) obj->y = 0; if (obj->y > 1) obj->y = 1;
++            if (obj->z < -1) obj->z = -1; if (obj->z > 1) obj->z = 1;
++        } else {
++            uint32_t xb = emdf_br_read(br, 6);
++            uint32_t yb = emdf_br_read(br, 6);
++            uint32_t zs = emdf_br_read(br, 1);
++            uint32_t zb = emdf_br_read(br, 4);
++            obj->x = (float)xb / 64.0f;
++            obj->y = (float)yb / 64.0f;
++            obj->z = (zs ? 1.0f : -1.0f) * (float)zb / 16.0f;
++        }
++        int b_dist = emdf_br_read(br, 1);
++        if (b_dist) {
++            if (!emdf_br_read(br, 1)) emdf_br_read(br, 4);
++        }
++    }
++    if (ri[1]) { /* zone */
++        emdf_br_read(br, 3);
++        emdf_br_read(br, 1);
++    }
++    if (ri[2]) { /* size */
++        uint32_t si = emdf_br_read(br, 2);
++        if (si == 1) { obj->size = (float)emdf_br_read(br, 5) / 32.0f; }
++        else if (si == 2) { emdf_br_skip(br, 15); obj->size = 0; }
++        else { obj->size = 0; }
++    }
++    if (ri[3]) { /* screen ref */
++        if (emdf_br_read(br, 1)) { emdf_br_read(br, 3); emdf_br_read(br, 2); }
++    }
++    emdf_br_read(br, 1); /* snap */
++}
++
++/* Parse object metadata object_info_block */
++static void objmeta_parse_info_block(EmdfBitReader *br, SpatialExtObjectPos *obj,
++                                   int blk) {
++    int b_not_active = emdf_br_read(br, 1);
++    int basic_status = 0;
++    if (b_not_active) {
++        obj->active = 0;
++    } else {
++        obj->active = 1;
++        basic_status = (blk == 0) ? 1 : emdf_br_read(br, 2);
++    }
++
++    /* object_basic_info (gain, priority) */
++    if (basic_status == 1 || basic_status == 3) {
++        int b_gain = 1, b_prio = 1;
++        if (basic_status != 1) {
++            b_prio = emdf_br_read(br, 1);
++            b_gain = emdf_br_read(br, 1);
++        }
++        if (b_gain) {
++            uint32_t gi = emdf_br_read(br, 2);
++            if (gi == 0) obj->gain_db = 0;
++            else if (gi == 1) obj->gain_db = -128;
++            else if (gi == 2) {
++                uint32_t gb = emdf_br_read(br, 6);
++                obj->gain_db = (gb <= 14) ? (int8_t)(15 - gb) : (int8_t)(14 - gb);
++            }
++        }
++        if (b_prio) {
++            if (!emdf_br_read(br, 1)) emdf_br_read(br, 5);
++        }
++    }
++
++    /* object_render_info (position) */
++    int render_status = 0;
++    if (!b_not_active) {
++        render_status = (blk == 0) ? 1 : emdf_br_read(br, 2);
++    }
++    if (render_status == 1 || render_status == 3) {
++        objmeta_parse_render_info(br, obj, blk, render_status);
++    }
++
++    /* additional table data */
++    if (emdf_br_read(br, 1)) {
++        uint32_t add_size = emdf_br_read(br, 4) + 1;
++        emdf_br_skip(br, add_size * 8);
++    }
++}
++
++/* Parse full object metadata payload and write to g_spatial_ext_objmeta */
++static int eac3_parse_objmeta(const uint8_t *payload, int payload_size) {
++    EmdfBitReader br;
++    emdf_br_init(&br, payload, payload_size);
++
++    uint32_t version = emdf_br_read(&br, 2);
++    if (version == 3) version += emdf_br_read(&br, 3);
++
++    uint32_t obj_bits = emdf_br_read(&br, 5);
++    if (obj_bits == 0x1F) obj_bits += emdf_br_read(&br, 7);
++    int object_count = obj_bits + 1;
++    if (object_count > SPATIAL_EXT_MAX_OBJECTS) object_count = SPATIAL_EXT_MAX_OBJECTS;
++
++    int b_dyn_only = 0, b_lfe = 0;
++    objmeta_parse_program_assignment(&br, &b_dyn_only, &b_lfe);
++
++    int b_alt = emdf_br_read(&br, 1);
++    uint32_t elem_bits = emdf_br_read(&br, 4);
++    if (elem_bits == 0xF) elem_bits += emdf_br_read(&br, 5);
++
++    /* Temporary object array (DD+ object metadata coords [0,1]) */
++    SpatialExtObjectPos objects[SPATIAL_EXT_MAX_OBJECTS];
++    memset(objects, 0, sizeof(objects));
++
++    for (uint32_t e = 0; e < elem_bits; e++) {
++        uint32_t elem_id = emdf_br_read(&br, 4);
++        uint32_t elem_size = emdf_variable_bits_max(&br, 4, 4);
++        if (b_alt) emdf_br_read(&br, 4);
++        emdf_br_read(&br, 1); /* discard */
++
++        int body_start = br.bit_pos;
++        int body_end = body_start + elem_size * 8;
++
++        if (elem_id == 1 && emdf_br_left(&br) > 20) {
++            /* object_element: parse md_update_info */
++            uint32_t soc = emdf_br_read(&br, 2);
++            if (soc == 1) emdf_br_read(&br, 2);
++            else if (soc == 2) emdf_br_read(&br, 5);
++
++            uint32_t num_blocks = emdf_br_read(&br, 3) + 1;
++            for (uint32_t blk = 0; blk < num_blocks; blk++) {
++                emdf_br_read(&br, 6); /* block_offset_factor */
++                uint32_t rdc = emdf_br_read(&br, 2);
++                if (rdc == 3) {
++                    if (emdf_br_read(&br, 1)) emdf_br_read(&br, 4);
++                    else emdf_br_read(&br, 11);
++                }
++            }
++
++            if (!emdf_br_read(&br, 1)) emdf_br_read(&br, 5); /* reserved */
++
++            /* Parse each object's blocks */
++            for (int j = 0; j < object_count; j++) {
++                for (uint32_t blk = 0; blk < num_blocks; blk++) {
++                    if (emdf_br_left(&br) < 3) goto done;
++                    objmeta_parse_info_block(&br, &objects[j], blk);
++                }
++            }
++        } else {
++            br.bit_pos = body_end;
++        }
++
++        if (br.bit_pos < body_end) br.bit_pos = body_end;
++    }
++
++done:
++    /* Convert DD+ object metadata [0,1] to DAMF [-1,+1] and write to global */
++    for (int j = 0; j < object_count; j++) {
++        g_spatial_ext_objmeta.objects[j].x      = objects[j].x * 2.0f - 1.0f;
++        g_spatial_ext_objmeta.objects[j].y      = objects[j].y * 2.0f - 1.0f;
++        g_spatial_ext_objmeta.objects[j].z      = objects[j].z;
++        g_spatial_ext_objmeta.objects[j].size    = objects[j].size;
++        g_spatial_ext_objmeta.objects[j].gain_db = objects[j].gain_db;
++        g_spatial_ext_objmeta.objects[j].active  = objects[j].active;
++    }
++    g_spatial_ext_objmeta.num_objects = object_count;
++    g_spatial_ext_objmeta.num_bed_objects = 0;
++    g_spatial_ext_objmeta.num_dynamic_objects = object_count;
++    atomic_store(&g_spatial_ext_objmeta.updated, 1);
++
++    /* Debug: log first few object metadata extractions to file */
++    {
++        static int eac3_objmeta_log_count = 0;
++        if (eac3_objmeta_log_count < 10) {
++            FILE *dbg = fopen("eac3_objmeta_debug.txt", "a");
++            if (dbg) {
++                fprintf(dbg, "EAC3-OBJMETA[%d]: %d objects\n",
++                        eac3_objmeta_log_count, object_count);
++                for (int j = 0; j < object_count && j < 16; j++) {
++                    fprintf(dbg, "  obj[%d] act=%d x=%+.3f y=%+.3f z=%+.3f g=%d\n",
++                            j, g_spatial_ext_objmeta.objects[j].active,
++                            g_spatial_ext_objmeta.objects[j].x,
++                            g_spatial_ext_objmeta.objects[j].y,
++                            g_spatial_ext_objmeta.objects[j].z,
++                            g_spatial_ext_objmeta.objects[j].gain_db);
++                }
++                fclose(dbg);
++            }
++            eac3_objmeta_log_count++;
++        }
++    }
++
++    return 0;
++}
++
++/* ======================================================================
++ * E-AC-3 object coding (DD+ spatial) bitstream parser
++ * Per ETSI TS 103 420 V1.2.1 — extracts mixing coefficients from object coding
++ * payloads (payload_id=14) and writes them to g_objcoding_data for the HRTF
++ * spatializer to reconstruct individual object audio from 5.1 downmix.
++ * ====================================================================== */
++
++/* Huffman tables from ETSI TS 103 420 Annex A.1 */
++static const int objcoding_huff_coarse_generic[][2] = {  /* MTX, mode 0 */
++    {  -1,   1}, {   2,  -2}, { -96,   3}, {   4,  -3}, { -95,   5}, {   6,   7}, {  -4, -94}, {   8,   9}, {  -5, -93}, {  10,  11},
++    {  -6, -92}, {  12,  13}, {  -7, -91}, {  14,  15}, {  16, -90}, {  -8,  17}, {  18, -89}, {  -9,  19}, {  20,  21}, { -88, -10},
++    {  22,  23}, { -11, -87}, {  24,  25}, {  26, -86}, { -12,  27}, {  28, -85}, { -13,  29}, {  30,  31}, {  32, -84}, { -14,  33},
++    {  34, -15}, { -83,  35}, {  36,  37}, { -16,  38}, { -17, -82}, {  39,  40}, {  41, -81}, {  42,  43}, {  44,  45}, {  46,  47},
++    {  48,  49}, {  50,  51}, {  52, -18}, { -78,  53}, { -19,  54}, {  55,  56}, {  57,  58}, { -22,  59}, {  60,  61}, {  62,  63},
++    {  64,  65}, {  66,  67}, {  68, -20}, { -21, -79}, { -80, -25}, {  69,  70}, { -26,  71}, {  72,  73}, {  74,  75}, {  76,  77},
++    {  78,  79}, {  80,  81}, {  82,  83}, {  84,  85}, {  86,  87}, {  88,  89}, {  90,  91}, {  92,  93}, {  94, -23}, { -74, -75},
++    { -72, -73}, { -76, -77}, { -34, -35}, { -32, -33}, { -38, -39}, { -36, -37}, { -30, -31}, { -28, -29}, { -50, -51}, { -48, -49},
++    { -54, -55}, { -52, -53}, { -42, -43}, { -40, -41}, { -46, -47}, { -44, -45}, { -66, -67}, { -64, -65}, { -70, -71}, { -68, -69},
++    { -58, -59}, { -56, -57}, { -62, -63}, { -60, -61}, { -24, -27}
++};
++
++static const int objcoding_huff_fine_generic[][2] = {  /* MTX, mode 1 */
++    {  -1,   1}, {   2,   3}, {  -2,-192}, {   4,   5}, {   6,  -3}, {-191,   7}, {   8,   9}, {  -4,-190}, {  10,  11}, {  -5,-189},
++    {  12,  13}, {  -6,  14}, {-188,  15}, {  16,  -7}, {-187,  17}, {  18,  -8}, {-186,  19}, {  20,  -9}, {-185,  21}, {  22, -10},
++    {-184,  23}, {  24, -11}, {  25,-183}, {  26,  27}, { -12,-182}, {  28,  29}, { -13,-181}, {  30,  31}, {-180, -14}, {  32,  33},
++    {  34,-179}, { -15,  35}, {  36,-178}, { -16,  37}, {  38,-177}, {  39, -17}, {  40,  41}, {-176,  42}, { -18,  43}, { -19,  44},
++    {-175,  45}, {  46,-174}, { -20,  47}, {-173,  48}, {  49, -21}, {  50,  51}, {  52, -22}, {  53,  54}, {-172,  55}, {-171, -23},
++    {  56,  57}, {  58,-170}, {  59, -24}, { -25,  60}, {-169,  61}, {  62,  63}, {  64,  65}, {  66,  67}, {-168,  68}, { -26,  69},
++    {-167, -27}, {  70,-166}, {-165,  71}, { -29,  72}, {  73,  74}, { -30,  75}, {  76,  77}, {  78,  79}, {  80, -28}, {  81,  82},
++    {  83,-163}, { -31, -33}, {-164,-161}, {  84,  85}, {  86,  87}, {  88,  89}, {  90,  91}, {  92,  93}, {  94,  95}, {  96,  97},
++    {  98,  99}, { -32,-162}, { 100, 101}, { 102, 103}, { 104, 105}, { 106, 107}, { 108, 109}, { 110, 111}, {-160, 112}, { -36, -38},
++    { 113, 114}, { 115, 116}, { 117, 118}, { 119, 120}, { 121, 122}, { 123, 124}, { 125, 126}, { 127, 128}, { 129, 130}, { 131, 132},
++    { 133, -35}, {-158, 134}, {-155,-156}, { -37, -42}, { 135, 136}, { 137, 138}, { 139, 140}, { 141, 142}, { 143, 144}, { 145, 146},
++    { 147, 148}, { 149, 150}, { 151, 152}, { 153, 154}, { 155, 156}, { 157, 158}, { 159, 160}, { 161, 162}, { 163, 164}, { 165, 166},
++    { 167, 168}, { 169, 170}, { 171, 172}, { 173, 174}, { 175, 176}, { 177, 178}, { 179, 180}, { 181, 182}, { 183, 184}, {-157, 185},
++    { -45, -48}, { 186, 187}, { 188, 189}, { -34, -41}, { 190, -39}, { -60, -61}, { -58, -59}, { -64, -65}, { -62, -63}, { -52, -53},
++    { -50, -51}, { -56, -57}, { -54, -55}, { -76, -77}, { -74, -75}, { -80, -81}, { -78, -79}, { -68, -69}, { -66, -67}, { -72, -73},
++    { -70, -71}, { -47, -49}, { -44, -46}, {-124,-125}, {-122,-123}, {-128,-129}, {-126,-127}, {-116,-117}, {-114,-115}, {-120,-121},
++    {-118,-119}, {-140,-141}, {-138,-139}, {-144,-145}, {-142,-143}, {-132,-133}, {-130,-131}, {-136,-137}, {-134,-135}, { -92, -93},
++    { -90, -91}, { -96, -97}, { -94, -95}, { -84, -85}, { -82, -83}, { -88, -89}, { -86, -87}, {-108,-109}, {-106,-107}, {-112,-113},
++    {-110,-111}, {-100,-101}, { -98, -99}, {-104,-105}, {-102,-103}, {-154,-159}, {-148,-149}, {-146,-147}, {-152,-153}, {-150,-151},
++    { -40, -43}
++};
++
++static const int objcoding_huff_coarse_coeff_sparse[][2] = {  /* VEC, mode 0 */
++    {  -1,   1}, {   2,   3}, {  -2, -96}, {   4,   5}, {   6, -95}, {  -3,   7}, {   8,   9}, {  -4,  10}, { -94,  11}, {  12,  -5},
++    { -93,  13}, {  14,  15}, {  -6, -92}, {  16,  17}, {  18,  -7}, { -91,  19}, {  20,  -8}, { -90,  21}, {  22,  23}, {  -9, -89},
++    {  24,  25}, {  26, -10}, { -88,  27}, {  28,  29}, {  30, -11}, { -87,  31}, {  32,  33}, {  34,  35}, { -12, -86}, {  36,  37},
++    {  38, -13}, {  39, -85}, {  40,  41}, {  42,  43}, { -14, -84}, {  44,  45}, {  46,  47}, { -83, -15}, {  48,  49}, {  50, -16},
++    {  51,  52}, { -82,  53}, {  54, -81}, {  55,  56}, { -17,  57}, {  58, -80}, {  59,  60}, { -18,  61}, {  62,  63}, { -79,  64},
++    { -19, -78}, {  65,  66}, {  67,  68}, {  69, -20}, { -77, -21}, {  70,  71}, {  72,  73}, {  74, -76}, {  75, -22}, {  76,  77},
++    { -75,  78}, {  79,  80}, { -54, -74}, { -73,  81}, { -23,  82}, { -50, -24}, { -55, -25}, {  83, -47}, { -49, -44}, { -71,  84},
++    { -48, -51}, {  85, -72}, { -26, -53}, { -70, -27}, {  86, -45}, {  87,  88}, { -68,  89}, { -29, -43}, {  90, -30}, { -46, -69},
++    {  91, -28}, { -52, -31}, {  92, -32}, {  93, -64}, { -67,  94}, { -36, -33}, { -63, -37}, { -65, -61}, { -66, -59}, { -34, -38},
++    { -41, -42}, { -35, -60}, { -39, -57}, { -56, -40}, { -62, -58}
++};
++
++static const int objcoding_huff_fine_coeff_sparse[][2] = {  /* VEC, mode 1 */
++    {   1,  -1}, {   2,   3}, {   4,  -2}, {-192,   5}, {   6,   7}, {   8,  -3}, {-191,   9}, {  10,  11}, {  12,-190}, {  -4,  13},
++    {  14,  15}, {-189,  -5}, {  16,  17}, {  18,  -6}, {-188,  19}, {  20,  21}, {  -7,-187}, {  22,  23}, {  -8,  24}, {-186,  25},
++    {  -9,  26}, {  27,-185}, {  28, -10}, {  29,  30}, {-184,  31}, { -11,  32}, {  33,-183}, {  34, -12}, {  35,-182}, {  36,  37},
++    {  38, -13}, {-181,  39}, {  40, -14}, {  41,-180}, {  42,  43}, {-179, -15}, {  44, -16}, {  45,-178}, {  46,  47}, {  48,  49},
++    {  50,-177}, { -17,  51}, { -18,  52}, {-176,  53}, {  54,  55}, {-175, -19}, {  56,  57}, {  58, -20}, {  59,-174}, {  60,  61},
++    { -21,  62}, {  63,-173}, {  64,  65}, {  66,-172}, {  67,  68}, { -22,  69}, {  70,  71}, { -23,  72}, {-171,  73}, {  74,  75},
++    {  76, -24}, {  77,-170}, { -25,  78}, {  79,  80}, {  81,-169}, {  82,  83}, {  84, -26}, {  85,-168}, {  86,  87}, {  88,  89},
++    {-167,  90}, { -27,  91}, {  92, -28}, {  93,-166}, {  94, -29}, {  95,  96}, {  97,  98}, {-165,  99}, { 100, -30}, {-164, 101},
++    { 102, 103}, { 104, 105}, {-163, 106}, { -31, 107}, { -32, 108}, { 109, 110}, {-161, 111}, {-160,-162}, { 112, -34}, { -33, 113},
++    { 114, 115}, { 116, 117}, { 118, 119}, { 120,-159}, { 121, 122}, { 123,-158}, { 124, 125}, { -36,-155}, { 126, 127}, { -35, 128},
++    { 129, 130}, {-157, 131}, {-156, 132}, { -37, 133}, { 134, 135}, {-154, -38}, { 136, 137}, { -39, -41}, { 138,-153}, { 139, -40},
++    {-149, 140}, { 141, 142}, { 143, 144}, {-151, 145}, { 146, 147}, { 148, -42}, { -43, 149}, { 150, 151}, {-152, 152}, { -46, -98},
++    { 153, 154}, { 155,-147}, { 156, 157}, { 158,-107}, { 159, 160}, {-145,-150}, { -96, 161}, { 162, -45}, {-146, 163}, { 164, -97},
++    {-108,-105}, {-148,-106}, { -44, 165}, { -94,-141}, { -99, 166}, { -89, 167}, { -50, -95}, {-100, -48}, {-144, 168}, { 169, 170},
++    { -51,-142}, { -90, -91}, { -47, -49}, { 171, -53}, { -93,-143}, {-137,-138}, { -55,-101}, { 172, 173}, { -54, -86}, { -88, -87},
++    {-103, 174}, { 175, -61}, {-109, 176}, { 177, 178}, { -52,-139}, { -57,-140}, { 179, 180}, { -56,-136}, { -58,-102}, { 181, 182},
++    { -60,-135}, { 183,-104}, {-128,-134}, { -92, 184}, { -59, -62}, { 185, 186}, { -71,-133}, { 187,-127}, {-126, 188}, { -63, -64},
++    { -85,-132}, { 189, -66}, {-121,-125}, { 190, -68}, { -74, -75}, { -70, -73}, { -81, -65}, {-118,-131}, { -72,-110}, {-119,-120},
++    { -76, -84}, {-122,-130}, { -83,-117}, { -69, -78}, { -80, -82}, {-123,-124}, { -67,-116}, {-129, -77}, {-113,-114}, {-112,-115},
++    { -79,-111}
++};
++
++static const int objcoding_huff_5ch_pos_idx_sparse[][2] = {  /* IDX, 5ch */
++    {  -1,   1}, {   2,   3}, {  -4,  -3}, {  -2,  -5}
++};
++
++static const int objcoding_huff_7ch_pos_idx_sparse[][2] = {  /* IDX, 7ch */
++    {  -1,   1}, {   2,   3}, {   4,   5}, {  -4,  -3}, {  -2,  -5}, {  -6,  -7}
++};
++
++/* Table 50: num_bands_idx -> num_bands (object coding) */
++static const int objcoding_num_bands_table[8] = {1, 3, 5, 7, 9, 12, 15, 23};
++
++/* Table 54: QMF subband → parameter band, indexed [num_bands_idx][subband] */
++static const uint8_t objcoding_sb_to_pb[8][64] = {
++    /* idx 0, num_bands=1 */
++    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
++    /* idx 1, num_bands=3 */
++    {0,0,0,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
++     2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2},
++    /* idx 2, num_bands=5 */
++    {0,1,1,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,
++     4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4},
++    /* idx 3, num_bands=7 */
++    {0,1,2,2,3,3,3,3,4,4,4,4,4,4,5,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,6,
++     6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6,6},
++    /* idx 4, num_bands=9 */
++    {0,1,2,3,3,4,4,5,5,6,6,6,6,6,7,7,7,7,7,7,7,7,7,8,8,8,8,8,8,8,8,8,
++     8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8},
++    /* idx 5, num_bands=12 */
++    {0,1,2,3,4,4,5,5,6,6,6,7,7,7,8,8,8,8,9,9,9,9,9,10,10,10,10,10,10,10,10,10,
++     10,10,10,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11,11},
++    /* idx 6, num_bands=15 */
++    {0,1,2,3,4,5,6,7,8,9,9,10,10,10,11,11,11,11,12,12,12,12,12,13,13,13,13,13,13,13,13,13,
++     13,13,13,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14},
++    /* idx 7, num_bands=23 */
++    {0,1,2,3,4,5,6,7,8,9,10,11,12,12,13,13,14,14,15,15,16,16,16,17,17,17,18,18,18,18,19,19,
++     19,19,19,20,20,20,20,20,20,21,21,21,21,21,21,21,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,22},
++};
++
++/* Persistent state across object coding frames */
++static float objcoding_mix_mtx_prev[OBJCODING_MAX_OBJECTS][OBJCODING_MAX_CHANNELS][OBJCODING_QMF_SUBBANDS];
++
++static int objcoding_huff_decode(EmdfBitReader *br, const int table[][2]) {
++    int node = 0;
++    do {
++        if (emdf_br_left(br) < 1) return 0;
++        int bit = emdf_br_read(br, 1);
++        node = table[node][bit];
++    } while (node > 0);
++    return (-node - 1);
++}
++
++/* Parse full object coding payload and write mixing matrix to g_objcoding_data */
++static int eac3_parse_objcoding(const uint8_t *payload, int payload_size) {
++    EmdfBitReader br;
++    emdf_br_init(&br, payload, payload_size);
++
++    /* object coding header (Section 6.2.2) */
++    uint32_t dmx_config_idx = emdf_br_read(&br, 3);
++    uint32_t num_objects_bits = emdf_br_read(&br, 6);
++    uint32_t ext_config_idx = emdf_br_read(&br, 3);
++
++    int num_objects = (int)num_objects_bits + 1;
++    if (num_objects > OBJCODING_MAX_OBJECTS) num_objects = OBJCODING_MAX_OBJECTS;
++
++    /* Table 48: num_channels from dmx_config_idx */
++    int num_channels;
++    if (dmx_config_idx == 0 || dmx_config_idx == 3)
++        num_channels = 5;
++    else if (dmx_config_idx <= 4)
++        num_channels = 7;
++    else
++        return -1; /* reserved */
++
++    /* object coding info (Section 6.2.3) */
++    uint32_t clipgain_x = emdf_br_read(&br, 3);
++    uint32_t clipgain_y = emdf_br_read(&br, 5);
++    emdf_br_read(&br, 10); /* seq_count_bits */
++    float clipgain = (1.0f + (float)clipgain_y / 32.0f) * (float)(1 << clipgain_x);
++
++    /* Per-object info */
++    int b_obj_present[OBJCODING_MAX_OBJECTS];
++    int num_bands_idx[OBJCODING_MAX_OBJECTS];
++    int num_bands[OBJCODING_MAX_OBJECTS];
++    int b_sparse[OBJCODING_MAX_OBJECTS];
++    int quant_idx[OBJCODING_MAX_OBJECTS];
++    int slope_idx[OBJCODING_MAX_OBJECTS];
++    int num_dpoints[OBJCODING_MAX_OBJECTS];
++    int offset_ts[OBJCODING_MAX_OBJECTS][2];
++
++    for (int obj = 0; obj < num_objects; obj++) {
++        b_obj_present[obj] = emdf_br_read(&br, 1);
++        if (b_obj_present[obj]) {
++            num_bands_idx[obj] = emdf_br_read(&br, 3);
++            num_bands[obj] = objcoding_num_bands_table[num_bands_idx[obj]];
++            b_sparse[obj] = emdf_br_read(&br, 1);
++            quant_idx[obj] = emdf_br_read(&br, 1);
++
++            /* object coding data_point_info (Section 6.2.4) */
++            slope_idx[obj] = emdf_br_read(&br, 1);
++            num_dpoints[obj] = emdf_br_read(&br, 1) + 1;
++
++            if (slope_idx[obj] == 1) { /* steep: read timeslot offsets */
++                for (int dp = 0; dp < num_dpoints[obj]; dp++)
++                    offset_ts[obj][dp] = emdf_br_read(&br, 5) + 1;
++            }
++        } else {
++            num_bands_idx[obj] = 0;
++            num_bands[obj] = 1;
++            b_sparse[obj] = 0;
++            quant_idx[obj] = 0;
++            slope_idx[obj] = 0;
++            num_dpoints[obj] = 1;
++            offset_ts[obj][0] = 0;
++            offset_ts[obj][1] = 0;
++        }
++    }
++
++    /* object coding data (Section 6.2.5): Huffman decode all objects */
++    /* Use static arrays to keep stack usage bounded */
++    static int objcoding_ch_idx[OBJCODING_MAX_OBJECTS][2][OBJCODING_MAX_BANDS];
++    static int objcoding_vec[OBJCODING_MAX_OBJECTS][2][OBJCODING_MAX_BANDS];
++    static int objcoding_mtx[OBJCODING_MAX_OBJECTS][2][OBJCODING_MAX_CHANNELS][OBJCODING_MAX_BANDS];
++
++    memset(objcoding_ch_idx, 0, sizeof(objcoding_ch_idx));
++    memset(objcoding_vec, 0, sizeof(objcoding_vec));
++    memset(objcoding_mtx, 0, sizeof(objcoding_mtx));
++
++    for (int obj = 0; obj < num_objects; obj++) {
++        if (!b_obj_present[obj]) continue;
++        for (int dp = 0; dp < num_dpoints[obj]; dp++) {
++            if (emdf_br_left(&br) < 3) goto done;
++
++            if (b_sparse[obj]) {
++                /* Sparse: channel_idx + vec per band */
++                objcoding_ch_idx[obj][dp][0] = emdf_br_read(&br, 3);
++
++                const int (*idx_tbl)[2] = (num_channels == 5) ?
++                    objcoding_huff_5ch_pos_idx_sparse : objcoding_huff_7ch_pos_idx_sparse;
++                for (int pb = 1; pb < num_bands[obj]; pb++)
++                    objcoding_ch_idx[obj][dp][pb] = objcoding_huff_decode(&br, idx_tbl);
++
++                const int (*vec_tbl)[2] = (quant_idx[obj] == 0) ?
++                    objcoding_huff_coarse_coeff_sparse : objcoding_huff_fine_coeff_sparse;
++                for (int pb = 0; pb < num_bands[obj]; pb++)
++                    objcoding_vec[obj][dp][pb] = objcoding_huff_decode(&br, vec_tbl);
++            } else {
++                /* Dense: full matrix ch×band */
++                const int (*mtx_tbl)[2] = (quant_idx[obj] == 0) ?
++                    objcoding_huff_coarse_generic : objcoding_huff_fine_generic;
++                for (int ch = 0; ch < num_channels; ch++)
++                    for (int pb = 0; pb < num_bands[obj]; pb++)
++                        objcoding_mtx[obj][dp][ch][pb] = objcoding_huff_decode(&br, mtx_tbl);
++            }
++        }
++    }
++
++    /* Differential decode + dequantize + interpolate (Pseudocodes 2-6) */
++    {
++        static int objcoding_mix_q[OBJCODING_MAX_OBJECTS][2][OBJCODING_MAX_CHANNELS][OBJCODING_MAX_BANDS];
++        static float objcoding_mix_dq[OBJCODING_MAX_OBJECTS][2][OBJCODING_MAX_CHANNELS][OBJCODING_MAX_BANDS];
++        int num_timeslots = OBJCODING_MAX_TIMESLOTS; /* 24 for 1536/64 */
++
++        for (int obj = 0; obj < num_objects; obj++) {
++            if (!b_obj_present[obj]) continue;
++            int nquant = (quant_idx[obj] == 0) ? 96 : 192;
++
++            /* Pseudocode 2 (sparse) / Pseudocode 3 (dense) */
++            for (int dp = 0; dp < num_dpoints[obj]; dp++) {
++                if (b_sparse[obj]) {
++                    int offset = (quant_idx[obj] == 0) ? 50 : 100;
++                    for (int pb = 0; pb < num_bands[obj]; pb++) {
++                        int ch_mod;
++                        if (pb == 0)
++                            ch_mod = objcoding_ch_idx[obj][dp][0];
++                        else
++                            ch_mod = (objcoding_ch_idx[obj][dp][pb - 1] +
++                                      objcoding_ch_idx[obj][dp][pb]) % num_channels;
++
++                        for (int ch = 0; ch < num_channels; ch++) {
++                            if (ch == ch_mod) {
++                                if (pb == 0)
++                                    objcoding_mix_q[obj][dp][ch][pb] =
++                                        (offset + objcoding_vec[obj][dp][pb]) % nquant;
++                                else
++                                    objcoding_mix_q[obj][dp][ch][pb] =
++                                        (objcoding_mix_q[obj][dp][ch][pb - 1] +
++                                         objcoding_vec[obj][dp][pb]) % nquant;
++                            } else {
++                                objcoding_mix_q[obj][dp][ch][pb] = offset;
++                            }
++                        }
++                    }
++                } else {
++                    int offset = (quant_idx[obj] == 0) ? 48 : 96;
++                    for (int ch = 0; ch < num_channels; ch++) {
++                        objcoding_mix_q[obj][dp][ch][0] =
++                            (offset + objcoding_mtx[obj][dp][ch][0]) % nquant;
++                        for (int pb = 1; pb < num_bands[obj]; pb++)
++                            objcoding_mix_q[obj][dp][ch][pb] =
++                                (objcoding_mix_q[obj][dp][ch][pb - 1] +
++                                 objcoding_mtx[obj][dp][ch][pb]) % nquant;
++                    }
++                }
++            }
++
++            /* Pseudocode 5: dequantize */
++            for (int dp = 0; dp < num_dpoints[obj]; dp++)
++                for (int ch = 0; ch < num_channels; ch++)
++                    for (int pb = 0; pb < num_bands[obj]; pb++)
++                        objcoding_mix_dq[obj][dp][ch][pb] =
++                            (float)(objcoding_mix_q[obj][dp][ch][pb] - nquant / 2) *
++                            820.0f / (4096.0f * (1 + quant_idx[obj]));
++        }
++
++        /* Pseudocode 6: temporal interpolation + band→subband expansion */
++        for (int obj = 0; obj < num_objects; obj++) {
++            if (!b_obj_present[obj]) {
++                /* Non-present: fade prev to zero */
++                for (int ch = 0; ch < num_channels; ch++)
++                    for (int sb = 0; sb < 64; sb++) {
++                        float prev = objcoding_mix_mtx_prev[obj][ch][sb];
++                        for (int ts = 0; ts < num_timeslots; ts++)
++                            g_objcoding_data.mix_mtx[obj][ts][ch][sb] =
++                                prev * (1.0f - (float)(ts + 1) / num_timeslots);
++                        objcoding_mix_mtx_prev[obj][ch][sb] = 0;
++                    }
++                continue;
++            }
++
++            int nbi = num_bands_idx[obj];
++            for (int ch = 0; ch < num_channels; ch++) {
++                for (int sb = 0; sb < 64; sb++) {
++                    int pb = objcoding_sb_to_pb[nbi][sb];
++                    float prev_val = objcoding_mix_mtx_prev[obj][ch][sb];
++
++                    for (int ts = 0; ts < num_timeslots; ts++) {
++                        float val;
++                        if (slope_idx[obj] == 0) {
++                            /* Smooth: linear interpolation */
++                            if (num_dpoints[obj] == 1) {
++                                float delta = objcoding_mix_dq[obj][0][ch][pb] - prev_val;
++                                val = prev_val + (ts + 1) * delta / num_timeslots;
++                            } else {
++                                int ts_2 = num_timeslots / 2;
++                                if (ts < ts_2) {
++                                    float delta = objcoding_mix_dq[obj][0][ch][pb] - prev_val;
++                                    val = prev_val + (ts + 1) * delta / ts_2;
++                                } else {
++                                    float delta = objcoding_mix_dq[obj][1][ch][pb] -
++                                                  objcoding_mix_dq[obj][0][ch][pb];
++                                    val = objcoding_mix_dq[obj][0][ch][pb] +
++                                          (ts - ts_2 + 1) * delta / (num_timeslots - ts_2);
++                                }
++                            }
++                        } else {
++                            /* Steep: step transition */
++                            if (num_dpoints[obj] == 1) {
++                                val = (ts < offset_ts[obj][0]) ?
++                                    prev_val : objcoding_mix_dq[obj][0][ch][pb];
++                            } else {
++                                if (ts < offset_ts[obj][0])
++                                    val = prev_val;
++                                else if (ts < offset_ts[obj][1])
++                                    val = objcoding_mix_dq[obj][0][ch][pb];
++                                else
++                                    val = objcoding_mix_dq[obj][1][ch][pb];
++                            }
++                        }
++                        g_objcoding_data.mix_mtx[obj][ts][ch][sb] = val;
++                    }
++                    /* Update prev for next frame */
++                    objcoding_mix_mtx_prev[obj][ch][sb] =
++                        objcoding_mix_dq[obj][num_dpoints[obj] - 1][ch][pb];
++                }
++            }
++        }
++
++        g_objcoding_data.num_objects = num_objects;
++        g_objcoding_data.num_channels = num_channels;
++        g_objcoding_data.num_timeslots = num_timeslots;
++        g_objcoding_data.clipgain = clipgain;
++        atomic_store(&g_objcoding_data.updated, 1);
++    }
++
++done:
++    /* Debug: log first few object coding extractions */
++    {
++        static int objcoding_log_count = 0;
++        if (objcoding_log_count < 5) {
++            FILE *dbg = fopen("objcoding_parse_debug.txt", "a");
++            if (dbg) {
++                fprintf(dbg, "OBJCODING[%d]: %d obj, %d ch, dmx=%d, clipgain=%.2f\n",
++                        objcoding_log_count, num_objects, num_channels,
++                        dmx_config_idx, clipgain);
++                for (int obj = 0; obj < num_objects && obj < 4; obj++)
++                    fprintf(dbg, "  obj[%d] pres=%d bands=%d sparse=%d quant=%d "
++                            "slope=%d dp=%d mtx[0][0][0]=%.4f\n",
++                            obj, b_obj_present[obj], num_bands[obj],
++                            b_sparse[obj], quant_idx[obj], slope_idx[obj],
++                            num_dpoints[obj], g_objcoding_data.mix_mtx[obj][0][0][0]);
++                fclose(dbg);
++            }
++            objcoding_log_count++;
++        }
++    }
++
++    return 0;
++}
++
++/* Search for EMDF syncword 0x5838 at bit granularity and extract object metadata + object coding */
++static void eac3_extract_emdf_objmeta(const uint8_t *frame, int frame_size) {
++    /* Search for 0x5838 at every bit position */
++    int search_end = frame_size * 8;
++
++    for (int bit = 32; bit <= search_end - 48; bit++) {
++        int byte0 = bit >> 3;
++        int shift = bit & 7;
++        if (byte0 + 2 >= frame_size) break;
++
++        uint32_t window;
++        if (shift == 0)
++            window = ((uint32_t)frame[byte0] << 8) | frame[byte0 + 1];
++        else
++            window = (((uint32_t)frame[byte0] << (8 + shift)) |
++                      ((uint32_t)frame[byte0 + 1] << shift) |
++                      ((uint32_t)frame[byte0 + 2] >> (8 - shift))) & 0xFFFF;
++
++        if (window != 0x5838)
++            continue;
++
++        /* Found potential EMDF sync - read container length */
++        EmdfBitReader br;
++        emdf_br_init(&br, frame, frame_size);
++        br.bit_pos = bit + 16; /* skip syncword */
++        if (emdf_br_left(&br) < 16) break;
++
++        uint32_t emdf_len = emdf_br_read(&br, 16);
++        int body_start = br.bit_pos;
++        int body_end = body_start + emdf_len * 8;
++
++        /* Sanity check */
++        if (emdf_len == 0 || emdf_len >= (uint32_t)frame_size ||
++            body_end > frame_size * 8)
++            continue; /* false positive, try next bit */
++
++        /* Parse EMDF container body */
++        uint32_t version = emdf_br_read(&br, 2);
++        if (version == 3) version += emdf_variable_bits(&br, 2);
++        uint32_t key_id = emdf_br_read(&br, 3);
++        if (key_id == 7) key_id += emdf_variable_bits(&br, 3);
++
++        /* Payload loop — extract object metadata (id=11) and object coding (id=14) */
++        while (br.bit_pos < body_end - 16) {
++            uint32_t pid = emdf_br_read(&br, 5);
++            if (pid == 0) break; /* terminator */
++            if (pid == 0x1F) pid += emdf_variable_bits(&br, 5);
++
++            emdf_parse_payload_config(&br);
++            uint32_t psize = emdf_variable_bits(&br, 8);
++
++            if (psize == 0 || psize > 4096 || emdf_br_left(&br) < (int)psize * 8)
++                break;
++
++            if (pid == 11 || pid == 14) {
++                /* Extract payload bytes (object metadata=11, object coding=14) */
++                uint8_t pbuf[4096];
++                if (psize <= sizeof(pbuf)) {
++                    for (uint32_t j = 0; j < psize; j++)
++                        pbuf[j] = (uint8_t)emdf_br_read(&br, 8);
++                    if (pid == 11)
++                        eac3_parse_objmeta(pbuf, psize);
++                    else if (pid == 14)
++                        eac3_parse_objcoding(pbuf, psize);
++                } else {
++                    emdf_br_skip(&br, psize * 8);
++                }
++            } else {
++                emdf_br_skip(&br, psize * 8);
++            }
++        }
++        return; /* done with this frame */
++    }
++}
++
+ /**
+  * Decode a single audio block from the AC-3 bitstream.
+  */
+@@ -1253,7 +2066,7 @@ static int decode_audio_block(AC3DecodeContext *s, int blk, int offset)
+         }
+     }
+ 
+-    /* unused dummy data */
++    /* unused dummy data (skip field) */
+     if (s->skip_syntax && get_bits1(gbc)) {
+         int skipl = get_bits(gbc, 9);
+         skip_bits_long(gbc, 8 * skipl);
+@@ -1540,6 +2353,11 @@ dependent_frame:
+     for (ch = 0; ch < s->out_channels; ch++)
+         memcpy(s->output[ch + offset], output[ch], AC3_BLOCK_SIZE*sizeof(SHORTFLOAT));
+ 
++    /* E-AC-3 object coding (DD+ spatial): extract object metadata positions from EMDF */
++    if (s->eac3 && s->eac3_extension_type_a && !err) {
++        eac3_extract_emdf_objmeta(buf, s->frame_size);
++    }
++
+     /* check if there is dependent frame */
+     if (buf_size > s->frame_size) {
+         AC3HeaderInfo hdr;
+diff --git a/libavcodec/mlp.h b/libavcodec/mlp.h
+index bec414c..71606ba 100644
+--- a/libavcodec/mlp.h
++++ b/libavcodec/mlp.h
+@@ -35,15 +35,17 @@
+ /** Maximum number of channels in a valid stream.
+  *  MLP   : 5.1 + 2 noise channels -> 8 channels
+  *  TrueHD: 7.1                    -> 8 channels
++ *  TrueHD Atmos (extract_objects): up to 16 channels (8 bed + 8 objects)
+  */
+-#define MAX_CHANNELS                8
++#define MAX_CHANNELS                16
+ 
+ /** Maximum number of matrices used in decoding; most streams have one matrix
+  *  per output channel, but some rematrix a channel (usually 0) more than once.
++ *  Atmos object substreams use up to 15 interpolating matrices (4-bit field).
+  */
+ #define MAX_MATRICES_MLP            6
+ #define MAX_MATRICES_TRUEHD         8
+-#define MAX_MATRICES                8
++#define MAX_MATRICES                15
+ 
+ /** Maximum number of substreams that can be decoded.
+  *  MLP's limit is 2. TrueHD supports at least up to 3.
+diff --git a/libavcodec/mlpdec.c b/libavcodec/mlpdec.c
+index e85dac3..80e1c3b 100644
+--- a/libavcodec/mlpdec.c
++++ b/libavcodec/mlpdec.c
+@@ -41,6 +41,7 @@
+ #include "mlp_parse.h"
+ #include "mlpdsp.h"
+ #include "mlp.h"
++#include "spatial_ext_coeff.h"
+ #include "config.h"
+ #include "profiles.h"
+ 
+@@ -105,11 +106,21 @@ typedef struct SubStream {
+     uint8_t     matrix_out_ch[MAX_MATRICES];
+ 
+     /// Whether the LSBs of the matrix output are encoded in the bitstream.
++    /// For 0x31ec substreams, this is 0-3 (2 bits); for standard, 0-1 (1 bit).
+     uint8_t     lsb_bypass[MAX_MATRICES];
+-    /// Matrix coefficients, stored as 2.14 fixed point.
++    /// Matrix coefficients, stored as 2.14 (standard) or 2.18 (0x31ec) fixed point.
+     DECLARE_ALIGNED(32, int32_t, matrix_coeff)[MAX_MATRICES][MAX_CHANNELS];
+     /// Left shift to apply to noise values in 0x31eb substreams.
+     uint8_t     matrix_noise_shift[MAX_MATRICES];
++
++    /// 0x31ec-specific fields for interpolating matrices
++    uint8_t     matrix_coeff_frac_bits[MAX_MATRICES];
++    int8_t      matrix_coeff_shift[MAX_MATRICES];
++    uint16_t    matrix_coeff_mask[MAX_MATRICES];
++    DECLARE_ALIGNED(32, int32_t, delta_matrix_coeff)[MAX_MATRICES][MAX_CHANNELS];
++    uint8_t     delta_matrix_coeff_bits[MAX_MATRICES];
++    uint8_t     delta_matrix_coeff_prec[MAX_MATRICES];
++    uint16_t    substream_type;
+     //@}
+ 
+     /// Left shift to apply to Huffman-decoded residuals.
+@@ -134,6 +145,9 @@ typedef struct MLPDecodeContext {
+ 
+     AVChannelLayout downmix_layout;
+ 
++    /// Enable spatial object extraction (decode 4th substream)
++    int         extract_objects;
++
+     /// Current access unit being read has a major sync.
+     int         is_major_sync_unit;
+ 
+@@ -181,6 +195,43 @@ typedef struct MLPDecodeContext {
+                            int8_t *output_shift,
+                            uint8_t max_matrix_channel,
+                            int is32);
++
++    /// spatial 4th substream interpolating matrix state
++    int         spatial_substream_type;    ///< 0=normal, 1=0x31ec interpolating
++    int         atmos_num_matrices;
++    uint8_t     atmos_matrix_out_ch[MAX_MATRICES];
++    DECLARE_ALIGNED(32, int32_t, atmos_seed_coeff)[MAX_MATRICES][MAX_CHANNELS];
++    DECLARE_ALIGNED(32, int32_t, atmos_delta_coeff)[MAX_MATRICES][MAX_CHANNELS];
++
++    /// Saved bed audio from substream 2 for spatial merging.
++    /// The spatial interpolating rematrix needs the bed audio as input,
++    /// but substream 3's decode overwrites it with near-zero residuals.
++    DECLARE_ALIGNED(32, int32_t, bed_buffer)[MAX_BLOCKSIZE][MAX_CHANNELS];
++    unsigned int bed_blockpos;
++    unsigned int bed_max_ch;
++
++    /// Height channel crossfade state for AU boundary smoothing.
++    /// Saves the last SPATIAL_XFADE_LEN samples of each height channel
++    /// from the previous AU so we can crossfade at the next AU boundary.
++#define SPATIAL_XFADE_LEN 20
++    int32_t prev_height_tail[SPATIAL_XFADE_LEN][MAX_CHANNELS];
++    int     prev_height_tail_valid;
++
++    /// Per-block coefficient state for spatial interpolating rematrix.
++    /// Each AU can contain multiple blocks with different seed/delta;
++    /// we save per-block state here so output_data can apply rematrix
++    /// with the correct coefficients for each block's sample range.
++#define MAX_SPATIAL_BLOCKS_PER_AU 16
++    int spatial_num_blocks;
++    struct {
++        unsigned int start;   ///< first sample index within AU
++        unsigned int size;    ///< number of samples in this block
++        int num_matrices;
++        uint8_t out_ch[MAX_MATRICES];
++        int32_t seed[MAX_MATRICES][MAX_CHANNELS];
++        int32_t delta[MAX_MATRICES][MAX_CHANNELS];
++    } spatial_blk[MAX_SPATIAL_BLOCKS_PER_AU];
++
+ } MLPDecodeContext;
+ 
+ static const enum AVChannel thd_channel_order[] = {
+@@ -267,7 +318,7 @@ static inline int read_huff_channels(MLPDecodeContext *m, GetBitContext *gbp,
+ 
+     for (mat = 0; mat < s->num_primitive_matrices; mat++)
+         if (s->lsb_bypass[mat])
+-            m->bypassed_lsbs[pos + s->blockpos][mat] = get_bits1(gbp);
++            m->bypassed_lsbs[pos + s->blockpos][mat] = get_bits(gbp, s->lsb_bypass[mat]);
+ 
+     for (channel = s->min_channel; channel <= s->max_channel; channel++) {
+         ChannelParams *cp = &s->channel_params[channel];
+@@ -403,15 +454,25 @@ static int read_major_sync(MLPDecodeContext *m, GetBitContext *gb)
+     m->substream_info        = mh.substream_info;
+ 
+     /*  If there is a 4th substream and the MSB of substream_info is set,
+-     *  there is a 16-channel spatial presentation (Atmos in TrueHD).
++     *  there is a 16-channel spatial presentation (spatial in lossless HD).
+      */
+     if (m->avctx->codec_id == AV_CODEC_ID_TRUEHD
+             && m->num_substreams == 4 && m->substream_info >> 7 == 1) {
+         m->avctx->profile     = AV_PROFILE_TRUEHD_ATMOS;
+     }
+ 
+-    /* limit to decoding 3 substreams, as the 4th is used by Dolby Atmos for non-audio data */
+-    m->max_decoded_substream = FFMIN(m->num_substreams - 1, 2);
++    if (m->extract_objects && m->avctx->codec_id == AV_CODEC_ID_TRUEHD &&
++        m->num_substreams >= 4 && (m->substream_info >> 7)) {
++        /* Decode all 4 substreams when spatial object extraction is enabled */
++        m->max_decoded_substream = m->num_substreams - 1;
++        av_log(m->avctx, AV_LOG_INFO,
++               "spatial object extraction: decoding %d substreams\n",
++               m->num_substreams);
++    } else {
++        /* Default: limit to decoding 3 substreams, as the 4th is used by
++         * spatial extension for non-audio data */
++        m->max_decoded_substream = FFMIN(m->num_substreams - 1, 2);
++    }
+ 
+     m->avctx->sample_rate    = mh.group1_samplerate;
+     m->avctx->frame_size     = mh.access_unit_size;
+@@ -476,7 +537,7 @@ static int read_major_sync(MLPDecodeContext *m, GetBitContext *gb)
+ 
+     m->needs_reordering = mh.channel_arrangement >= 18 && mh.channel_arrangement <= 20;
+ 
+-    /* Parse the TrueHD decoder channel modifiers and set each substream's
++    /* Parse the lossless HD decoder channel modifiers and set each substream's
+      * AVMatrixEncoding accordingly.
+      *
+      * The meaning of the modifiers depends on the channel layout:
+@@ -539,14 +600,23 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
+ 
+     sync_word = get_bits(gbp, 13);
+ 
+-    if (sync_word != 0x31ea >> 1) {
++    if (sync_word == 0x31ec >> 1) {
++        /* spatial 4th substream: 0x31ec sync word with interpolating matrices */
++        m->spatial_substream_type = 1;
++        s->substream_type = 0x31ec;
++        noise_type = get_bits1(gbp);
++        av_log(m->avctx, AV_LOG_DEBUG,
++               "spatial substream %d: 0x31ec sync (interpolating)\n", substr);
++    } else if (sync_word != 0x31ea >> 1) {
+         av_log(m->avctx, AV_LOG_ERROR,
+                "restart header sync incorrect (got 0x%04x)\n", sync_word);
+         return AVERROR_INVALIDDATA;
++    } else {
++        noise_type = get_bits1(gbp);
++        if (substr < 3)
++            m->spatial_substream_type = 0;
+     }
+ 
+-    noise_type = get_bits1(gbp);
+-
+     if (m->avctx->codec_id == AV_CODEC_ID_MLP && noise_type) {
+         av_log(m->avctx, AV_LOG_ERROR, "MLP must have 0x31ea sync word.\n");
+         return AVERROR_INVALIDDATA;
+@@ -558,16 +628,18 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
+     max_channel        = get_bits(gbp, 4);
+     max_matrix_channel = get_bits(gbp, 4);
+ 
+-    if (max_matrix_channel > std_max_matrix_channel) {
++    if (max_matrix_channel > std_max_matrix_channel &&
++        !(m->extract_objects && substr >= 3)) {
+         av_log(m->avctx, AV_LOG_ERROR,
+                "Max matrix channel cannot be greater than %d.\n",
+                std_max_matrix_channel);
+         return AVERROR_INVALIDDATA;
+     }
+ 
+-    /* This should happen for TrueHD streams with >6 channels and MLP's noise
++    /* This should happen for lossless HD streams with >6 channels and MLP's noise
+      * type. It is not yet known if this is allowed. */
+-    if (max_matrix_channel > MAX_MATRIX_CHANNEL_MLP && !noise_type) {
++    if (max_matrix_channel > MAX_MATRIX_CHANNEL_MLP && !noise_type &&
++        !(m->extract_objects && substr >= 3)) {
+         avpriv_request_sample(m->avctx,
+                               "%d channels (more than the "
+                               "maximum supported by the decoder)",
+@@ -615,12 +687,18 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
+ 
+     for (ch = 0; ch <= s->max_matrix_channel; ch++) {
+         int ch_assign = get_bits(gbp, 6);
+-        if (m->avctx->codec_id == AV_CODEC_ID_TRUEHD) {
++        if (m->avctx->codec_id == AV_CODEC_ID_TRUEHD &&
++            !(m->extract_objects && substr >= 3)) {
++            /* Standard lossless HD: map through speaker layout */
+             AVChannelLayout l;
+             enum AVChannel channel = thd_channel_layout_extract_channel(s->mask, ch_assign);
+ 
+             av_channel_layout_from_mask(&l, s->mask);
+             ch_assign = av_channel_layout_index_from_channel(&l, channel);
++        } else if (m->extract_objects && substr >= 3) {
++            /* spatial object substream: use identity mapping (objects are not
++             * standard speaker channels, they have arbitrary positions) */
++            ch_assign = ch;
+         }
+         if (ch_assign < 0 || ch_assign > s->max_matrix_channel) {
+             avpriv_request_sample(m->avctx,
+@@ -661,11 +739,25 @@ static int read_restart_header(MLPDecodeContext *m, GetBitContext *gbp,
+ 
+     if (substr == m->max_decoded_substream) {
+         av_channel_layout_uninit(&m->avctx->ch_layout);
+-        av_channel_layout_from_mask(&m->avctx->ch_layout, s->mask);
+-        m->pack_output = m->dsp.mlp_select_pack_output(s->ch_assign,
+-                                                       s->output_shift,
+-                                                       s->max_matrix_channel,
+-                                                       m->avctx->sample_fmt == AV_SAMPLE_FMT_S32);
++        if (m->extract_objects && substr >= 3) {
++            /* spatial objects: always output MAX_CHANNELS (16) for a stable
++             * channel count. Unused object channels will be silent.
++             * Set identity ch_assign for all possible channels. */
++            av_channel_layout_default(&m->avctx->ch_layout, MAX_CHANNELS);
++            for (unsigned int ch = 0; ch < MAX_CHANNELS; ch++) {
++                s->ch_assign[ch] = ch;
++                s->output_shift[ch] = 0;
++            }
++        } else {
++            av_channel_layout_from_mask(&m->avctx->ch_layout, s->mask);
++        }
++        m->pack_output = m->dsp.mlp_select_pack_output(
++                             s->ch_assign,
++                             s->output_shift,
++                             m->extract_objects && substr >= 3
++                                 ? MAX_CHANNELS - 1
++                                 : s->max_matrix_channel,
++                             m->avctx->sample_fmt == AV_SAMPLE_FMT_S32);
+ 
+         if (m->avctx->codec_id == AV_CODEC_ID_MLP && m->needs_reordering) {
+             if (s->mask == (AV_CH_LAYOUT_QUAD|AV_CH_LOW_FREQUENCY) ||
+@@ -760,6 +852,122 @@ static int read_filter_params(MLPDecodeContext *m, GetBitContext *gbp,
+     return 0;
+ }
+ 
++/** Read interpolating matrix parameters for spatial 0x31ec substreams.
++ *  Based on the Massimo Eynard extract_objects patch.
++ *  These matrices use seed+delta interpolation with 2.18 fixed point. */
++
++static int read_31ec_matrix_params(MLPDecodeContext *m, unsigned int substr,
++                                    GetBitContext *gbp)
++{
++    SubStream *s = &m->substream[substr];
++    unsigned int mat, ch;
++
++    if (++m->matrix_changed > 1) {
++        av_log(m->avctx, AV_LOG_ERROR,
++               "Matrices may change only once per access unit.\n");
++        return AVERROR_INVALIDDATA;
++    }
++
++    /* Seed primitive matrices */
++    if (get_bits1(gbp)) {
++        /* New seed primitive matrices */
++        if (get_bits1(gbp)) {
++            /* New seed matrices parameters */
++            s->num_primitive_matrices = get_bits(gbp, 4) + 1;
++
++            if (s->num_primitive_matrices > MAX_MATRICES) {
++                av_log(m->avctx, AV_LOG_ERROR,
++                       "Number of primitive matrices cannot be greater than %d.\n",
++                       MAX_MATRICES);
++                goto error;
++            }
++
++            for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++                s->matrix_out_ch[mat] = get_bits(gbp, 4);
++                s->matrix_coeff_frac_bits[mat] = get_bits(gbp, 4);
++                s->matrix_coeff_shift[mat] = ((int)get_bits(gbp, 3)) - 1;
++                s->lsb_bypass[mat] = get_bits(gbp, 2);
++                s->matrix_noise_shift[mat] = get_bits(gbp, 4);
++                s->matrix_coeff_mask[mat] =
++                    get_bits(gbp, s->max_matrix_channel + 1);
++
++                if (s->matrix_out_ch[mat] > s->max_matrix_channel) {
++                    av_log(m->avctx, AV_LOG_ERROR,
++                           "Invalid channel %d specified as output from matrix.\n",
++                           s->matrix_out_ch[mat]);
++                    goto error;
++                }
++                if (s->matrix_coeff_frac_bits[mat] > 14) {
++                    av_log(m->avctx, AV_LOG_ERROR,
++                           "Too many fractional bits specified.\n");
++                    goto error;
++                }
++            }
++        }
++
++        /* Seed matrices coefficients */
++        for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++            const int coeff_shift = s->matrix_coeff_shift[mat]
++                                  - s->matrix_coeff_frac_bits[mat];
++
++            memset(s->matrix_coeff[mat], 0, sizeof(s->matrix_coeff[mat]));
++
++            for (ch = 0; ch <= s->max_matrix_channel; ch++) {
++                int64_t coeff_val;
++
++                if (!((s->matrix_coeff_mask[mat] >> ch) & 0x1))
++                    continue;
++
++                coeff_val = get_sbits(gbp, s->matrix_coeff_frac_bits[mat] + 2);
++                s->matrix_coeff[mat][ch] = coeff_val * (1LL << (18 + coeff_shift));
++            }
++        }
++    }
++
++    if (!get_bits1(gbp)) {
++        /* No primitive matrices interpolation */
++        memset(s->delta_matrix_coeff, 0, sizeof(s->delta_matrix_coeff));
++    } else if (get_bits1(gbp)) {
++        /* New delta primitive matrices */
++        if (get_bits1(gbp)) {
++            /* New delta primitive matrices parameters */
++            for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++                s->delta_matrix_coeff_bits[mat] = get_bits(gbp, 4) + 1;
++                s->delta_matrix_coeff_prec[mat] = get_bits(gbp, 2);
++            }
++        }
++
++        for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++            const int coeff_shift = s->matrix_coeff_shift[mat]
++                                  - s->delta_matrix_coeff_prec[mat]
++                                  - s->matrix_coeff_frac_bits[mat];
++
++            memset(s->delta_matrix_coeff[mat], 0,
++                   sizeof(s->delta_matrix_coeff[mat]));
++
++            if (s->delta_matrix_coeff_bits[mat] <= 1)
++                continue;
++
++            for (ch = 0; ch <= s->max_matrix_channel; ch++) {
++                int64_t coeff_val;
++
++                if (!((s->matrix_coeff_mask[mat] >> ch) & 0x1))
++                    continue;
++
++                coeff_val = get_sbits(gbp, s->delta_matrix_coeff_bits[mat]);
++                s->delta_matrix_coeff[mat][ch] =
++                    coeff_val * (1LL << (18 + coeff_shift));
++            }
++        }
++    }
++
++    return 0;
++error:
++    s->num_primitive_matrices = 0;
++    memset(s->matrix_out_ch, 0, sizeof(s->matrix_out_ch));
++    return AVERROR_INVALIDDATA;
++}
++
+ /** Read parameters for primitive matrices. */
+ 
+ static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitContext *gbp)
+@@ -803,8 +1011,11 @@ static int read_matrix_params(MLPDecodeContext *m, unsigned int substr, GetBitCo
+         }
+ 
+         max_chan = s->max_matrix_channel;
+-        if (!s->noise_type)
++        if (!s->noise_type) {
+             max_chan+=2;
++            if (max_chan >= MAX_CHANNELS)
++                max_chan = MAX_CHANNELS - 1;
++        }
+ 
+         for (ch = 0; ch <= max_chan; ch++) {
+             int coeff_val = 0;
+@@ -910,9 +1121,14 @@ static int read_decoding_params(MLPDecodeContext *m, GetBitContext *gbp,
+         }
+ 
+     if (s->param_presence_flags & PARAM_MATRIX)
+-        if (get_bits1(gbp))
+-            if ((ret = read_matrix_params(m, substr, gbp)) < 0)
++        if (get_bits1(gbp)) {
++            if (m->spatial_substream_type && substr >= 3)
++                ret = read_31ec_matrix_params(m, substr, gbp);
++            else
++                ret = read_matrix_params(m, substr, gbp);
++            if (ret < 0)
+                 return ret;
++        }
+ 
+     if (s->param_presence_flags & PARAM_OUTSHIFT)
+         if (get_bits1(gbp)) {
+@@ -1037,7 +1253,7 @@ static int read_block_data(MLPDecodeContext *m, GetBitContext *gbp,
+     return 0;
+ }
+ 
+-/** Data table used for TrueHD noise generation function. */
++/** Data table used for lossless HD noise generation function. */
+ 
+ static const int8_t noise_table[256] = {
+      30,  51,  22,  54,   3,   7,  -4,  38,  14,  55,  46,  81,  22,  58,  -3,   2,
+@@ -1075,6 +1291,19 @@ static void generate_2_noise_channels(MLPDecodeContext *m, unsigned int substr)
+     uint32_t seed = s->noisegen_seed;
+     unsigned int maxchan = s->max_matrix_channel;
+ 
++    /* Noise channels occupy maxchan+1 and maxchan+2 in sample_buffer.
++     * If there is no room (e.g. 16-channel spatial), skip generation
++     * to avoid buffer overflow.  The caller must not increment maxchan. */
++    if (maxchan + 2 >= MAX_CHANNELS) {
++        /* Still advance the seed so that subsequent blocks stay in sync */
++        for (i = 0; i < s->blockpos; i++) {
++            uint16_t seed_shr7 = seed >> 7;
++            seed = (seed << 16) ^ seed_shr7 ^ (seed_shr7 << 5);
++        }
++        s->noisegen_seed = seed;
++        return;
++    }
++
+     for (i = 0; i < s->blockpos; i++) {
+         uint16_t seed_shr7 = seed >> 7;
+         m->sample_buffer[i][maxchan+1] = ((int8_t)(seed >> 15)) * (1 << s->noise_shift);
+@@ -1115,7 +1344,40 @@ static int output_data(MLPDecodeContext *m, unsigned int substr,
+     int ret;
+     int is32 = (m->avctx->sample_fmt == AV_SAMPLE_FMT_S32);
+ 
+-    if (m->avctx->ch_layout.nb_channels != s->max_matrix_channel + 1) {
++    if (m->extract_objects) {
++        static int od_count = 0;
++        od_count++;
++
++        /* Log every frame for the first 10, then every 500th. */
++        if (od_count <= 10 || od_count % 500 == 0)
++            av_log(avctx, AV_LOG_WARNING,
++                   "output_data[%d]: substr=%u max_matrix_ch=%u blockpos=%u "
++                   "noise_type=%d ch_layout=%d atmos_type=%d bed_blockpos=%u\n",
++                   od_count, substr, s->max_matrix_channel, s->blockpos,
++                   s->noise_type, avctx->ch_layout.nb_channels,
++                   m->spatial_substream_type, m->bed_blockpos);
++
++        /* ANOMALY: blockpos mismatch between bed and spatial. */
++        if (substr >= 3 && m->bed_blockpos > 0 &&
++            s->blockpos != m->bed_blockpos)
++            av_log(avctx, AV_LOG_ERROR,
++                   "ANOMALY[%d]: blockpos MISMATCH atmos=%u bed=%u\n",
++                   od_count, s->blockpos, m->bed_blockpos);
++
++        /* ANOMALY: bed_blockpos is 0 when it shouldn't be. */
++        if (substr >= 3 && m->bed_blockpos == 0)
++            av_log(avctx, AV_LOG_ERROR,
++                   "ANOMALY[%d]: bed_blockpos is ZERO\n", od_count);
++
++        /* ANOMALY: fallback to bed substream (substr < 3). */
++        if (substr < 3 && m->max_decoded_substream >= 3)
++            av_log(avctx, AV_LOG_ERROR,
++                   "ANOMALY[%d]: FALLBACK to substr=%u (atmos failed)\n",
++                   od_count, substr);
++    }
++
++    if (!m->extract_objects &&
++        m->avctx->ch_layout.nb_channels != s->max_matrix_channel + 1) {
+         av_log(m->avctx, AV_LOG_ERROR, "channel count mismatch\n");
+         return AVERROR_INVALIDDATA;
+     }
+@@ -1125,43 +1387,528 @@ static int output_data(MLPDecodeContext *m, unsigned int substr,
+         return AVERROR_INVALIDDATA;
+     }
+ 
++    /* When extract_objects is enabled, always output MAX_CHANNELS (16) for
++     * a stable channel count, even when falling back to substream 2.
++     * Unused channels will be zero (silent). */
++    unsigned int effective_max_ch = m->extract_objects
++                                    ? MAX_CHANNELS - 1
++                                    : s->max_matrix_channel;
++
++    /* The 0x31ec interpolating rematrix operates on the spatial substream's
++     * decoded residuals and produces the complete spatial-rendered audio in
++     * channels 0..max_matrix_channel.  This includes all spatial effects
++     * (objects, height channels) already mixed in. */
++
++    if (m->extract_objects && substr < 3) {
++        /* Fallback to bed substream (only used before first good frame).
++         * Zero-fill object channels, identity mapping. */
++        for (unsigned int ch = s->max_matrix_channel + 1; ch < MAX_CHANNELS; ch++) {
++            s->ch_assign[ch] = ch;
++            s->output_shift[ch] = 0;
++        }
++        for (unsigned int i = 0; i < s->blockpos; i++)
++            for (unsigned int ch = s->max_matrix_channel + 1; ch < MAX_CHANNELS; ch++)
++                m->sample_buffer[i][ch] = 0;
++        if (m->avctx->ch_layout.nb_channels != MAX_CHANNELS) {
++            av_channel_layout_uninit(&m->avctx->ch_layout);
++            av_channel_layout_default(&m->avctx->ch_layout, MAX_CHANNELS);
++        }
++    }
++
++    /* Generate noise and apply channel matrices. */
+     maxchan = s->max_matrix_channel;
++
+     if (!s->noise_type) {
+         generate_2_noise_channels(m, substr);
+         maxchan += 2;
++        if (maxchan >= MAX_CHANNELS)
++            maxchan = MAX_CHANNELS - 1;
+     } else {
+         fill_noise_buffer(m, substr);
+     }
+ 
+-    /* Apply the channel matrices in turn to reconstruct the original audio
+-     * samples. */
+-    for (mat = 0; mat < s->num_primitive_matrices; mat++) {
+-        unsigned int dest_ch = s->matrix_out_ch[mat];
+-        m->dsp.mlp_rematrix_channel(&m->sample_buffer[0][0],
+-                                    s->matrix_coeff[mat],
+-                                    &m->bypassed_lsbs[0][mat],
+-                                    m->noise_buffer,
+-                                    s->num_primitive_matrices - mat,
+-                                    dest_ch,
+-                                    s->blockpos,
+-                                    maxchan,
+-                                    s->matrix_noise_shift[mat],
+-                                    m->access_unit_size_pow2,
+-                                    MSB_MASK(s->quant_step_size[dest_ch]));
++    /* Apply the channel matrices to reconstruct original audio samples. */
++    if (m->spatial_substream_type && substr >= 3) {
++        /* Bed injection + interpolating rematrix approach.
++         *
++         * Replace bed channel positions in sample_buffer with clean bed
++         * audio from bed_buffer (substream 2 post-rematrix), then apply
++         * substream 3's interpolating rematrix.  Height channels get their
++         * audio from the rematrix output.  Re-inject bed after rematrix
++         * to restore clean bed channels.
++         *
++         * Height channels need manual scaling by bed_shift (applied here
++         * in integer with clamp, then crossfaded at AU boundaries to
++         * smooth discontinuities from coefficient changes). */
++        int8_t bed_shift = 0;
++
++        if (m->bed_blockpos > 0) {
++            SubStream *bed_s_os = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
++            AVChannelLayout bed_layout_os;
++            av_channel_layout_from_mask(&bed_layout_os, bed_s_os->mask);
++            for (int ci = 0; ci <= (int)s->max_matrix_channel &&
++                             ci < (int)FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                enum AVChannel ac = thd_channel_order[ci];
++                if (bed_s_os->mask & (1ULL << ac)) {
++                    int bed_idx = av_channel_layout_index_from_channel(
++                                      &bed_layout_os, ac);
++                    if (bed_idx >= 0) {
++                        int mat_ch = bed_s_os->ch_assign[bed_idx];
++                        bed_shift = bed_s_os->output_shift[mat_ch];
++                    }
++                    break;
++                }
++            }
++            av_channel_layout_uninit(&bed_layout_os);
++        }
++
++        /* Bed channels: use bed substream's output_shift.
++         * Height channels: use bed_shift so pack_output scales them
++         * to match bed level.  This is correct per-AU (each AU has its
++         * own bed_shift), avoiding the af_hrtf.c problem of applying
++         * one bed_shift to 256 samples spanning multiple AUs. */
++        for (unsigned int ch = 0; ch < MAX_CHANNELS; ch++)
++            s->output_shift[ch] = bed_shift;
++
++        if (m->bed_blockpos > 0) {
++            SubStream *bed_s_sh = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
++            AVChannelLayout bed_layout_sh;
++            av_channel_layout_from_mask(&bed_layout_sh, bed_s_sh->mask);
++            for (int ci = 0; ci <= (int)s->max_matrix_channel &&
++                             ci < (int)FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                enum AVChannel ac = thd_channel_order[ci];
++                if (bed_s_sh->mask & (1ULL << ac)) {
++                    int bed_idx = av_channel_layout_index_from_channel(
++                                      &bed_layout_sh, ac);
++                    if (bed_idx >= 0) {
++                        int mat_ch = bed_s_sh->ch_assign[bed_idx];
++                        s->output_shift[ci] = bed_s_sh->output_shift[mat_ch];
++                    }
++                }
++            }
++            av_channel_layout_uninit(&bed_layout_sh);
++        }
++
++        /* Per-block bed injection + interpolating rematrix + re-injection. */
++        if (m->bed_blockpos > 0 && m->spatial_num_blocks > 0) {
++            SubStream *bed_s_blk = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
++            AVChannelLayout bed_layout_blk;
++            av_channel_layout_from_mask(&bed_layout_blk, bed_s_blk->mask);
++
++            for (int blk = 0; blk < m->spatial_num_blocks; blk++) {
++                unsigned int blk_start = m->spatial_blk[blk].start;
++                unsigned int blk_size  = m->spatial_blk[blk].size;
++                unsigned int blk_end   = FFMIN(blk_start + blk_size,
++                                               m->bed_blockpos);
++
++                /* Inject bed audio for this block's sample range */
++                for (int ci = 0; ci <= (int)s->max_matrix_channel &&
++                                 ci < (int)FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                    enum AVChannel ac = thd_channel_order[ci];
++                    if (bed_s_blk->mask & (1ULL << ac)) {
++                        int bed_idx = av_channel_layout_index_from_channel(
++                                          &bed_layout_blk, ac);
++                        if (bed_idx >= 0) {
++                            int mat_ch = bed_s_blk->ch_assign[bed_idx];
++                            for (unsigned int i = blk_start; i < blk_end; i++)
++                                m->sample_buffer[i][ci] = m->bed_buffer[i][mat_ch];
++                        }
++                    }
++                }
++
++                /* Run interpolating rematrix for this block only */
++                for (int mt = 0; mt < m->spatial_blk[blk].num_matrices; mt++) {
++                    unsigned int dest_ch = m->spatial_blk[blk].out_ch[mt];
++                    ff_mlp_rematrix_interp_channel(
++                        &m->sample_buffer[blk_start][0],
++                        m->spatial_blk[blk].seed[mt],
++                        m->spatial_blk[blk].delta[mt],
++                        dest_ch,
++                        blk_size,
++                        maxchan,
++                        MSB_MASK(s->quant_step_size[dest_ch]));
++                }
++
++                /* Re-inject bed audio */
++                for (int ci = 0; ci <= (int)s->max_matrix_channel &&
++                                 ci < (int)FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                    enum AVChannel ac = thd_channel_order[ci];
++                    if (bed_s_blk->mask & (1ULL << ac)) {
++                        int bed_idx = av_channel_layout_index_from_channel(
++                                          &bed_layout_blk, ac);
++                        if (bed_idx >= 0) {
++                            int mat_ch = bed_s_blk->ch_assign[bed_idx];
++                            for (unsigned int i = blk_start; i < blk_end; i++)
++                                m->sample_buffer[i][ci] = m->bed_buffer[i][mat_ch];
++                        }
++                    }
++                }
++            }
++
++            av_channel_layout_uninit(&bed_layout_blk);
++        }
++
++        /* Height channel scaling is done in float in af_hrtf.c using
++         * bed_shift exported via g_spatial_ext_coeff. No integer scaling
++         * or crossfade here — that avoids clipping and phaser artifacts. */
++
++        /* Export combined channel mask for the HRTF spatializer.
++         * Include bed speakers and height (TOP) speakers present in
++         * thd_channel_order[0..max_matrix_channel].  Exclude intermediary
++         * channels (FLC, FRC) that the rematrix uses as temporaries.
++         * Also zero out intermediary channels in sample_buffer so they
++         * don't produce unwanted audio in the spatializer. */
++        {
++            SubStream *bed_s_exp = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
++            uint64_t combined_mask = 0;
++            for (int ci = 0; ci <= (int)s->max_matrix_channel &&
++                             ci < (int)FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                enum AVChannel ac = thd_channel_order[ci];
++                int in_bed = (bed_s_exp->mask & (1ULL << ac)) != 0;
++                int is_top = (ac == AV_CHAN_TOP_FRONT_LEFT  ||
++                              ac == AV_CHAN_TOP_FRONT_RIGHT ||
++                              ac == AV_CHAN_TOP_FRONT_CENTER ||
++                              ac == AV_CHAN_TOP_CENTER ||
++                              ac == AV_CHAN_TOP_BACK_LEFT ||
++                              ac == AV_CHAN_TOP_BACK_RIGHT ||
++                              ac == AV_CHAN_TOP_BACK_CENTER ||
++                              ac == AV_CHAN_TOP_SIDE_LEFT ||
++                              ac == AV_CHAN_TOP_SIDE_RIGHT);
++                if (in_bed || is_top)
++                    combined_mask |= (1ULL << ac);
++            }
++
++            /* Zero ALL channels not in combined_mask, including noise
++             * channels (max_matrix_channel+1 .. maxchan) and unused
++             * channels beyond maxchan.  The rematrix uses some of these
++             * as intermediaries; leaking them to the spatializer causes
++             * audible micro-clicks. */
++            for (unsigned int ci = 0; ci < MAX_CHANNELS; ci++) {
++                enum AVChannel ac = (ci < FF_ARRAY_ELEMS(thd_channel_order))
++                                        ? thd_channel_order[ci]
++                                        : AV_CHAN_NONE;
++                if (ac == AV_CHAN_NONE || !(combined_mask & (1ULL << ac))) {
++                    for (unsigned int i = 0; i < s->blockpos; i++)
++                        m->sample_buffer[i][ci] = 0;
++                }
++            }
++
++            g_spatial_ext_coeff.num_matrices = s->num_primitive_matrices;
++            g_spatial_ext_coeff.max_channel = maxchan;
++            g_spatial_ext_coeff.bed_mask = combined_mask;
++            g_spatial_ext_coeff.bed_shift = bed_shift;
++            for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++                g_spatial_ext_coeff.out_ch[mat] = s->matrix_out_ch[mat];
++                for (unsigned int c = 0; c <= maxchan; c++)
++                    g_spatial_ext_coeff.coeff[mat][c] =
++                        s->matrix_coeff[mat][c];
++            }
++            atomic_store(&g_spatial_ext_coeff.updated, 1);
++        }
++    } else {
++        for (mat = 0; mat < s->num_primitive_matrices; mat++) {
++            unsigned int dest_ch = s->matrix_out_ch[mat];
++            m->dsp.mlp_rematrix_channel(&m->sample_buffer[0][0],
++                                        s->matrix_coeff[mat],
++                                        &m->bypassed_lsbs[0][mat],
++                                        m->noise_buffer,
++                                        s->num_primitive_matrices - mat,
++                                        dest_ch,
++                                        s->blockpos,
++                                        maxchan,
++                                        s->matrix_noise_shift[mat],
++                                        m->access_unit_size_pow2,
++                                        MSB_MASK(s->quant_step_size[dest_ch]));
++        }
+     }
+ 
+     /* get output buffer */
+     frame->nb_samples = s->blockpos;
+     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+         return ret;
+-    s->lossless_check_data = m->pack_output(s->lossless_check_data,
+-                                            s->blockpos,
+-                                            m->sample_buffer,
+-                                            frame->data[0],
+-                                            s->ch_assign,
+-                                            s->output_shift,
+-                                            s->max_matrix_channel,
+-                                            is32);
++
++    if (m->extract_objects && m->bed_blockpos > 0 && substr >= 3) {
++        /* spatial: build ch_assign that maps from combined_mask bit order
++         * (what the spatializer expects) to thd_channel_order indices
++         * (where sample_buffer has the audio after the rematrix).
++         *
++         * combined_mask iterates bits in AVChannel order (FL=0,FR=1,...,BL=4,
++         * BR=5,...,SL=9,SR=10,...,TFL=12,TFR=14).  But sample_buffer uses
++         * thd_channel_order (FL=0,FR=1,...,SL=4,SR=5,TFL=6,TFR=7,...,BL=10,
++         * BR=11).  Without this mapping, height channels would be spatialized
++         * at the wrong positions (e.g. TFL at SL instead of overhead). */
++        uint8_t atmos_ch_assign[MAX_CHANNELS];
++
++        /* Find a zeroed channel to use as silence source for unused
++         * output positions.  FLC (thd index 8) is always zeroed since
++         * it's an intermediary not in combined_mask.  Fallback: last. */
++        uint8_t silent_ch = MAX_CHANNELS - 1;
++        for (unsigned int ci = 0;
++             ci < FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++            enum AVChannel ac = thd_channel_order[ci];
++            if (!(g_spatial_ext_coeff.bed_mask & (1ULL << ac))) {
++                silent_ch = ci;
++                break;
++            }
++        }
++        for (int ch = 0; ch < MAX_CHANNELS; ch++)
++            atmos_ch_assign[ch] = silent_ch;
++
++        uint64_t cm = g_spatial_ext_coeff.bed_mask;
++        int out_pos = 0;
++        for (int bit = 0; bit < 64 && out_pos < MAX_CHANNELS; bit++) {
++            if (!(cm & (1ULL << bit)))
++                continue;
++            /* Find thd_channel_order index for this AVChannel */
++            int thd_idx = -1;
++            for (unsigned int ci = 0;
++                 ci < FF_ARRAY_ELEMS(thd_channel_order); ci++) {
++                if ((int)thd_channel_order[ci] == bit) {
++                    thd_idx = ci;
++                    break;
++                }
++            }
++            atmos_ch_assign[out_pos] = (thd_idx >= 0)
++                                           ? (uint8_t)thd_idx
++                                           : silent_ch;
++            out_pos++;
++        }
++
++        /* Diagnostic: log peak sample values per channel and ch_assign. */
++        {
++            static int diag_cnt = 0;
++            diag_cnt++;
++            if (diag_cnt <= 5 || diag_cnt % 200 == 0) {
++                av_log(avctx, AV_LOG_WARNING,
++                       "SPATIAL_DIAG[%d]: blkpos=%u nblks=%d bed_shift=%d maxchan=%u mask=0x%llx\n",
++                       diag_cnt, s->blockpos, m->spatial_num_blocks,
++                       (int)g_spatial_ext_coeff.bed_shift, maxchan, (unsigned long long)g_spatial_ext_coeff.bed_mask);
++                /* Peak per thd channel index */
++                for (unsigned int ci = 0; ci <= maxchan && ci < MAX_CHANNELS; ci++) {
++                    int32_t peak = 0;
++                    for (unsigned int i = 0; i < s->blockpos; i++) {
++                        int32_t v = m->sample_buffer[i][ci];
++                        if (v < 0) v = -v;
++                        if (v > peak) peak = v;
++                    }
++                    av_log(avctx, AV_LOG_WARNING,
++                           "  ch[%u] peak=%d oshift=%d assign[%u]=%u\n",
++                           ci, peak, s->output_shift[ci], ci, atmos_ch_assign[ci]);
++                }
++            }
++        }
++
++        s->lossless_check_data = m->pack_output(s->lossless_check_data,
++                                                s->blockpos,
++                                                m->sample_buffer,
++                                                frame->data[0],
++                                                atmos_ch_assign,
++                                                s->output_shift,
++                                                effective_max_ch,
++                                                is32);
++    } else if (0) {
++        /* Dead code: old merge approach kept for reference. */
++        uint8_t merged_ch_assign[MAX_CHANNELS];
++        int8_t  merged_output_shift[MAX_CHANNELS];
++        SubStream *bed_s = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
++        unsigned int bed_nch = m->bed_max_ch + 1;
++
++        /* Re-identify height channels (TOP speakers only) */
++        int height_src2[MAX_CHANNELS];
++        enum AVChannel height_avch2[MAX_CHANNELS];
++        int nh2 = 0;
++        for (int ci = 0; ci <= (int)s->max_matrix_channel && ci < MAX_CHANNELS; ci++) {
++            enum AVChannel ac;
++            if (s->mask != 0) {
++                ac = thd_channel_layout_extract_channel(s->mask, ci);
++            } else if (ci < (int)FF_ARRAY_ELEMS(thd_channel_order)) {
++                ac = thd_channel_order[ci];
++            } else {
++                ac = AV_CHAN_NONE;
++            }
++            int is_top2 = (ac == AV_CHAN_TOP_FRONT_LEFT  ||
++                           ac == AV_CHAN_TOP_FRONT_RIGHT ||
++                           ac == AV_CHAN_TOP_FRONT_CENTER ||
++                           ac == AV_CHAN_TOP_CENTER ||
++                           ac == AV_CHAN_TOP_BACK_LEFT ||
++                           ac == AV_CHAN_TOP_BACK_RIGHT ||
++                           ac == AV_CHAN_TOP_BACK_CENTER ||
++                           ac == AV_CHAN_TOP_SIDE_LEFT ||
++                           ac == AV_CHAN_TOP_SIDE_RIGHT);
++            if (is_top2 && !(bed_s->mask & (1ULL << ac))) {
++                height_src2[nh2] = ci;
++                height_avch2[nh2] = ac;
++                nh2++;
++            }
++        }
++        if (nh2 > 8) nh2 = 8;
++
++        /* Build ch_assign and output_shift in combined_mask bit order.
++         * Bed channels use bed substream's output_shift (correct for
++         * bed_buffer data).  Height channels use spatial output_shift
++         * (they come from normalized temp_buf rematrix). */
++        uint64_t combined2 = bed_s->mask;
++        for (int h = 0; h < nh2; h++)
++            combined2 |= (1ULL << height_avch2[h]);
++
++        AVChannelLayout bed_layout2;
++        av_channel_layout_from_mask(&bed_layout2, bed_s->mask);
++
++        int total_out2 = 0;
++        for (int bit = 0; bit < 64 && total_out2 < MAX_CHANNELS; bit++) {
++            if (!(combined2 & (1ULL << bit)))
++                continue;
++            merged_ch_assign[total_out2] = total_out2; /* identity */
++            if (bed_s->mask & (1ULL << bit)) {
++                int bed_idx = av_channel_layout_index_from_channel(
++                                  &bed_layout2, (enum AVChannel)bit);
++                if (bed_idx >= 0) {
++                    int mat_ch = bed_s->ch_assign[bed_idx];
++                    merged_output_shift[total_out2] = bed_s->output_shift[mat_ch];
++                } else {
++                    merged_output_shift[total_out2] = 0;
++                }
++            } else {
++                merged_output_shift[total_out2] = 0;
++                for (int h2 = 0; h2 < nh2; h2++) {
++                    if ((int)height_avch2[h2] == bit) {
++                        merged_output_shift[total_out2] =
++                            s->output_shift[height_src2[h2]];
++                        break;
++                    }
++                }
++            }
++            total_out2++;
++        }
++        av_channel_layout_uninit(&bed_layout2);
++
++        /* Remaining: identity, zero shift */
++        for (int ch = total_out2; ch < MAX_CHANNELS; ch++) {
++            merged_ch_assign[ch] = ch;
++            merged_output_shift[ch] = 0;
++        }
++
++        /* Debug: log channel mapping */
++        {
++            static int atmos_dbg_count = 0;
++            static int atmos_dbg_periodic = 0;
++            atmos_dbg_periodic++;
++            /* Log first 3 frames in detail, then every 500 frames for peaks */
++            if (atmos_dbg_count < 3) {
++                atmos_dbg_count++;
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "ATMOS MERGE: bed_nch=%u height=%d bed_mask=0x%llx "
++                       "atmos_mask=0x%llx combined=0x%llx num_mat=%u "
++                       "atmos_max_matrix_ch=%u\n",
++                       bed_nch, nh2,
++                       (unsigned long long)bed_s->mask,
++                       (unsigned long long)s->mask,
++                       (unsigned long long)g_spatial_ext_coeff.bed_mask,
++                       s->num_primitive_matrices,
++                       s->max_matrix_channel);
++                /* Log each spatial internal channel's AVChannel mapping */
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  atmos_ch_map:");
++                for (int ci = 0; ci <= (int)s->max_matrix_channel && ci < MAX_CHANNELS; ci++) {
++                    enum AVChannel ac;
++                    if (s->mask != 0) {
++                        ac = thd_channel_layout_extract_channel(s->mask, ci);
++                    } else if (ci < (int)FF_ARRAY_ELEMS(thd_channel_order)) {
++                        ac = thd_channel_order[ci];
++                    } else {
++                        ac = AV_CHAN_NONE;
++                    }
++                    int in_bed = (ac != AV_CHAN_NONE &&
++                                  (bed_s->mask & (1ULL << ac)));
++                    av_log(m->avctx, AV_LOG_WARNING,
++                           " [%d]=ch%d(%s)", ci, (int)ac,
++                           in_bed ? "BED" : "OBJ");
++                }
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++                /* Log matrix out_ch targets */
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  matrix_out_ch:");
++                for (unsigned int mt = 0; mt < s->num_primitive_matrices; mt++)
++                    av_log(m->avctx, AV_LOG_WARNING,
++                           " [%u]->%u", mt, s->matrix_out_ch[mt]);
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++                if (nh2 > 0) {
++                    av_log(m->avctx, AV_LOG_WARNING,
++                           "  height_src:");
++                    for (int h = 0; h < nh2; h++)
++                        av_log(m->avctx, AV_LOG_WARNING,
++                               " [%d]->ch%u", height_src2[h], bed_nch + h);
++                    av_log(m->avctx, AV_LOG_WARNING, "\n");
++                }
++                /* Log output peaks from sample_buffer (after merge) */
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  output_peaks:");
++                for (int ci = 0; ci < total_out2 && ci < MAX_CHANNELS; ci++) {
++                    int32_t peak = 0;
++                    for (unsigned int i = 0; i < FFMIN(s->blockpos, 40u); i++) {
++                        int32_t v = m->sample_buffer[i][ci];
++                        if (v < 0) v = -v;
++                        if (v > peak) peak = v;
++                    }
++                    av_log(m->avctx, AV_LOG_WARNING, " [%d]=%d", ci, peak);
++                }
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++                /* Log output_shift values for each output channel */
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  output_shift:");
++                for (int ci = 0; ci < total_out2; ci++)
++                    av_log(m->avctx, AV_LOG_WARNING, " [%d]=%d",
++                           ci, merged_output_shift[ci]);
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++                /* Log bed vs spatial quant_step_size */
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  bed_quant_step:");
++                for (int ci = 0; ci <= (int)bed_s->max_matrix_channel; ci++)
++                    av_log(m->avctx, AV_LOG_WARNING, " [%d]=%d",
++                           ci, bed_s->quant_step_size[ci]);
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "  atmos_quant_step:");
++                for (int ci = 0; ci <= (int)s->max_matrix_channel; ci++)
++                    av_log(m->avctx, AV_LOG_WARNING, " [%d]=%d",
++                           ci, s->quant_step_size[ci]);
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++            }
++            /* Periodic peak logging every 500 blocks to catch loud passages */
++            if (atmos_dbg_periodic % 500 == 0) {
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "ATMOS PEAKS[%d]:", atmos_dbg_periodic);
++                for (int ci = 0; ci < total_out2 && ci < MAX_CHANNELS; ci++) {
++                    int32_t peak = 0;
++                    for (unsigned int i = 0; i < s->blockpos; i++) {
++                        int32_t v = m->sample_buffer[i][ci];
++                        if (v < 0) v = -v;
++                        if (v > peak) peak = v;
++                    }
++                    av_log(m->avctx, AV_LOG_WARNING, " [%d]=%d", ci, peak);
++                }
++                av_log(m->avctx, AV_LOG_WARNING, "\n");
++            }
++        }
++
++        s->lossless_check_data = m->pack_output(s->lossless_check_data,
++                                                s->blockpos,
++                                                m->sample_buffer,
++                                                frame->data[0],
++                                                merged_ch_assign,
++                                                merged_output_shift,
++                                                effective_max_ch,
++                                                is32);
++    } else {
++        s->lossless_check_data = m->pack_output(s->lossless_check_data,
++                                                s->blockpos,
++                                                m->sample_buffer,
++                                                frame->data[0],
++                                                s->ch_assign,
++                                                s->output_shift,
++                                                effective_max_ch,
++                                                is32);
++    }
+ 
+     /* Update matrix encoding side data */
+     if (s->matrix_encoding != s->prev_matrix_encoding) {
+@@ -1176,6 +1923,535 @@ static int output_data(MLPDecodeContext *m, unsigned int substr,
+     return 0;
+ }
+ 
++/* ------------------------------------------------------------------ */
++/*  Object metadata parser                                             */
++/*                                                                    */
++/*  Chain: AccessUnit → ExtraData → EvoFrame → EvoPayload(id=11)     */
++/*         → object metadata payload with object positions.           */
++/*                                                                    */
++/*  Position encoding (raw object metadata):                          */
++/*    X: 6 bits unsigned / 62.0 → [0,1]                              */
++/*    Y: 6 bits unsigned / 62.0 → [0,1]                              */
++/*    Z: 1 sign bit + 4 bits / 15.0 → [-1,+1]                        */
++/*                                                                    */
++/*  Output coordinates (DAMF):                                        */
++/*    x_out = (x_raw - 0.5) * 2.0     [-1,+1] left-right             */
++/*    y_out = (0.5 - y_raw) * 2.0     [-1,+1] front-back (inverted)  */
++/*    z_out = z_raw                    [-1,+1] below-above            */
++/* ------------------------------------------------------------------ */
++
++/** Read variable-length unsigned value matching truehdd get_variable_bits_max.
++ *  Each group: read n data bits, then 1 continuation bit.
++ *  If continuation=1: value = (value + 1) << n, read next group.
++ *  Repeat up to max_num_groups times. */
++static uint32_t oamd_get_variable(GetBitContext *gb, int n, int max_num_groups)
++{
++    uint32_t value = 0;
++    int num_group = 0;
++    int b_read_more = 1;
++
++    while (b_read_more && num_group < max_num_groups) {
++        uint32_t read_val = get_bits(gb, n);
++        value += read_val;
++        b_read_more = get_bits1(gb); /* continuation bit */
++        if (b_read_more) {
++            value = (value + 1) << n;
++            num_group++;
++        }
++    }
++    return value;
++}
++
++static const uint16_t oamd_ramp_lut[16] = {
++    32, 64, 128, 256, 320, 480, 1000, 1001,
++    1024, 1600, 1601, 1602, 1920, 2000, 2002, 2048
++};
++
++static const uint16_t oamd_smploffst_lut[4] = { 8, 16, 18, 24 };
++
++/** Parse object metadata payload bytes to extract object positions.
++ *  Follows truehdd oamd.rs structure exactly.
++ *  Returns 0 on success, <0 on error or if parsing fails gracefully. */
++static int parse_oamd_payload(AVCodecContext *avctx,
++                              const uint8_t *data, int size,
++                              uint32_t evo_sample_offset)
++{
++    GetBitContext gb;
++    int oamd_version, object_count, num_bed = 0, num_isf = 0, num_dynamic = 0;
++    int oa_element_count;
++
++    if (size < 4)
++        return -1;
++
++    init_get_bits(&gb, data, size * 8);
++
++    /* object metadata version */
++    oamd_version = get_bits(&gb, 2);
++    if (oamd_version == 3)
++        oamd_version += get_bits(&gb, 3);
++
++    /* Object count (truehdd: object_count_bits + 1) */
++    object_count = get_bits(&gb, 5);
++    if (object_count == 31)
++        object_count += get_bits(&gb, 7);
++    object_count += 1;
++    if (object_count > SPATIAL_EXT_MAX_OBJECTS)
++        object_count = SPATIAL_EXT_MAX_OBJECTS;
++
++    /* ProgramAssignment */
++    if (get_bits1(&gb)) {
++        /* b_dyn_object_only_program */
++        num_dynamic = object_count;
++        if (get_bits1(&gb)) { /* b_lfe_present */
++            num_bed = 1; /* LFE only */
++            num_dynamic--;
++        }
++    } else {
++        int content_desc = get_bits(&gb, 4);
++        /* Bit 0: bed objects */
++        if (content_desc & 1) {
++            skip_bits1(&gb); /* b_bed_chan_distribute */
++            int num_bed_instances = get_bits1(&gb) ? (get_bits(&gb, 3) + 2) : 1;
++            for (int bi = 0; bi < num_bed_instances; bi++) {
++                if (get_bits1(&gb)) {
++                    /* b_lfe_only — single LFE channel */
++                    num_bed += 1;
++                } else if (get_bits1(&gb)) {
++                    /* b_standard_chan_assign */
++                    int bed_assign = get_bits(&gb, 10);
++                    /* Count actual channels from STD_BED_LIST:
++                     * bits 0,3,4,5,6,7,8 = pairs (2 ch each)
++                     * bits 1,2,9 = single (1 ch each) */
++                    for (int b = 0; b < 10; b++) {
++                        if (bed_assign & (1 << b)) {
++                            if (b == 1 || b == 2 || b == 9)
++                                num_bed += 1;
++                            else
++                                num_bed += 2;
++                        }
++                    }
++                } else {
++                    /* Non-standard: 17-bit config, count set bits */
++                    int ns = get_bits(&gb, 17);
++                    for (int b = 0; b < 17; b++)
++                        if (ns & (1 << b))
++                            num_bed++;
++                }
++            }
++        }
++        /* Bit 1: ISF objects */
++        if (content_desc & 2) {
++            static const int isf_count_list[6] = {4, 8, 10, 14, 15, 30};
++            int isf_idx = get_bits(&gb, 3);
++            if (isf_idx < 6)
++                num_isf = isf_count_list[isf_idx];
++        }
++        /* Bit 2: dynamic objects */
++        if (content_desc & 4) {
++            int dyn_count = get_bits(&gb, 5);
++            if (dyn_count == 31)
++                dyn_count += get_bits(&gb, 7);
++            num_dynamic = dyn_count + 1;
++        }
++        /* Bit 3: reserved */
++        if (content_desc & 8) {
++            int res_sz = (get_bits(&gb, 4) + 1) << 3;
++            skip_bits(&gb, res_sz);
++        }
++    }
++
++    int beds_or_isf = num_bed + num_isf;
++
++    /* b_alternate_object_data_present */
++    int b_alt = get_bits1(&gb);
++
++    /* OA element count — truehdd does NOT add 1 */
++    oa_element_count = get_bits(&gb, 4);
++    if (oa_element_count == 15)
++        oa_element_count += get_bits(&gb, 5);
++
++    av_log(avctx, AV_LOG_DEBUG,
++           "OAMD: ver=%d obj=%d bed=%d dyn=%d elem=%d\n",
++           oamd_version, object_count, num_bed, num_dynamic,
++           oa_element_count);
++
++    /* Parse OA elements looking for ObjectElement (type 1) */
++    for (int elem = 0; elem < oa_element_count; elem++) {
++        if (get_bits_left(&gb) < 8)
++            break;
++
++        int elem_type_idx = get_bits(&gb, 4);
++        int elem_size_bits = (oamd_get_variable(&gb, 4, 4) + 1) << 3;
++
++        if (b_alt)
++            skip_bits(&gb, 4); /* alternate_object_data_id_idx */
++        skip_bits1(&gb); /* b_discard_unknown_element */
++
++        int elem_start = get_bits_count(&gb);
++
++        if (elem_type_idx == 1) {
++            /* ObjectElement — MDUpdateInfo */
++            int smpl_offset_code = get_bits(&gb, 2);
++            uint32_t sample_offset = 0;
++            if (smpl_offset_code == 1)
++                sample_offset = oamd_smploffst_lut[get_bits(&gb, 2)];
++            else if (smpl_offset_code == 2)
++                sample_offset = get_bits(&gb, 5);
++
++            int num_blocks = get_bits(&gb, 3) + 1;
++
++            /* BlockUpdateInfo for all blocks */
++            uint32_t ramp_duration = 0;
++            for (int blk = 0; blk < num_blocks; blk++) {
++                skip_bits(&gb, 6); /* block_offset_factor */
++                int rc = get_bits(&gb, 2);
++                uint32_t rd = 0;
++                if (rc == 1)      rd = 512;
++                else if (rc == 2) rd = 1536;
++                else if (rc == 3) {
++                    if (get_bits1(&gb))
++                        rd = oamd_ramp_lut[get_bits(&gb, 4)];
++                    else
++                        rd = get_bits(&gb, 11);
++                }
++                if (blk == 0) ramp_duration = rd;
++            }
++
++            /* b_reserved_data_not_present */
++            if (!get_bits1(&gb))
++                skip_bits(&gb, 5);
++
++            /* Parse ObjectInfoBlocks for all objects × all blocks.
++             * truehdd structure: for each object → for each block → ObjectInfoBlock.
++             * We capture block 0 data for position export. */
++            SpatialExtObjMeta oamd = {0};
++            oamd.num_objects = FFMIN(object_count, SPATIAL_EXT_MAX_OBJECTS);
++            oamd.num_bed_objects = num_bed;
++            oamd.num_dynamic_objects = num_dynamic;
++            oamd.sample_offset = sample_offset + evo_sample_offset;
++            oamd.ramp_duration = ramp_duration;
++
++            int8_t prev_gain[8] = {0}; /* per block_index, across objects */
++
++            for (int obj = 0; obj < oamd.num_objects; obj++) {
++              for (int blk = 0; blk < num_blocks; blk++) {
++                if (get_bits_left(&gb) < 2)
++                    goto oamd_export;
++
++                /* b_object_not_active */
++                int b_inactive = get_bits1(&gb);
++                if (blk == 0)
++                    oamd.objects[obj].active = !b_inactive;
++
++                /* object_basic_info_status_idx:
++                 *   inactive → 0
++                 *   block 0, active → 1 (implicit, no bits read)
++                 *   block >0, active → read 2 bits */
++                int basic_status;
++                if (b_inactive)
++                    basic_status = 0;
++                else if (blk == 0)
++                    basic_status = 1;
++                else
++                    basic_status = get_bits(&gb, 2);
++
++                /* ObjectBasicInfo:
++                 *   status 0: default (no bits)
++                 *   status 1: mask=3 hardcoded (gain+priority present)
++                 *   status 2: carry from previous (no bits)
++                 *   status 3: read 2-bit mask, selective update */
++                if (basic_status == 1 || basic_status == 3) {
++                    int basic_bits = (basic_status == 1) ? 3 : get_bits(&gb, 2);
++
++                    if (basic_bits & 1) { /* gain */
++                        int8_t prev_g = (obj > 0) ? prev_gain[blk] : 0;
++                        int gain_idx = get_bits(&gb, 2);
++                        int8_t gain = 0;
++                        if (gain_idx == 0)
++                            gain = 0;
++                        else if (gain_idx == 1)
++                            gain = -128;
++                        else if (gain_idx == 2) {
++                            int gv = get_bits(&gb, 6);
++                            gain = (gv <= 14) ?
++                                (int8_t)(15 - gv) : (int8_t)(14 - gv);
++                        } else {
++                            gain = prev_g;
++                        }
++                        prev_gain[blk] = gain;
++                        if (blk == 0)
++                            oamd.objects[obj].gain_db = gain;
++                    }
++                    if (basic_bits & 2) { /* priority */
++                        if (!get_bits1(&gb)) /* b_default_priority */
++                            skip_bits(&gb, 5);
++                    }
++                }
++                /* status 0, 2: no bits consumed */
++
++                /* object_render_info_status_idx:
++                 *   inactive → 0
++                 *   bed/ISF → 0
++                 *   dynamic, block 0 → 1 (implicit)
++                 *   dynamic, block >0 → read 2 bits */
++                int in_bed_or_isf = (obj < beds_or_isf);
++                int render_status;
++                if (b_inactive)
++                    render_status = 0;
++                else if (!in_bed_or_isf) {
++                    if (blk == 0)
++                        render_status = 1;
++                    else
++                        render_status = get_bits(&gb, 2);
++                } else {
++                    render_status = 0;
++                }
++
++                /* ObjectRenderInfo:
++                 *   status 0: default (no bits)
++                 *   status 1: all present (render_bits=15)
++                 *   status 2: carry from previous (no bits)
++                 *   status 3: read 4-bit mask, selective update */
++                if (render_status == 1 || render_status == 3) {
++                    int render_bits = (render_status == 1) ? 15
++                                                           : get_bits(&gb, 4);
++
++                    /* Bit 0: position */
++                    if (render_bits & 1) {
++                        int b_differential = (blk == 0) ? 0 : get_bits1(&gb);
++
++                        if (b_differential) {
++                            /* Differential: 3 signed bits each for x, y, z */
++                            int dx = get_bits(&gb, 3);
++                            int dy = get_bits(&gb, 3);
++                            int dz = get_bits(&gb, 3);
++                            /* Sign extend 3-bit values */
++                            if (dx >= 4) dx -= 8;
++                            if (dy >= 4) dy -= 8;
++                            if (dz >= 4) dz -= 8;
++                            (void)dx; (void)dy; (void)dz;
++                        } else {
++                            /* Absolute position */
++                            int x_raw = get_bits(&gb, 6);
++                            int y_raw = get_bits(&gb, 6);
++                            int z_sign = get_bits1(&gb) ? 1 : -1;
++                            int z_mag = get_bits(&gb, 4);
++
++                            if (blk == 0) {
++                                float x = (float)x_raw / 62.0f;
++                                float y = (float)y_raw / 62.0f;
++                                float z = (float)z_mag / 15.0f * z_sign;
++
++                                /* Transform to DAMF coordinates */
++                                oamd.objects[obj].x = (x - 0.5f) * 2.0f;
++                                oamd.objects[obj].y = (0.5f - y) * 2.0f;
++                                oamd.objects[obj].z = z;
++
++                                { static int raw_dbg = 0;
++                                  if (++raw_dbg <= 60)
++                                    av_log(avctx, AV_LOG_WARNING,
++                                      "  RAW obj=%d blk=%d xr=%d yr=%d zs=%d zm=%d -> DAMF(%.3f,%.3f,%.3f)\n",
++                                      obj, blk, x_raw, y_raw, z_sign, z_mag,
++                                      oamd.objects[obj].x, oamd.objects[obj].y, oamd.objects[obj].z);
++                                }
++                            }
++                        }
++
++                        /* b_object_distance_specified */
++                        if (get_bits1(&gb)) {
++                            if (!get_bits1(&gb)) /* b_at_infinity */
++                                skip_bits(&gb, 4);
++                        }
++                    }
++                    /* Bit 1: zone constraints */
++                    if (render_bits & 2) {
++                        skip_bits(&gb, 3);
++                        skip_bits1(&gb); /* b_enable_elevation */
++                    }
++                    /* Bit 2: size */
++                    if (render_bits & 4) {
++                        int sz = get_bits(&gb, 2);
++                        if (sz == 1) {
++                            if (blk == 0)
++                                oamd.objects[obj].size =
++                                    (float)get_bits(&gb, 5) / 31.0f;
++                            else
++                                skip_bits(&gb, 5);
++                        } else if (sz == 2) {
++                            if (blk == 0)
++                                oamd.objects[obj].size =
++                                    (float)get_bits(&gb, 5) / 31.0f;
++                            else
++                                skip_bits(&gb, 5);
++                            skip_bits(&gb, 5); /* depth */
++                            skip_bits(&gb, 5); /* height */
++                        }
++                    }
++                    /* Bit 3: screen reference */
++                    if (render_bits & 8) {
++                        if (get_bits1(&gb)) {
++                            skip_bits(&gb, 3); /* screen_factor */
++                            skip_bits(&gb, 2); /* depth_factor */
++                        }
++                    }
++                    /* b_object_snap */
++                    skip_bits1(&gb);
++                }
++                /* render_status 0, 2: no bits consumed */
++
++                /* b_additional_table_data_exists — read for ALL
++                 * objects+blocks including inactive (truehdd line 639) */
++                if (get_bits1(&gb)) {
++                    int addl_size = (get_bits(&gb, 4) + 1) << 3;
++                    if (addl_size <= get_bits_left(&gb))
++                        skip_bits(&gb, addl_size);
++                }
++              } /* end block loop */
++            } /* end object loop */
++oamd_export:
++
++            /* Export to global structure */
++            for (int obj = 0; obj < oamd.num_objects; obj++)
++                g_spatial_ext_objmeta.objects[obj] = oamd.objects[obj];
++            g_spatial_ext_objmeta.num_objects = oamd.num_objects;
++            g_spatial_ext_objmeta.num_bed_objects = oamd.num_bed_objects;
++            g_spatial_ext_objmeta.num_dynamic_objects = oamd.num_dynamic_objects;
++            g_spatial_ext_objmeta.sample_offset = oamd.sample_offset;
++            g_spatial_ext_objmeta.ramp_duration = oamd.ramp_duration;
++            atomic_store(&g_spatial_ext_objmeta.updated, 1);
++
++            { /* Debug: log ALL object positions every ~50 frames */
++                static int oamd_dbg_cnt = 0;
++                if (++oamd_dbg_cnt % 50 == 1) {
++                    av_log(avctx, AV_LOG_WARNING,
++                           "OAMD[%d]: nblk=%d obj=%d bed=%d isf=%d dyn=%d beds_or_isf=%d\n",
++                           oamd_dbg_cnt, num_blocks, oamd.num_objects,
++                           oamd.num_bed_objects, num_isf,
++                           oamd.num_dynamic_objects, beds_or_isf);
++                    for (int obj = 0; obj < oamd.num_objects; obj++)
++                        av_log(avctx, AV_LOG_WARNING,
++                               "  [%d] act=%d x=%+.3f y=%+.3f z=%+.3f g=%d sz=%.2f\n",
++                               obj, oamd.objects[obj].active,
++                               oamd.objects[obj].x, oamd.objects[obj].y,
++                               oamd.objects[obj].z, oamd.objects[obj].gain_db,
++                               oamd.objects[obj].size);
++                }
++            }
++
++            return 0;
++        }
++
++        /* Skip unknown element types using elem_size_bits */
++        int consumed = get_bits_count(&gb) - elem_start;
++        int skip = elem_size_bits - consumed;
++        if (skip > 0 && skip <= get_bits_left(&gb))
++            skip_bits(&gb, skip);
++    }
++
++    return -1;
++}
++
++/** Parse ExtraData and EVO frame after substreams to find object metadata.
++ *  buf points to the first byte after all substream data.
++ *  remaining is the number of bytes left in the access unit. */
++static void parse_extra_data_objmeta(AVCodecContext *avctx,
++                                  const uint8_t *buf, int remaining)
++{
++    GetBitContext gb;
++
++    if (remaining < 4)
++        return;
++
++    init_get_bits(&gb, buf, remaining * 8);
++
++    /* ExtraData header: 4-bit check + 12-bit length (in 16-bit words) */
++    skip_bits(&gb, 4); /* check_nibble */
++    int extra_len_words = get_bits(&gb, 12);
++    int extra_len_bytes = extra_len_words * 2;
++
++    if (extra_len_bytes < 2 || extra_len_bytes + 2 > remaining)
++        return;
++
++    /* EVO frame: 4-bit reserved + 12-bit byte length */
++    skip_bits(&gb, 4); /* evo_reserved */
++    int evo_byte_len = get_bits(&gb, 12);
++
++    if (evo_byte_len < 2 || evo_byte_len > extra_len_bytes)
++        return;
++
++    /* EVO frame content starts here */
++    /* evo_version: 2 bits (if 3, read more) */
++    int evo_ver = get_bits(&gb, 2);
++    if (evo_ver == 3)
++        evo_ver += oamd_get_variable(&gb, 2, 16);
++
++    /* key_id: 3 bits (if 7, read more) */
++    int key_id = get_bits(&gb, 3);
++    if (key_id == 7)
++        key_id += oamd_get_variable(&gb, 3, 10);
++    (void)evo_ver;
++    (void)key_id;
++
++    /* EVO payloads: loop until payload_id == 0 */
++    while (get_bits_left(&gb) >= 8) {
++        int payload_id = get_bits(&gb, 5);
++        if (payload_id == 0)
++            break; /* terminator */
++
++        /* EvoPayloadConfig (matches truehdd evolution.rs) */
++        uint32_t smploffst = 0;
++        int has_smploffst = 0;
++
++        /* smploffst */
++        if (get_bits1(&gb)) {
++            smploffst = oamd_get_variable(&gb, 11, 2);
++            has_smploffst = 1;
++        }
++        /* duration */
++        if (get_bits1(&gb))
++            oamd_get_variable(&gb, 11, 2); /* discard */
++        /* groupid */
++        if (get_bits1(&gb))
++            oamd_get_variable(&gb, 2, 16); /* discard */
++        /* codedcdata */
++        if (get_bits1(&gb))
++            skip_bits(&gb, 8); /* discard */
++        /* discard_unknown_payload (inverted flag) */
++        if (!get_bits1(&gb)) {
++            int payload_frame_aligned = 0;
++            if (!has_smploffst)
++                payload_frame_aligned = get_bits1(&gb);
++            if (payload_frame_aligned) {
++                skip_bits(&gb, 1); /* create_duplicate */
++                skip_bits(&gb, 1); /* remove_duplicate */
++            }
++            if (has_smploffst || payload_frame_aligned) {
++                skip_bits(&gb, 5); /* priority */
++                skip_bits(&gb, 2); /* proc_allowed */
++            }
++        }
++
++        /* evo_payload_size: number of bytes, then read each byte */
++        uint32_t payload_size = oamd_get_variable(&gb, 8, 4);
++
++        if (payload_id == 11 && payload_size > 0 &&
++            (int)payload_size * 8 <= get_bits_left(&gb)) {
++            /* Extract object metadata payload bytes from the bitstream */
++            uint8_t oamd_buf[512];
++            uint32_t copy_size = FFMIN(payload_size, sizeof(oamd_buf));
++            for (uint32_t i = 0; i < copy_size; i++)
++                oamd_buf[i] = get_bits(&gb, 8);
++            parse_oamd_payload(avctx, oamd_buf, copy_size, smploffst);
++            return; /* done after first object metadata */
++        }
++
++        /* Skip payload bytes */
++        if (payload_size * 8 > (unsigned)get_bits_left(&gb))
++            return;
++        skip_bits(&gb, payload_size * 8);
++    }
++}
++
+ /** Read an access unit from the stream.
+  *  @return negative on error, 0 if not enough data is present in the input stream,
+  *  otherwise the number of bytes consumed. */
+@@ -1189,6 +2465,7 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+     GetBitContext gb;
+     unsigned int length, substr;
+     unsigned int substream_start;
++    unsigned int all_substreams_end = 0;
+     unsigned int header_size = 4;
+     unsigned int substr_header_size = 0;
+     uint8_t substream_parity_present[MAX_SUBSTREAMS];
+@@ -1199,6 +2476,12 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+     if (buf_size < 4)
+         return AVERROR_INVALIDDATA;
+ 
++    /* Do NOT reset bed_blockpos here.  Keep the last valid bed_buffer so
++     * that if the bed substream fails to decode for one access unit the
++     * channel rearrangement (bed in 0-7, objects in 8-15) still works
++     * instead of falling back to the wrong order. bed_blockpos is
++     * overwritten whenever the bed substream decodes successfully. */
++
+     length = (AV_RB16(buf) & 0xfff) * 2;
+ 
+     if (length < 4 || length > buf_size)
+@@ -1270,6 +2553,8 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+             goto error;
+         }
+ 
++        all_substreams_end = end;
++
+         if (substr > m->max_decoded_substream)
+             continue;
+ 
+@@ -1297,6 +2582,9 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+         memset(m->filter_changed, 0, sizeof(m->filter_changed));
+ 
+         s->blockpos = 0;
++        if (m->extract_objects && substr >= 3)
++            m->spatial_num_blocks = 0;
++        {
+         do {
+             if (get_bits1(&gb)) {
+                 if (get_bits1(&gb)) {
+@@ -1330,6 +2618,8 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+             }
+ 
+             if (substr != m->max_decoded_substream &&
++                !(m->extract_objects && m->max_decoded_substream >= 3 &&
++                  substr == m->max_decoded_substream - 1) &&
+                 ((s->coded_channels & m->substream[m->max_decoded_substream].coded_channels) != 0)) {
+                 av_log(avctx, AV_LOG_DEBUG,
+                        "Current substream(%d) channels overlaps final substream(%d) channels, skipping.\n",
+@@ -1337,21 +2627,65 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+                 goto next_substr;
+             }
+ 
+-            if ((ret = read_block_data(m, &gb, substr)) < 0)
++            /* Save per-block spatial coefficients BEFORE read_block_data
++             * so each block's rematrix uses its own seed/delta. */
++            if (m->extract_objects && substr >= 3 &&
++                m->spatial_substream_type &&
++                m->spatial_num_blocks < MAX_SPATIAL_BLOCKS_PER_AU) {
++                int blk = m->spatial_num_blocks;
++                m->spatial_blk[blk].start = s->blockpos;
++                m->spatial_blk[blk].num_matrices = s->num_primitive_matrices;
++                memcpy(m->spatial_blk[blk].out_ch, s->matrix_out_ch,
++                       sizeof(m->spatial_blk[blk].out_ch));
++                memcpy(m->spatial_blk[blk].seed, s->matrix_coeff,
++                       sizeof(m->spatial_blk[blk].seed));
++                memcpy(m->spatial_blk[blk].delta, s->delta_matrix_coeff,
++                       sizeof(m->spatial_blk[blk].delta));
++            }
++
++            if ((ret = read_block_data(m, &gb, substr)) < 0) {
++                if (m->extract_objects && substr >= 3) {
++                    s->blockpos = 0;
++                    goto next_substr;
++                }
+                 return ret;
++            }
+ 
+-            if (get_bits_count(&gb) >= substream_data_len[substr] * 8)
++            /* Record block size and advance seed for next block. */
++            if (m->extract_objects && substr >= 3 &&
++                m->spatial_substream_type &&
++                m->spatial_num_blocks < MAX_SPATIAL_BLOCKS_PER_AU) {
++                int blk = m->spatial_num_blocks;
++                m->spatial_blk[blk].size = s->blockpos - m->spatial_blk[blk].start;
++                m->spatial_num_blocks++;
++                for (unsigned int mt = 0; mt < (unsigned)s->num_primitive_matrices; mt++)
++                    for (unsigned int c = 0; c <= s->max_matrix_channel; c++)
++                        s->matrix_coeff[mt][c] += s->delta_matrix_coeff[mt][c];
++            }
++
++            if (get_bits_count(&gb) >= substream_data_len[substr] * 8) {
++                if (m->extract_objects && substr >= 3) {
++                    s->blockpos = 0;
++                    goto next_substr;
++                }
+                 goto substream_length_mismatch;
++            }
+ 
+         } while (!get_bits1(&gb));
++        } /* end block scope */
+ 
+         skip_bits(&gb, (-get_bits_count(&gb)) & 15);
+ 
+         if (substream_data_len[substr] * 8 - get_bits_count(&gb) >= 32) {
+             int shorten_by;
+ 
+-            if (get_bits(&gb, 16) != 0xD234)
++            if (get_bits(&gb, 16) != 0xD234) {
++                if (m->extract_objects && substr >= 3) {
++                    s->blockpos = 0;
++                    goto next_substr;
++                }
+                 return AVERROR_INVALIDDATA;
++            }
+ 
+             shorten_by = get_bits(&gb, 16);
+             if      (m->avctx->codec_id == AV_CODEC_ID_TRUEHD && shorten_by  & 0x2000)
+@@ -1366,8 +2700,13 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+         if (substream_parity_present[substr]) {
+             uint8_t parity, checksum;
+ 
+-            if (substream_data_len[substr] * 8 - get_bits_count(&gb) != 16)
++            if (substream_data_len[substr] * 8 - get_bits_count(&gb) != 16) {
++                if (m->extract_objects && substr >= 3) {
++                    s->blockpos = 0;
++                    goto next_substr;
++                }
+                 goto substream_length_mismatch;
++            }
+ 
+             parity   = ff_mlp_calculate_parity(buf, substream_data_len[substr] - 2);
+             checksum = ff_mlp_checksum8       (buf, substream_data_len[substr] - 2);
+@@ -1378,19 +2717,115 @@ static int read_access_unit(AVCodecContext *avctx, AVFrame *frame,
+                 av_log(m->avctx, AV_LOG_ERROR, "Substream %d checksum failed.\n"    , substr);
+         }
+ 
+-        if (substream_data_len[substr] * 8 != get_bits_count(&gb))
++        if (substream_data_len[substr] * 8 != get_bits_count(&gb)) {
++            if (m->extract_objects && substr >= 3) {
++                s->blockpos = 0;
++                goto next_substr;
++            }
+             goto substream_length_mismatch;
++        }
+ 
+ next_substr:
+         if (!s->restart_seen)
+             av_log(m->avctx, AV_LOG_ERROR,
+                    "No restart header present in substream %d.\n", substr);
+ 
++        /* Apply the bed substream's standard rematrix to get clean
++         * per-channel audio, then save to bed_buffer.  The rematrix
++         * reverses the decorrelation applied during encoding so that
++         * each output channel carries exactly one speaker's signal.
++         * We must do this HERE before the spatial substream decodes,
++         * because the spatial decode will overwrite sample_buffer and
++         * bypassed_lsbs. */
++        if (m->extract_objects && m->max_decoded_substream >= 3 &&
++            substr == m->max_decoded_substream - 1 &&
++            s->restart_seen && s->blockpos > 0) {
++            unsigned int bed_maxchan = s->max_matrix_channel;
++
++            /* Generate noise channels for the bed's rematrix */
++            if (!s->noise_type) {
++                generate_2_noise_channels(m, substr);
++                bed_maxchan += 2;
++                if (bed_maxchan >= MAX_CHANNELS)
++                    bed_maxchan = MAX_CHANNELS - 1;
++            } else {
++                fill_noise_buffer(m, substr);
++            }
++
++            /* Apply bed's standard rematrix (2.14 fixed-point) */
++            for (unsigned int bmat = 0; bmat < s->num_primitive_matrices; bmat++) {
++                unsigned int dest_ch = s->matrix_out_ch[bmat];
++                m->dsp.mlp_rematrix_channel(&m->sample_buffer[0][0],
++                                            s->matrix_coeff[bmat],
++                                            &m->bypassed_lsbs[0][bmat],
++                                            m->noise_buffer,
++                                            s->num_primitive_matrices - bmat,
++                                            dest_ch,
++                                            s->blockpos,
++                                            bed_maxchan,
++                                            s->matrix_noise_shift[bmat],
++                                            m->access_unit_size_pow2,
++                                            MSB_MASK(s->quant_step_size[dest_ch]));
++            }
++
++            m->bed_blockpos = s->blockpos;
++            m->bed_max_ch = s->max_matrix_channel;
++            memcpy(m->bed_buffer, m->sample_buffer,
++                   s->blockpos * sizeof(m->bed_buffer[0]));
++        }
++
+         buf += substream_data_len[substr];
+     }
+ 
+-    if ((ret = output_data(m, m->max_decoded_substream, frame, got_frame_ptr)) < 0)
+-        return ret;
++    /* Parse object metadata from ExtraData after all substreams (spatial only).
++     * ExtraData starts after ALL substream data (including undecoded ones).
++     * buf may only have been advanced through decoded substreams, so use
++     * all_substreams_end (from headers) to find the true start. */
++    if (m->avctx->profile == AV_PROFILE_TRUEHD_ATMOS) {
++        const uint8_t *data_start = avpkt->data + header_size + substr_header_size;
++        const uint8_t *extra_start = data_start + all_substreams_end;
++        const uint8_t *au_end = avpkt->data + length;
++        int extra_remaining = au_end - extra_start;
++        if (extra_remaining > 4)
++            parse_extra_data_objmeta(avctx, extra_start, extra_remaining);
++    }
++
++    /* When extract_objects is enabled, fall back to a lower substream if
++     * substream 3 failed to decode (restart not seen, or parse error
++     * resulting in blockpos==0). Always output 16 channels for stability.
++     *
++     * If bed_buffer is available and the spatial substream has seen a
++     * restart header, prefer restoring blockpos and keeping the spatial
++     * path.  output_data's spatial branch will inject bed_buffer into
++     * sample_buffer (overwriting the corrupted partial-decode data),
++     * run the rematrix, then re-inject bed audio.  This ensures the
++     * output format (ch_assign, output_shift, channel count) stays
++     * identical to normal spatial frames, avoiding audible discontinuities
++     * from format switching. */
++    {
++        unsigned int output_substr = m->max_decoded_substream;
++        if (m->extract_objects && output_substr >= 3 &&
++            (!m->substream[output_substr].restart_seen ||
++             !m->substream[output_substr].blockpos)) {
++            if (m->bed_blockpos > 0 &&
++                m->substream[output_substr].restart_seen) {
++                /* spatial parse error (blockpos==0) but bed_buffer valid.
++                 * Restore blockpos so the spatial output path runs normally
++                 * with bed audio injection providing clean sample data. */
++                m->substream[output_substr].blockpos = m->bed_blockpos;
++                av_log(m->avctx, AV_LOG_WARNING,
++                       "spatial substream error, using bed buffer "
++                       "(blockpos restored to %u)\n", m->bed_blockpos);
++            } else {
++                output_substr = FFMIN(m->max_decoded_substream - 1, 2);
++                while (output_substr > 0 &&
++                       !m->substream[output_substr].restart_seen)
++                    output_substr--;
++            }
++        }
++        if ((ret = output_data(m, output_substr, frame, got_frame_ptr)) < 0)
++            return ret;
++    }
+ 
+     for (substr = 0; substr <= m->max_decoded_substream; substr++){
+         SubStream *s = &m->substream[substr];
+@@ -1431,6 +2866,8 @@ static void mlp_decode_flush(AVCodecContext *avctx)
+ static const AVOption options[] = {
+     { "downmix", "Request a specific channel layout from the decoder", OFFSET(downmix_layout),
+         AV_OPT_TYPE_CHLAYOUT, {.str = NULL}, .flags = FLAGS },
++    { "extract_objects", "Extract spatial object audio from 4th substream",
++        OFFSET(extract_objects), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS },
+     { NULL },
+ };
+ 
+diff --git a/libavcodec/mlpdsp.c b/libavcodec/mlpdsp.c
+index cb40160..439e17e 100644
+--- a/libavcodec/mlpdsp.c
++++ b/libavcodec/mlpdsp.c
+@@ -89,6 +89,29 @@ void ff_mlp_rematrix_channel(int32_t *samples,
+     }
+ }
+ 
++void ff_mlp_rematrix_interp_channel(int32_t *samples,
++                                     const int32_t *seed_coeffs,
++                                     const int32_t *delta_coeffs,
++                                     unsigned int dest_ch,
++                                     uint16_t blockpos,
++                                     unsigned int maxchan,
++                                     int32_t mask)
++{
++    unsigned int src_ch, i;
++    for (i = 0; i < blockpos; i++) {
++        int64_t accum = 0;
++        /* Interpolated coefficient = seed + (delta * i) / blockpos
++         * Using 2.18 fixed-point: delta is the total change over the block. */
++        for (src_ch = 0; src_ch <= maxchan; src_ch++) {
++            int32_t coeff = seed_coeffs[src_ch] +
++                            (int32_t)(((int64_t)delta_coeffs[src_ch] * i) / blockpos);
++            accum += (int64_t)samples[src_ch] * coeff;
++        }
++        samples[dest_ch] = (int32_t)((accum >> 18) & mask);
++        samples += MAX_CHANNELS;
++    }
++}
++
+ static int32_t (*mlp_select_pack_output(uint8_t *ch_assign,
+                                         int8_t *output_shift,
+                                         uint8_t max_matrix_channel,
+diff --git a/libavcodec/mlpdsp.h b/libavcodec/mlpdsp.h
+index 7a9ac22..6a53119 100644
+--- a/libavcodec/mlpdsp.h
++++ b/libavcodec/mlpdsp.h
+@@ -37,6 +37,18 @@ void ff_mlp_rematrix_channel(int32_t *samples,
+                              int access_unit_size_pow2,
+                              int32_t mask);
+ 
++/** Interpolating rematrix for Atmos 4th substream (0x31ec).
++ *  Applies linearly-interpolated matrix coefficients across a block,
++ *  blending from seed_coeffs to seed_coeffs+delta over blockpos samples.
++ */
++void ff_mlp_rematrix_interp_channel(int32_t *samples,
++                                     const int32_t *seed_coeffs,
++                                     const int32_t *delta_coeffs,
++                                     unsigned int dest_ch,
++                                     uint16_t blockpos,
++                                     unsigned int maxchan,
++                                     int32_t mask);
++
+ int32_t ff_mlp_pack_output(int32_t lossless_check_data,
+                            uint16_t blockpos,
+                            int32_t (*sample_buffer)[MAX_CHANNELS],
+diff --git a/libavcodec/x86/mlpdsp.asm b/libavcodec/x86/mlpdsp.asm
+index 3dc641e..a902d7d 100644
+--- a/libavcodec/x86/mlpdsp.asm
++++ b/libavcodec/x86/mlpdsp.asm
+@@ -65,8 +65,8 @@ SECTION .text
+     and       accumd, maskd                         ; accum &= mask
+     add       accumd, blsbsd                        ; accum += *bypassed_lsbs
+     mov   [samplesq + dest_chq], accumd             ; samples[dest_ch] = accum
+-    add   blsbs_ptrq, 8                             ; bypassed_lsbs += MAX_CHANNELS;
+-    add     samplesq, 32                            ; samples += MAX_CHANNELS;
++    add   blsbs_ptrq, 16                            ; bypassed_lsbs += MAX_CHANNELS;
++    add     samplesq, 64                            ; samples += MAX_CHANNELS;
+     cmp   blsbs_ptrq, cntq
+ %endmacro
+ 
+@@ -84,8 +84,8 @@ SECTION .text
+     and       accumd, maskd                         ; accum &= mask
+     add       accumd, noised                        ; accum += *bypassed_lsbs
+     mov   [samplesq + dest_chq], accumd             ; samples[dest_ch] = accum
+-    add   blsbs_ptrq, 8                             ; bypassed_lsbs += MAX_CHANNELS;
+-    add     samplesq, 32                            ; samples += MAX_CHANNELS;
++    add   blsbs_ptrq, 16                            ; bypassed_lsbs += MAX_CHANNELS;
++    add     samplesq, 64                            ; samples += MAX_CHANNELS;
+     cmp   blsbs_ptrq, cntq
+ %endmacro
+ 
+@@ -106,7 +106,8 @@ cglobal mlp_rematrix_channel, 0, 13, 5, samples, coeffs, blsbs_ptr, blsbs, \
+     mov     dest_chd, dest_chm                      ; load dest_chd (not needed on UNIX64)
+ %endif
+     shl     dest_chd, 2
+-    lea         cntq, [blsbs_ptrq + blockposq*8]
++    shl     blockposq, 4                            ; blockpos *= MAX_CHANNELS (16)
++    lea         cntq, [blsbs_ptrq + blockposq]
+     test        mnsd, mnsd                          ; is matrix_noise_shift != 0?
+     jne .shift                                      ; jump if true
+     cmp     maxchand, 4                             ; is maxchan < 4?

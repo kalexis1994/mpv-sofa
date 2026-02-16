@@ -1,0 +1,38 @@
+# Patch instructions for mpv-src/meson.build
+#
+# 1. In meson.options, add:
+#    option('hrtf', type: 'feature', value: 'auto', description: 'HRTF binaural audio filter (libmysofa)')
+#
+# 2. In meson.build, after the rubberband block (~line 748), add:
+
+# --- BEGIN PATCH ---
+
+# HRTF binaural spatialization filter
+libmysofa = dependency('libmysofa', required: get_option('hrtf'))
+features += {'hrtf': libmysofa.found()}
+if features['hrtf']
+    dependencies += libmysofa
+    sources += files('audio/filter/af_hrtf.c')
+
+    # PFFFT (bundled for FFT convolution)
+    # Option A: Bundled source
+    sources += files('audio/filter/pffft.c')
+    # Option B: System library
+    # pffft_dep = cc.find_library('pffft', required: false)
+    # if pffft_dep.found()
+    #     dependencies += pffft_dep
+    # endif
+endif
+
+# --- END PATCH ---
+
+# 3. In filters/user_filters.h, add:
+#    extern const struct mp_user_filter_entry af_hrtf;
+#
+# 4. In filters/user_filters.c, add to af_list[]:
+#    #if HAVE_HRTF
+#        &af_hrtf,
+#    #endif
+#
+# 5. Copy af_hrtf.c to mpv-src/audio/filter/
+# 6. Copy pffft.c and pffft.h to mpv-src/audio/filter/ (from pffft submodule)

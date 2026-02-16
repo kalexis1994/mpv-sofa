@@ -1,0 +1,14 @@
+[package]
+name = "losslesshd_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "losslesshd_ffi"
+crate-type = ["staticlib"]
+
+[dependencies]
+losslesshd = "0.2"    # losslesshd's library crate
+
+[build-dependencies]
+cbindgen = "0.27"
