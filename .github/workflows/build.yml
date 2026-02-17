@@ -93,6 +93,7 @@ jobs:
             --enable-d3d11va
 
           # Build and install
+          # (spatial symbol exports are handled by the patched libavcodec.v)
           make -j$(nproc)
           make install
 

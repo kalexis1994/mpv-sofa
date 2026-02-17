@@ -1397,6 +1397,12 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         if (dist < p->min_dist) dist = p->min_dist;
         float dist_gain = (p->min_dist / dist) * room_gain;
 
+        // DEBUG TEST: completely mute height channels to isolate
+        // whether "saturated" sound comes from heights or bed
+        float el = p->speaker_pos[ch].elevation;
+        if (el > 20.0f || el < -20.0f)
+            dist_gain *= 0.0f;  // MUTED for testing
+
         for (int i = 0; i < num_samples; i++)
             channel_data[ch][i] *= dist_gain;
 
@@ -1456,22 +1462,20 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         }
     }
 
-    // Adaptive headroom: scales with sqrt of active channel count to account
-    // for uncorrelated multi-channel summation. -6 dB for 6ch, steeper for
-    // more.  Use bed channel count (active speakers) when available, since
-    // spatial outputs 16ch but only bed+height have audio (rest are silent).
+    // Adaptive headroom: scales with active channel count to prevent
+    // clipping from multi-channel summation through HRTF convolution.
+    // For 7.1.2/7.1.4 Atmos beds, use a more conservative formula
+    // since height channels carry significant energy.
     {
         int active_ch = (p->num_bed_channels > 0) ? p->num_bed_channels : num_ch;
-        float ch_factor = (float)(active_ch > 6 ? active_ch : 6);
-        float headroom = 0.5f * sqrtf(6.0f / ch_factor);
+        if (active_ch < 6) active_ch = 6;
+        float headroom = 1.0f / sqrtf((float)active_ch);
         for (int i = 0; i < num_samples; i++) {
             out_l[i] *= headroom;
             out_r[i] *= headroom;
         }
     }
 
-    // NOTE: Peak limiter is applied at the end of af_hrtf_process,
-    // AFTER early reflections, reverb, and master volume are applied.
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,10 +2182,11 @@ static void af_hrtf_process(struct mp_filter *f) {
     // Transparent below threshold, smoothly compresses above it.
     // No attack/release/pumping artifacts; purely per-sample curve.
     // Uses tanh-based soft knee: output = T + (1-T)*tanh((|x|-T)/(1-T))
-    // where T=0.9 is the knee threshold.  C1 continuous, asymptotes to 1.0.
+    // T=0.7 gives a gradual compression curve that preserves dynamics
+    // while preventing harsh clipping on loud transients.
     {
-        const float T = 0.9f;
-        const float inv_range = 1.0f / (1.0f - T);  // 1/(1-0.9) = 10
+        const float T = 0.7f;
+        const float inv_range = 1.0f / (1.0f - T);  // 1/(1-0.7) = 3.33
         for (int i = 0; i < in_samples; i++) {
             float ax = fabsf(out_l[i]);
             if (ax > T) {
