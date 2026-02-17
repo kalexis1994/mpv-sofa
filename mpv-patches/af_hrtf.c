@@ -1397,11 +1397,10 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         if (dist < p->min_dist) dist = p->min_dist;
         float dist_gain = (p->min_dist / dist) * room_gain;
 
-        // DEBUG TEST: completely mute height channels to isolate
-        // whether "saturated" sound comes from heights or bed
+        // Height attenuation: -6dB for elevated/below speakers
         float el = p->speaker_pos[ch].elevation;
         if (el > 20.0f || el < -20.0f)
-            dist_gain *= 0.0f;  // MUTED for testing
+            dist_gain *= 0.50f;
 
         for (int i = 0; i < num_samples; i++)
             channel_data[ch][i] *= dist_gain;
