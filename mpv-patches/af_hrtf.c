@@ -90,6 +90,7 @@ typedef struct {
 typedef struct {
     // Written by audio filter, read by UI
     _Atomic int32_t  num_channels;
+    _Atomic int32_t  num_bed_channels;
     _Atomic float    channel_rms[HRTF_MAX_CHANNELS];
     _Atomic float    channel_peak[HRTF_MAX_CHANNELS];
     _Atomic int64_t  frame_counter;
@@ -101,6 +102,8 @@ typedef struct {
     _Atomic float    object_x[HRTF_SS_MAX_OBJECTS];
     _Atomic float    object_y[HRTF_SS_MAX_OBJECTS];
     _Atomic float    object_z[HRTF_SS_MAX_OBJECTS];
+    _Atomic float    object_gain[HRTF_SS_MAX_OBJECTS];
+    _Atomic int32_t  object_active[HRTF_SS_MAX_OBJECTS];
     _Atomic int32_t  objects_changed;
 
     // Written by UI, read by audio filter
@@ -287,6 +290,7 @@ struct priv {
     // Distance attenuation / air absorption
     float air_abs_state[HRTF_MAX_CHANNELS];  // one-pole lowpass state
     float min_dist;                           // minimum speaker distance
+    float out_limiter_gain;                   // smoothed output limiter gain
 
     // spatial object rendering
     float object_az[HRTF_MAX_CHANNELS];      // cached azimuth per object channel
@@ -1049,8 +1053,33 @@ static void update_object_positions_from_objmeta(struct priv *p) {
 
     int num_obj = g_spatial_objmeta_ptr->num_objects;
     int num_bed = g_spatial_objmeta_ptr->num_bed_objects;
-    if (num_obj <= 0 || num_obj > SPATIAL_EXT_MAX_OBJECTS)
+    if (num_obj <= 0 || num_obj > SPATIAL_EXT_MAX_OBJECTS) {
+        if (p->shared) {
+            atomic_store_explicit(&p->shared->num_objects, 0,
+                                  memory_order_relaxed);
+            for (int i = 0; i < HRTF_SS_MAX_OBJECTS; i++) {
+                atomic_store_explicit(&p->shared->object_active[i], 0,
+                                      memory_order_relaxed);
+                atomic_store_explicit(&p->shared->object_gain[i], 0.0f,
+                                      memory_order_relaxed);
+            }
+        }
         return;
+    }
+    if (num_bed < 0)
+        num_bed = 0;
+    if (num_bed > num_obj)
+        num_bed = num_obj;
+
+    /* Lossless HD path currently exposes speaker feeds (bed + height),
+     * not guaranteed one-channel-per-object stems. In that mode we keep
+     * metadata for visualization but avoid remapping audio channels as
+     * if they were discrete objects. */
+    int allow_audio_object_mapping = 1;
+    if (p->num_channels > 8 && g_spatial_coeff_ptr &&
+        g_spatial_coeff_ptr->bed_mask) {
+        allow_audio_object_mapping = 0;
+    }
 
     float room_w = 6.5f, room_d = 5.0f, room_h = 2.7f;
     if (p->shared) {
@@ -1078,13 +1107,24 @@ static void update_object_positions_from_objmeta(struct priv *p) {
         }
     }
 
-    int wrote_objects = 0;
+    int total_dyn = num_obj - num_bed;
+    if (total_dyn < 0) total_dyn = 0;
+    if (total_dyn > HRTF_SS_MAX_OBJECTS) total_dyn = HRTF_SS_MAX_OBJECTS;
+
+    if (p->shared) {
+        for (int i = 0; i < total_dyn; i++) {
+            atomic_store_explicit(&p->shared->object_active[i], 0,
+                                  memory_order_relaxed);
+            atomic_store_explicit(&p->shared->object_gain[i], 0.0f,
+                                  memory_order_relaxed);
+        }
+    }
+
     for (int i = num_bed; i < num_obj && i < SPATIAL_EXT_MAX_OBJECTS; i++) {
         SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[i];
-        if (!obj->active)
-            continue;
-
         int obj_idx = i - num_bed;
+        if (obj_idx < 0 || obj_idx >= HRTF_SS_MAX_OBJECTS)
+            break;
 
         /* DAMF coords: x [-1,+1] L/R, y [-1,+1] front/back, z [-1,+1] below/above
          * (Y: -1 = front, +1 = back per spatial_ext_coeff.h) */
@@ -1104,24 +1144,8 @@ static void update_object_positions_from_objmeta(struct priv *p) {
         float az = atan2f(-rx, -ry) * (180.0f / (float)M_PI);
         float el = asinf(rz / dist) * (180.0f / (float)M_PI);
 
-        /* Update audio spatialization — for lossless HD objects start at ch 8,
-         * for DD+ object coding reconstructed objects start at ch 6 (after 5.1 bed) */
-        int ch = p->num_bed_channels + obj_idx;
-        if (ch < HRTF_MAX_CHANNELS) {
-            float daz = fabsf(az - p->object_az[obj_idx]);
-            float del = fabsf(el - p->object_el[obj_idx]);
-            float ddi = fabsf(dist - p->object_dist[obj_idx]);
-            if (daz > 2.0f || del > 2.0f || ddi > 0.1f) {
-                p->object_az[obj_idx] = az;
-                p->object_el[obj_idx] = el;
-                p->object_dist[obj_idx] = dist;
-                p->speaker_pos[ch] = (HrtfSpeakerPos){az, el, dist};
-                update_channel_hrir(p, ch);
-            }
-        }
-
         /* Write to SharedState for UI visualization (no channel limit) */
-        if (p->shared && obj_idx < HRTF_SS_MAX_OBJECTS) {
+        if (p->shared) {
             /* Convert DAMF → SharedState: x 0=L 1=R, y 0=front 1=back, z -1..+1
              * DAMF Y: -1=front +1=back, so (dy+1)/2 maps to 0=front 1=back */
             atomic_store_explicit(&p->shared->object_x[obj_idx],
@@ -1130,15 +1154,43 @@ static void update_object_positions_from_objmeta(struct priv *p) {
                                   (dy + 1.0f) * 0.5f, memory_order_relaxed);
             atomic_store_explicit(&p->shared->object_z[obj_idx],
                                   dz, memory_order_relaxed);
-            wrote_objects = obj_idx + 1;
+
+            float gain_lin = 0.0f;
+            if (obj->active && obj->gain_db > -128) {
+                gain_lin = powf(10.0f, (float)obj->gain_db / 20.0f);
+                if (gain_lin > 1.0f) gain_lin = 1.0f;
+            }
+            atomic_store_explicit(&p->shared->object_gain[obj_idx],
+                                  gain_lin, memory_order_relaxed);
+            atomic_store_explicit(&p->shared->object_active[obj_idx],
+                                  obj->active ? 1 : 0, memory_order_relaxed);
+        }
+
+        if (!obj->active || !allow_audio_object_mapping)
+            continue;
+
+        /* Update audio spatialization — for lossless HD objects start after bed,
+         * for DD+ object coding reconstructed objects start after 5.1/7.1 bed. */
+        int ch = p->num_bed_channels + obj_idx;
+        if (ch < HRTF_MAX_CHANNELS) {
+            float daz = fabsf(az - p->object_az[obj_idx]);
+            float del = fabsf(el - p->object_el[obj_idx]);
+            float ddi = fabsf(dist - p->object_dist[obj_idx]);
+            if (daz > 5.0f || del > 5.0f || ddi > 0.2f) {
+                p->object_az[obj_idx] = az;
+                p->object_el[obj_idx] = el;
+                p->object_dist[obj_idx] = dist;
+                p->speaker_pos[ch] = (HrtfSpeakerPos){az, el, dist};
+                update_channel_hrir(p, ch);
+            }
         }
     }
 
-    if (p->shared && wrote_objects > 0) {
+    if (p->shared) {
         /* Write num_objects for the Renderer but do NOT set objects_changed.
          * objects_changed triggers the sidecar handler which uses a different
          * coordinate conversion and would overwrite our speaker_pos. */
-        atomic_store_explicit(&p->shared->num_objects, wrote_objects,
+        atomic_store_explicit(&p->shared->num_objects, total_dyn,
                               memory_order_relaxed);
     }
     update_min_dist(p);
@@ -1189,6 +1241,7 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
     p->sample_rate = sample_rate;
     p->num_channels = num_channels;
     p->min_dist = 1.0f;
+    p->out_limiter_gain = 1.0f;
 
     // Initialize convolver pairs
     for (int ch = 0; ch < num_channels && ch < HRTF_MAX_CHANNELS; ch++) {
@@ -1397,10 +1450,17 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         if (dist < p->min_dist) dist = p->min_dist;
         float dist_gain = (p->min_dist / dist) * room_gain;
 
-        // Height attenuation: -6dB for elevated/below speakers
-        float el = p->speaker_pos[ch].elevation;
-        if (el > 20.0f || el < -20.0f)
-            dist_gain *= 0.50f;
+        // Smooth elevation attenuation — gradual rolloff replaces
+        // the old hard ±20° cliff that caused audible "muting" when
+        // objects crossed the threshold.  Unity below 10°, gentle
+        // quadratic rolloff to -3 dB at 90°.
+        {
+            float el_abs = fabsf(p->speaker_pos[ch].elevation);
+            if (el_abs > 10.0f) {
+                float t = (el_abs - 10.0f) / 80.0f; // 0→1 over 10°→90°
+                dist_gain *= 1.0f - 0.29f * t * t;   // 1.0→0.71 (-3 dB)
+            }
+        }
 
         for (int i = 0; i < num_samples; i++)
             channel_data[ch][i] *= dist_gain;
@@ -1443,9 +1503,15 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
 
                 for (int i = 0; i < num_samples; i++) {
                     if (pair->crossfade_remaining > 0) {
-                        float t = (float)pair->crossfade_remaining / HRTF_CROSSFADE_LEN;
-                        block_l[i] = block_l[i] * (1.0f - t) + prev_l[i] * t;
-                        block_r[i] = block_r[i] * (1.0f - t) + prev_r[i] * t;
+                        // Equal-power crossfade: maintains constant energy
+                        // even when old and new HRIRs are uncorrelated,
+                        // preventing the audible dip of a linear fade.
+                        float phase = (1.0f - (float)pair->crossfade_remaining / HRTF_CROSSFADE_LEN)
+                                      * ((float)M_PI * 0.5f);
+                        float g_new = sinf(phase);
+                        float g_old = cosf(phase);
+                        block_l[i] = block_l[i] * g_new + prev_l[i] * g_old;
+                        block_r[i] = block_r[i] * g_new + prev_r[i] * g_old;
                         pair->crossfade_remaining--;
                     }
                 }
@@ -1466,7 +1532,12 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     // For 7.1.2/7.1.4 Atmos beds, use a more conservative formula
     // since height channels carry significant energy.
     {
-        int active_ch = (p->num_bed_channels > 0) ? p->num_bed_channels : num_ch;
+        int active_ch = 0;
+        for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
+            if (mute_bed && ch < bed_count) continue;
+            if (mute_obj && ch >= bed_count) continue;
+            active_ch++;
+        }
         if (active_ch < 6) active_ch = 6;
         float headroom = 1.0f / sqrtf((float)active_ch);
         for (int i = 0; i < num_samples; i++) {
@@ -1734,6 +1805,11 @@ static void af_hrtf_process(struct mp_filter *f) {
                               memory_order_relaxed);
         atomic_store_explicit(&p->shared->num_channels, (int32_t)in_channels,
                               memory_order_relaxed);
+        atomic_store_explicit(&p->shared->num_bed_channels,
+                              (int32_t)((p->num_bed_channels > 0 && p->num_bed_channels <= in_channels)
+                                      ? p->num_bed_channels
+                                      : ((in_channels > 8) ? 8 : in_channels)),
+                              memory_order_relaxed);
 
         // Write current PTS so host app can sync sidecar metadata
         double pts = mp_aframe_get_pts(in);
@@ -1757,8 +1833,11 @@ static void af_hrtf_process(struct mp_filter *f) {
                                   memory_order_relaxed)) {
             int num_obj = atomic_load_explicit(&p->shared->num_objects,
                                                 memory_order_relaxed);
-            if (num_obj > HRTF_MAX_CHANNELS - 8)
-                num_obj = HRTF_MAX_CHANNELS - 8;
+            int bed_count = p->num_bed_channels > 0 ? p->num_bed_channels : 8;
+            if (bed_count < 0) bed_count = 0;
+            if (bed_count > HRTF_MAX_CHANNELS) bed_count = HRTF_MAX_CHANNELS;
+            if (num_obj > HRTF_MAX_CHANNELS - bed_count)
+                num_obj = HRTF_MAX_CHANNELS - bed_count;
 
             float room_w = atomic_load_explicit(&p->shared->room_width,
                                                  memory_order_relaxed);
@@ -1771,7 +1850,7 @@ static void af_hrtf_process(struct mp_filter *f) {
             if (room_h <= 0) room_h = 2.7f;
 
             for (int i = 0; i < num_obj; i++) {
-                int ch = 8 + i;
+                int ch = bed_count + i;
                 if (ch >= HRTF_MAX_CHANNELS) break;
 
                 float ox = atomic_load_explicit(&p->shared->object_x[i],
@@ -1799,7 +1878,7 @@ static void af_hrtf_process(struct mp_filter *f) {
                 float daz = fabsf(az - p->object_az[i]);
                 float del = fabsf(el - p->object_el[i]);
                 float ddi = fabsf(dist - p->object_dist[i]);
-                if (daz > 2.0f || del > 2.0f || ddi > 0.1f) {
+                if (daz > 5.0f || del > 5.0f || ddi > 0.2f) {
                     p->object_az[i] = az;
                     p->object_el[i] = el;
                     p->object_dist[i] = dist;
@@ -2177,27 +2256,48 @@ static void af_hrtf_process(struct mp_filter *f) {
         }
     }
 
-    // Soft clipper — applied after ALL processing.
-    // Transparent below threshold, smoothly compresses above it.
-    // No attack/release/pumping artifacts; purely per-sample curve.
-    // Uses tanh-based soft knee: output = T + (1-T)*tanh((|x|-T)/(1-T))
-    // T=0.7 gives a gradual compression curve that preserves dynamics
-    // while preventing harsh clipping on loud transients.
+    // Transparent safety limiter (sample-wise envelope).
+    // Avoids frame-wide gain dips that can sound like transient "cuts".
     {
-        const float T = 0.7f;
-        const float inv_range = 1.0f / (1.0f - T);  // 1/(1-0.7) = 3.33
+        const float ceiling = 0.90f; // leave headroom for DAC/output stages
+        const float sr = (float)(p->sample_rate > 0 ? p->sample_rate : 48000);
+        const float attack_tc = 0.002f;   // ~2 ms attack
+        const float release_tc = 0.200f;  // ~200 ms release
+        const float attack_a = expf(-1.0f / (sr * attack_tc));
+        const float release_a = expf(-1.0f / (sr * release_tc));
+        float g = p->out_limiter_gain;
+
+        if (!(g > 0.0f) || g > 1.0f)
+            g = 1.0f;
+
         for (int i = 0; i < in_samples; i++) {
-            float ax = fabsf(out_l[i]);
-            if (ax > T) {
-                float sign = out_l[i] >= 0 ? 1.0f : -1.0f;
-                out_l[i] = sign * (T + (1.0f - T) * tanhf((ax - T) * inv_range));
-            }
-            ax = fabsf(out_r[i]);
-            if (ax > T) {
-                float sign = out_r[i] >= 0 ? 1.0f : -1.0f;
-                out_r[i] = sign * (T + (1.0f - T) * tanhf((ax - T) * inv_range));
-            }
+            float l = out_l[i];
+            float r = out_r[i];
+            float peak = fabsf(l) > fabsf(r) ? fabsf(l) : fabsf(r);
+            float target = 1.0f;
+
+            if (peak > ceiling && peak > 1e-12f)
+                target = ceiling / peak;
+
+            if (target < g)
+                g = attack_a * g + (1.0f - attack_a) * target;
+            else
+                g = release_a * g + (1.0f - release_a) * target;
+
+            l *= g;
+            r *= g;
+
+            // Hard safety clamp to guarantee no sample overs.
+            if (l > ceiling) l = ceiling;
+            else if (l < -ceiling) l = -ceiling;
+            if (r > ceiling) r = ceiling;
+            else if (r < -ceiling) r = -ceiling;
+
+            out_l[i] = l;
+            out_r[i] = r;
         }
+
+        p->out_limiter_gain = g;
     }
 
     // Debug: track peaks across ALL frames.
@@ -2222,8 +2322,9 @@ static void af_hrtf_process(struct mp_filter *f) {
                     if (v > max_in) max_in = v;
                 }
             }
-            HRTF_DBG("frame %d: max_in=%.6f POST_PEAK=%.6f vol=%.3f wr=%d\n",
-                      total_frames, max_in, true_max_post, master_vol, out_written);
+            HRTF_DBG("frame %d: max_in=%.6f POST_PEAK=%.6f vol=%.3f lim=%.3f wr=%d\n",
+                      total_frames, max_in, true_max_post, master_vol,
+                      p->out_limiter_gain, out_written);
             if (max_in > 0.001f) {
                 HRTF_DBG("  ch_peak:");
                 for (int ch = 0; ch < in_channels && ch < 16; ch++)
@@ -2264,6 +2365,7 @@ static void af_hrtf_reset(struct mp_filter *f) {
     p->test_tone_out_read = 0;
 
     memset(p->air_abs_state, 0, sizeof(p->air_abs_state));
+    p->out_limiter_gain = 1.0f;
 
     reverb_clear(&p->reverb);
     er_clear(&p->er);

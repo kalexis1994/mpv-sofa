@@ -85,3 +85,4 @@ copy_deps.bat
 # FFmpeg patches (tracked, override patterns above)
 !ffmpeg-patches/
 !ffmpeg-patches/**
+/tmp

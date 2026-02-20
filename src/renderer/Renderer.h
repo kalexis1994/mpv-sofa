@@ -4,6 +4,7 @@
 #include "Primitives.h"
 #include "Camera.h"
 #include <glm/glm.hpp>
+#include <array>
 #include <memory>
 
 struct HrtfSharedState;
@@ -27,6 +28,8 @@ private:
     void renderListener(const Camera& camera, float aspect);
     void renderLines(const Camera& camera, HrtfSharedState* state, float aspect);
     void renderSpatialObjects(const Camera& camera, HrtfSharedState* state, float aspect);
+    float getSpatialObjectLevel(HrtfSharedState* state, int objectIndex, int numChannels);
+    glm::vec4 getSpatialObjectColor(float level) const;
 
     // Get color for speaker based on channel index
     glm::vec4 getSpeakerColor(int channel);
@@ -41,4 +44,8 @@ private:
     BoxMesh m_box;
     GridMesh m_grid;
     LineBatch m_lines;
+
+    static constexpr int kMaxObjectViz = 128;
+    std::array<float, kMaxObjectViz> m_objectLevelSmooth{};
+    float m_objectPulsePhase = 0.0f;
 };

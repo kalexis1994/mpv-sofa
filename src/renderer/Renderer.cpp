@@ -2,6 +2,8 @@
 #include "core/SharedState.h"
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/geometric.hpp>
+#include <algorithm>
 #include <cmath>
 
 #ifndef M_PI
@@ -154,6 +156,97 @@ const char* Renderer::getSpeakerName(int channel) {
     return "?";
 }
 
+float Renderer::getSpatialObjectLevel(HrtfSharedState* state, int objectIndex,
+                                      int numChannels) {
+    if (!state || objectIndex < 0) return 0.0f;
+
+    int active = atomic_load(&state->object_active[objectIndex]);
+    if (!active) return 0.0f;
+
+    int bedCount = atomic_load(&state->num_bed_channels);
+    if (bedCount < 0 || bedCount > numChannels)
+        bedCount = (numChannels > 8) ? 8 : numChannels;
+
+    float audioLevel = 0.0f;
+    int ch = bedCount + objectIndex;
+    if (ch >= 0 && ch < numChannels && ch < HRTF_MAX_CHANNELS) {
+        float peak = atomic_load(&state->channel_peak[ch]);
+        float rms = atomic_load(&state->channel_rms[ch]);
+        float rawLevel = std::max(peak, rms * 1.8f);
+        if (rawLevel < 0.0f) rawLevel = 0.0f;
+
+        // Log mapping keeps quiet detail visible while avoiding hard saturation.
+        audioLevel = (float)(std::log1p(rawLevel * 12.0f) / std::log1p(12.0f));
+    }
+
+    // If there is no direct object channel (common in some Atmos tracks),
+    // estimate object activity from nearby speaker energy using metadata position.
+    float projectedLevel = 0.0f;
+    {
+        float ox = atomic_load(&state->object_x[objectIndex]);
+        float oy = atomic_load(&state->object_y[objectIndex]);
+        float oz = atomic_load(&state->object_z[objectIndex]);
+
+        glm::vec3 objDir((ox - 0.5f) * 2.0f, oz, (oy * 2.0f) - 1.0f);
+        float objLen = glm::length(objDir);
+        if (objLen > 1e-4f) {
+            objDir /= objLen;
+
+            float wsum = 0.0f;
+            float esum = 0.0f;
+            for (int c = 0; c < numChannels && c < HRTF_MAX_CHANNELS; c++) {
+                float peak = atomic_load(&state->channel_peak[c]);
+                float rms = atomic_load(&state->channel_rms[c]);
+                float raw = std::max(peak, rms * 1.8f);
+                if (raw <= 0.0f)
+                    continue;
+
+                const HrtfPosition &sp = state->speaker_pos[c];
+                glm::vec3 spDir = speakerToWorldPos(sp.azimuth, sp.elevation, 1.0f);
+                float spLen = glm::length(spDir);
+                if (spLen <= 1e-4f)
+                    continue;
+                spDir /= spLen;
+
+                float d = glm::dot(objDir, spDir);
+                if (d <= 0.0f)
+                    continue;
+
+                float w = d * d * d * d;
+                wsum += w;
+                esum += w * raw;
+            }
+
+            if (wsum > 1e-6f) {
+                float rawProj = esum / wsum;
+                projectedLevel = (float)(std::log1p(rawProj * 12.0f) / std::log1p(12.0f));
+            }
+        }
+    }
+
+    return std::clamp(std::max(audioLevel, projectedLevel), 0.0f, 1.0f);
+}
+
+glm::vec4 Renderer::getSpatialObjectColor(float level) const {
+    level = std::clamp(level, 0.0f, 1.0f);
+
+    const glm::vec3 c0(0.08f, 0.24f, 1.0f);  // blue (low)
+    const glm::vec3 c1(0.0f, 0.9f, 0.9f);    // cyan
+    const glm::vec3 c2(1.0f, 0.95f, 0.2f);   // yellow
+    const glm::vec3 c3(1.0f, 0.24f, 0.12f);  // red/orange (hot)
+
+    glm::vec3 rgb;
+    if (level < 0.33f) {
+        rgb = glm::mix(c0, c1, level / 0.33f);
+    } else if (level < 0.66f) {
+        rgb = glm::mix(c1, c2, (level - 0.33f) / 0.33f);
+    } else {
+        rgb = glm::mix(c2, c3, (level - 0.66f) / 0.34f);
+    }
+
+    return glm::vec4(rgb, 1.0f);
+}
+
 void Renderer::render(const Camera& camera, HrtfSharedState* state, float aspect,
                       int selectedSpeaker) {
     glEnable(GL_BLEND);
@@ -280,11 +373,23 @@ void Renderer::renderLines(const Camera& camera, HrtfSharedState* state, float a
 }
 
 void Renderer::renderSpatialObjects(const Camera& camera, HrtfSharedState* state, float aspect) {
+    (void)camera;
+    (void)aspect;
     if (!state) return;
 
     int numObj = atomic_load(&state->num_objects);
     if (numObj <= 0) return;
     if (numObj > HRTF_MAX_OBJECTS) numObj = HRTF_MAX_OBJECTS;
+    int numCh = atomic_load(&state->num_channels);
+    if (numCh < 0) numCh = 0;
+    if (numCh > HRTF_MAX_CHANNELS) numCh = HRTF_MAX_CHANNELS;
+
+    for (int i = numObj; i < (int)m_objectLevelSmooth.size(); i++)
+        m_objectLevelSmooth[i] *= 0.9f;
+
+    m_objectPulsePhase += 0.22f;
+    if (m_objectPulsePhase > 10000.0f)
+        m_objectPulsePhase -= 10000.0f;
 
     // Read room dimensions for coordinate conversion
     float room_w = atomic_load(&state->room_width);
@@ -296,6 +401,11 @@ void Renderer::renderSpatialObjects(const Camera& camera, HrtfSharedState* state
 
     // Solid shader is already bound by render()
     for (int i = 0; i < numObj; i++) {
+        if (!atomic_load(&state->object_active[i])) {
+            m_objectLevelSmooth[i] *= 0.85f;
+            continue;
+        }
+
         float ox = atomic_load(&state->object_x[i]);  // 0=L, 1=R
         float oy = atomic_load(&state->object_y[i]);  // 0=front, 1=back
         float oz = atomic_load(&state->object_z[i]);   // -1=floor, 1=ceiling
@@ -307,11 +417,20 @@ void Renderer::renderSpatialObjects(const Camera& camera, HrtfSharedState* state
 
         glm::vec3 worldPos(rx, ry, rz);
 
-        // Object color: cyan for spatial dynamic objects
-        glm::vec4 color(0.0f, 0.9f, 0.9f, 1.0f);
+        // Audio-driven size + heatmap color (vibration + intensity map).
+        float rawLevel = getSpatialObjectLevel(state, i, numCh);
+        float prev = m_objectLevelSmooth[i];
+        float alpha = (rawLevel > prev) ? 0.4f : 0.08f; // fast attack, slower release
+        float level = prev + (rawLevel - prev) * alpha;
+        m_objectLevelSmooth[i] = level;
+        if (level < 0.015f)
+            continue;
 
-        // Small sphere for each object
-        float radius = 0.12f;
+        float vibrate = 1.0f + sinf(m_objectPulsePhase * 4.0f + i * 0.9f) * (0.18f * level);
+        float radius = (0.1f + level * 0.11f) * vibrate;
+        radius = std::clamp(radius, 0.08f, 0.26f);
+        glm::vec4 color = getSpatialObjectColor(level);
+
         glm::mat4 model = glm::translate(glm::mat4(1.0f), worldPos);
         model = glm::scale(model, glm::vec3(radius));
         glm::mat3 normalMat = glm::transpose(glm::inverse(glm::mat3(model)));

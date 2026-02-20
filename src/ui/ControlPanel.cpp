@@ -400,6 +400,7 @@ void ControlPanel::render() {
         for (int i = 0; i < numCh && i < 12; i++)
             m_state->speaker_pos[i] = room.positions[i];
         atomic_store(&m_state->num_channels, numCh);
+        atomic_store(&m_state->num_bed_channels, numCh);
         atomic_store(&m_state->speaker_pos_changed, 1);
     }
 
@@ -490,6 +491,9 @@ void ControlPanel::render() {
     // Speaker list with editable positions
     ImGui::Text("Speakers:");
     int numCh = atomic_load(&m_state->num_channels);
+    int bedCount = atomic_load(&m_state->num_bed_channels);
+    if (bedCount < 0 || bedCount > numCh)
+        bedCount = (numCh > 8) ? 8 : numCh;
 
     for (int i = 0; i < numCh && i < HRTF_MAX_CHANNELS; i++) {
         ImGui::PushID(i);
@@ -512,11 +516,12 @@ void ControlPanel::render() {
         if (isSelected)
             ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
-        const char* spkName = (i < 12) ? speakerNames[i]
-                                        : (i < 8) ? "Unknown" : "Object";
+        bool isObjectChannel = i >= bedCount;
+        const char* spkName = (i < 12 && !isObjectChannel) ? speakerNames[i]
+                                                            : (isObjectChannel ? "Object" : "Unknown");
         char spkLabel[64];
-        if (i >= 8)
-            snprintf(spkLabel, sizeof(spkLabel), "Object %d (ch %d)", i - 8, i);
+        if (isObjectChannel)
+            snprintf(spkLabel, sizeof(spkLabel), "Object %d (ch %d)", i - bedCount, i);
         else
             snprintf(spkLabel, sizeof(spkLabel), "%s", spkName);
         if (ImGui::TreeNode(spkLabel)) {
@@ -577,19 +582,30 @@ void ControlPanel::render() {
     // --- Debug section ---
     if (ImGui::CollapsingHeader("Debug")) {
         int numChNow = atomic_load(&m_state->num_channels);
+        int bedCountNow = atomic_load(&m_state->num_bed_channels);
+        if (bedCountNow < 0 || bedCountNow > numChNow)
+            bedCountNow = (numChNow > 8) ? 8 : numChNow;
 
         bool muteBed = atomic_load(&m_state->mute_bed) != 0;
         bool muteObj = atomic_load(&m_state->mute_objects) != 0;
 
-        if (ImGui::Checkbox("Mute Bed (ch 0-7)", &muteBed))
+        char muteBedLabel[64];
+        char muteObjLabel[64];
+        snprintf(muteBedLabel, sizeof(muteBedLabel), "Mute Bed (ch 0-%d)",
+                 bedCountNow > 0 ? bedCountNow - 1 : 0);
+        snprintf(muteObjLabel, sizeof(muteObjLabel), "Mute Objects (ch %d+)",
+                 bedCountNow);
+
+        if (ImGui::Checkbox(muteBedLabel, &muteBed))
             atomic_store(&m_state->mute_bed, muteBed ? 1 : 0);
 
-        if (ImGui::Checkbox("Mute Objects (ch 8+)", &muteObj))
+        if (ImGui::Checkbox(muteObjLabel, &muteObj))
             atomic_store(&m_state->mute_objects, muteObj ? 1 : 0);
 
-        if (numChNow > 8) {
+        if (numChNow > bedCountNow) {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
-                "Spatial: %d bed + %d object channels", 8, numChNow - 8);
+                "Spatial: %d bed + %d object channels",
+                bedCountNow, numChNow - bedCountNow);
         } else {
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
                 "Standard: %d channels (no objects)", numChNow);
@@ -600,10 +616,11 @@ void ControlPanel::render() {
             for (int i = 0; i < numChNow && i < HRTF_MAX_CHANNELS; i++) {
                 float rms = atomic_load(&m_state->channel_rms[i]);
                 float peak = atomic_load(&m_state->channel_peak[i]);
-                const char* label = (i < 12) ? speakerNames[i] : "Object";
+                bool isObj = i >= bedCountNow;
+                const char* label = (i < 12 && !isObj) ? speakerNames[i] : "Object";
                 char buf[64];
-                if (i >= 8)
-                    snprintf(buf, sizeof(buf), "Obj %d", i - 8);
+                if (isObj)
+                    snprintf(buf, sizeof(buf), "Obj %d", i - bedCountNow);
                 else
                     snprintf(buf, sizeof(buf), "%s", label);
                 ImGui::Text("%-20s RMS: %.4f  Peak: %.4f", buf, rms, peak);
@@ -620,6 +637,7 @@ void ControlPanel::render() {
         m_selectedRoom = 1; // Home Theater
         const RoomPreset& room = roomPresets[m_selectedRoom];
         atomic_store(&m_state->num_channels, 12);
+        atomic_store(&m_state->num_bed_channels, 12);
         for (int i = 0; i < 12; i++)
             m_state->speaker_pos[i] = room.positions[i];
         atomic_store(&m_state->speaker_pos_changed, 1);
@@ -751,10 +769,16 @@ void ControlPanel::updateObjectPositions() {
     if (numObj > 128) numObj = 128;
 
     atomic_store(&m_state->num_objects, (int32_t)numObj);
-    for (int i = 0; i < numObj; i++) {
-        atomic_store(&m_state->object_x[i], frame.objects[i].x);
-        atomic_store(&m_state->object_y[i], frame.objects[i].y);
-        atomic_store(&m_state->object_z[i], frame.objects[i].z);
+    for (int i = 0; i < HRTF_MAX_OBJECTS; i++) {
+        if (i < numObj) {
+            atomic_store(&m_state->object_x[i], frame.objects[i].x);
+            atomic_store(&m_state->object_y[i], frame.objects[i].y);
+            atomic_store(&m_state->object_z[i], frame.objects[i].z);
+            atomic_store(&m_state->object_active[i], 1);
+        } else {
+            atomic_store(&m_state->object_active[i], 0);
+        }
+        atomic_store(&m_state->object_gain[i], 0.0f);
     }
     atomic_store(&m_state->objects_changed, 1);
 }

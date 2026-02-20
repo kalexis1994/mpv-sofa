@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 
 // Generate a small WAV file with silence (used to pump audio frames for test tones)
 static bool createSilenceWav(const char* path) {
@@ -86,8 +87,11 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     }
     fprintf(stderr, "[MpvPlayer] mpv_create() OK\n");
 
-    // Enable mpv's own logging to stderr
-    mpv_request_log_messages(m_mpv, "v");
+    // Keep runtime logging lightweight by default to avoid I/O-induced jitter.
+    // Set HRTF_DEBUG_LOGS=1 to re-enable verbose mpv logging + file log.
+    const char* dbg = std::getenv("HRTF_DEBUG_LOGS");
+    m_verboseMpvLogs = dbg && dbg[0] && strcmp(dbg, "0") != 0;
+    mpv_request_log_messages(m_mpv, m_verboseMpvLogs ? "v" : "warn");
 
     // Configure mpv for embedded use
     mpv_set_option_string(m_mpv, "vo", "libmpv");
@@ -99,8 +103,10 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     // everything into the 7.1 bed.
     mpv_set_option_string(m_mpv, "ad-lavc-o", "extract_objects=1");
 
-    // Log mpv messages to file for decoder debug analysis
-    mpv_set_option_string(m_mpv, "log-file", "mpv_debug.log");
+    if (m_verboseMpvLogs) {
+        // Log mpv messages to file for decoder debug analysis
+        mpv_set_option_string(m_mpv, "log-file", "mpv_debug.log");
+    }
 
     // Enable our HRTF audio filter
     // Pass the shared state pointer so the filter can communicate with the UI

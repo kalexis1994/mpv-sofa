@@ -28,6 +28,7 @@ typedef struct {
 typedef struct HrtfSharedState {
     // --- Written by audio filter, read by UI ---
     HRTF_ATOMIC(int32_t)  num_channels;
+    HRTF_ATOMIC(int32_t)  num_bed_channels;                     // real bed channels (objects start after this)
     HRTF_ATOMIC(float)    channel_rms[HRTF_MAX_CHANNELS];      // per-channel RMS level
     HRTF_ATOMIC(float)    channel_peak[HRTF_MAX_CHANNELS];      // per-channel peak level
     HRTF_ATOMIC(int64_t)  frame_counter;                         // monotonic frame counter
@@ -40,6 +41,8 @@ typedef struct HrtfSharedState {
     HRTF_ATOMIC(float)    object_x[HRTF_MAX_OBJECTS];   // X: 0=L, 1=R
     HRTF_ATOMIC(float)    object_y[HRTF_MAX_OBJECTS];   // Y: 0=front, 1=back
     HRTF_ATOMIC(float)    object_z[HRTF_MAX_OBJECTS];   // Z: -1=floor, 1=ceiling
+    HRTF_ATOMIC(float)    object_gain[HRTF_MAX_OBJECTS]; // linear gain hint from metadata (0..1)
+    HRTF_ATOMIC(int32_t)  object_active[HRTF_MAX_OBJECTS]; // 1 if object slot is active in current frame
     HRTF_ATOMIC(int32_t)  objects_changed;               // set by host app, cleared by filter
 
     // --- Written by UI, read by audio filter ---

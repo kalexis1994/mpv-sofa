@@ -10,6 +10,7 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     atomic_store(&s->master_volume, 1.0f);
     atomic_store(&s->hrtf_enabled, 1);
     atomic_store(&s->active, 0);
+    atomic_store(&s->num_bed_channels, 12);
 
     // Test tone: inactive by default
     atomic_store(&s->test_tone_channel, -1);
@@ -50,4 +51,5 @@ void hrtf_shared_state_init_714(HrtfSharedState* state) {
     state->speaker_pos[11] = (HrtfPosition){-135.0f, 45.0f, dist};  // TBR
 
     atomic_store(&state->num_channels, 12);
+    atomic_store(&state->num_bed_channels, 12);
 }

@@ -95,5 +95,6 @@ private:
     double m_subDelay = 0.0;
     bool m_testToneWasPaused = false;
     bool m_testToneSilenceSource = false;
+    bool m_verboseMpvLogs = false;
     std::string m_silencePath;
 };
