@@ -1080,15 +1080,12 @@ static void update_object_positions_from_objmeta(struct priv *p) {
     if (num_bed > num_obj)
         num_bed = num_obj;
 
-    /* Lossless HD path currently exposes speaker feeds (bed + height),
-     * not guaranteed one-channel-per-object stems. In that mode we keep
-     * metadata for visualization but avoid remapping audio channels as
-     * if they were discrete objects. */
+    /* Enable audio object mapping for lossless HD (TrueHD Atmos).
+     * With the fixed extract_objects decoder (seed advancement fix,
+     * AU boundary crossfade), the height/object channels now contain
+     * clean rematrix output that can be spatialized at their real
+     * OAMD positions. */
     int allow_audio_object_mapping = 1;
-    if (p->num_channels > 8 && g_spatial_coeff_ptr &&
-        g_spatial_coeff_ptr->bed_mask) {
-        allow_audio_object_mapping = 0;
-    }
 
     float room_w = 6.5f, room_d = 5.0f, room_h = 2.7f;
     if (p->shared) {
