@@ -1,0 +1,18 @@
+{
+  "name": "halosound-server",
+  "version": "1.0.0",
+  "description": "HaloSound companion server - serves video and multichannel audio to webOS TV app",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js --verbose"
+  },
+  "bin": {
+    "halosound-server": "src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "fluent-ffmpeg": "^2.1.3"
+  }
+}

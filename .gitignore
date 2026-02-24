@@ -86,3 +86,17 @@ copy_deps.bat
 !ffmpeg-patches/
 !ffmpeg-patches/**
 /tmp
+
+# HaloSound
+halosound/dsp/build_wasm*/
+halosound/emsdk/
+halosound/server/node_modules/
+halosound/diag/*.pcm
+halosound/diag/*.wav
+halosound/diag/*.png
+halosound/app/assets/hrtf/*.sofa
+halosound/app/wasm/*.wasm
+
+# Other working dirs
+mlp-repo/
+truehdd/

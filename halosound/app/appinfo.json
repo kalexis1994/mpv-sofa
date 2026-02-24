@@ -1,0 +1,12 @@
+{
+  "id": "com.halosound.app",
+  "version": "1.0.0",
+  "vendor": "HaloSound",
+  "type": "web",
+  "main": "index.html",
+  "title": "HaloSound",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "requiredPermissions": ["all"],
+  "resolution": "1920x1080"
+}

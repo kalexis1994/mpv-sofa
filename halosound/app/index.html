@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=1920, height=1080">
+    <title>HaloSound</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <!-- Connection screen -->
+    <div id="screen-connect" class="screen active">
+        <div class="logo">HaloSound</div>
+        <div class="subtitle">Spatial Audio for Your TV</div>
+        <div id="connection-status">Enter server IP address</div>
+        <div class="input-group">
+            <label>Server IP:</label>
+            <input type="text" id="server-ip" value="192.168.1.100" />
+            <span id="server-port">:8080</span>
+        </div>
+        <button id="btn-connect" class="btn focused">Connect</button>
+    </div>
+
+    <!-- File browser screen -->
+    <div id="screen-browser" class="screen">
+        <div class="header">
+            <span class="title">HaloSound</span>
+            <span id="server-info"></span>
+            <button id="btn-settings" class="btn-icon">Settings</button>
+        </div>
+        <div id="file-list" class="file-list"></div>
+    </div>
+
+    <!-- Track selection screen -->
+    <div id="screen-tracks" class="screen">
+        <div class="header">
+            <span class="title">Select Tracks</span>
+            <button id="btn-back-tracks" class="btn-icon">Back</button>
+        </div>
+        <div class="tracks-container">
+            <div class="tracks-column">
+                <h3>Audio</h3>
+                <div id="track-list-audio" class="track-list"></div>
+            </div>
+            <div class="tracks-column">
+                <h3>Subtitles</h3>
+                <div id="track-list-subs" class="track-list"></div>
+            </div>
+        </div>
+        <div class="tracks-footer">
+            <button id="btn-play-tracks" class="btn">Play</button>
+        </div>
+    </div>
+
+    <!-- Player screen -->
+    <div id="screen-player" class="screen">
+        <video id="video-player" muted></video>
+        <div id="player-overlay" class="player-overlay">
+            <div id="player-title" class="player-title"></div>
+            <div id="transport-bar" class="transport-bar">
+                <span id="time-current">0:00</span>
+                <div id="progress-bar" class="progress-bar">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <span id="time-total">0:00</span>
+            </div>
+            <div id="audio-status" class="audio-status">
+                <span id="audio-info"></span>
+                <span id="hrtf-status">HRTF: Loading...</span>
+            </div>
+        </div>
+        <div id="debug-mutes" class="debug-mutes">
+            <label><input type="checkbox" id="mute-bed"> Mute Bed (ch 0-7: FL FR FC LFE BL BR SL SR)</label>
+            <label><input type="checkbox" id="mute-height"> Mute Objects (ch 8-15: Atmos spatial objects)</label>
+        </div>
+        <canvas id="visualizer" width="300" height="150"></canvas>
+    </div>
+
+    <!-- Settings screen -->
+    <div id="screen-settings" class="screen">
+        <div class="header">
+            <span class="title">Settings</span>
+            <button id="btn-back-settings" class="btn-icon">Back</button>
+        </div>
+        <div class="settings-panel">
+            <div class="setting-group">
+                <h3>Output Mode</h3>
+                <div class="toggle-group" id="setting-output-mode">
+                    <button class="toggle-btn active" data-value="headphones">Headphones</button>
+                    <button class="toggle-btn" data-value="speakers">Speakers</button>
+                </div>
+                <div class="setting-hint" id="hint-output-mode">HRTF binaural virtualization active</div>
+            </div>
+            <div class="setting-group">
+                <h3>Audio Track</h3>
+                <div class="setting-info" id="setting-track-info">No file loaded</div>
+                <div class="setting-hint" id="hint-layout">Speaker layout auto-detected from audio track</div>
+            </div>
+            <div class="setting-group" id="group-room">
+                <h3>Room Simulation</h3>
+                <select id="setting-room">
+                    <option value="0">Studio</option>
+                    <option value="1" selected>Home Theater</option>
+                    <option value="2">Cinema</option>
+                    <option value="3">Concert Hall</option>
+                </select>
+            </div>
+            <div class="setting-group" id="group-reverb">
+                <h3>Reverb</h3>
+                <label>Wet Mix: <input type="range" id="setting-reverb-wet" min="0" max="100" value="7"></label>
+                <label>Decay: <input type="range" id="setting-reverb-decay" min="0" max="100" value="45"></label>
+            </div>
+            <div class="setting-group">
+                <h3>Master Volume</h3>
+                <input type="range" id="setting-volume" min="0" max="100" value="80">
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/connection.js"></script>
+    <script src="js/audio-engine.js"></script>
+    <!-- hrtf-worklet.js is loaded as AudioWorklet module, not a main-thread script -->
+    <script src="js/player.js"></script>
+    <script src="js/file-browser.js"></script>
+    <script src="js/ui-controller.js"></script>
+    <script src="js/track-selector.js"></script>
+    <script src="js/settings.js"></script>
+    <script src="js/visualizer.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
