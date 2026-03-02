@@ -20,7 +20,7 @@ static FILE *hrtf_dbg = NULL;
 static int hrtf_dbg_count = 0;
 /* Debug logging DISABLED for real-time playback to avoid I/O-induced
  * audio glitches.  Set HRTF_ENABLE_DBG=1 to re-enable at compile time. */
-#define HRTF_ENABLE_DBG 0
+#define HRTF_ENABLE_DBG 1
 #define HRTF_DBG(...) do { \
     if (HRTF_ENABLE_DBG) { \
         if (!hrtf_dbg) hrtf_dbg = fopen("hrtf_debug.txt", "w"); \
@@ -2263,6 +2263,14 @@ static void af_hrtf_process(struct mp_filter *f) {
              * channels after the bed for HRTF spatialization. */
             int proc_channels = in_channels;
             int joc_objects = objcoding_reconstruct_objects(p, accum_ptrs, in_channels);
+            {
+                static int joc_diag = 0;
+                if (joc_diag < 10) {
+                    HRTF_DBG("JOC_DIAG[%d]: g_objcoding_data_ptr=%p joc_objects=%d in_channels=%d active=%d\n",
+                             joc_diag, (void*)g_objcoding_data_ptr, joc_objects, in_channels, p->objcoding_active);
+                    joc_diag++;
+                }
+            }
             if (joc_objects > 0) {
                 for (int i = 0; i < joc_objects && (in_channels + i) < HRTF_MAX_CHANNELS; i++)
                     accum_ptrs[in_channels + i] = p->objcoding_obj_buf[i];
