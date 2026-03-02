@@ -78,10 +78,36 @@ typedef struct {
     _Atomic int updated;
 } ObjCodingMixData;
 
+/* -----------------------------------------------------------------------
+ * Pre-rematrix residual audio export — decoded residual channels from
+ * TrueHD Atmos substream 3, BEFORE the interpolating rematrix is applied.
+ * These contain the "pure" object/height audio without bed contamination
+ * or rematrix coefficient discontinuities.
+ *
+ * Lock-free SPSC ring buffer: decoder writes, HRTF filter reads.
+ * Each residual channel corresponds to a thd_channel_order index that
+ * is NOT in the bed mask (typically TFL=index 6, TFR=index 7).
+ * ----------------------------------------------------------------------- */
+
+#define SPATIAL_RESIDUAL_MAX_CH   4     /* max residual channels (typically 2: TFL/TFR) */
+#define SPATIAL_RESIDUAL_BUF_SIZE 2048  /* ring buffer size (power of 2, ~42ms at 48kHz) */
+#define SPATIAL_RESIDUAL_BUF_MASK (SPATIAL_RESIDUAL_BUF_SIZE - 1)
+
+typedef struct {
+    /* Ring buffer: float samples, interleaved per residual channel */
+    float buf[SPATIAL_RESIDUAL_MAX_CH][SPATIAL_RESIDUAL_BUF_SIZE];
+    _Atomic uint32_t write_pos;           /* next write position (mod BUF_SIZE) */
+    _Atomic uint32_t read_pos;            /* next read position (mod BUF_SIZE) */
+    int     num_channels;                 /* number of residual channels (typically 2) */
+    int     output_shift;                 /* right-shift applied during int32→float conversion */
+    _Atomic int ready;                    /* set to 1 once first write happens */
+} SpatialResidualBuf;
+
 /* Plain extern for use within avcodec. External consumers (mpv) should
  * declare with __declspec(dllimport) on Windows. */
 extern SpatialExtCoeff    g_spatial_ext_coeff;
 extern SpatialExtObjMeta  g_spatial_ext_objmeta;
 extern ObjCodingMixData   g_objcoding_data;
+extern SpatialResidualBuf g_spatial_residual;
 
 #endif /* AVCODEC_SPATIAL_EXT_COEFF_H */
