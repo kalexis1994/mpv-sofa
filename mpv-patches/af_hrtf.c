@@ -20,7 +20,7 @@ static FILE *hrtf_dbg = NULL;
 static int hrtf_dbg_count = 0;
 /* Debug logging DISABLED for real-time playback to avoid I/O-induced
  * audio glitches.  Set HRTF_ENABLE_DBG=1 to re-enable at compile time. */
-#define HRTF_ENABLE_DBG 1
+#define HRTF_ENABLE_DBG 0
 #define HRTF_DBG(...) do { \
     if (HRTF_ENABLE_DBG) { \
         if (!hrtf_dbg) hrtf_dbg = fopen("hrtf_debug.txt", "w"); \
@@ -50,7 +50,6 @@ static int hrtf_dbg_count = 0;
 static SpatialExtCoeff *g_spatial_coeff_ptr = NULL;
 static SpatialExtObjMeta *g_spatial_objmeta_ptr = NULL;
 static ObjCodingMixData *g_objcoding_data_ptr = NULL;
-static SpatialResidualBuf *g_spatial_residual_ptr = NULL;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -58,7 +57,8 @@ static SpatialResidualBuf *g_spatial_residual_ptr = NULL;
 
 #define HRTF_BLOCK_SIZE      256
 #define HRTF_MAX_HRIR_LEN    768   // Must accommodate actual HRIR (e.g. 558 samples)
-#define HRTF_MAX_CHANNELS    16
+#define HRTF_SS_MAX_CHANNELS 16   // SharedState array size — must match host app
+#define HRTF_MAX_CHANNELS    32   // internal max (bed + JOC objects)
 #define HRTF_FFT_SIZE        (HRTF_BLOCK_SIZE + HRTF_MAX_HRIR_LEN - 1)
 // Round up to next power of 2 for FFT (must be >= HRTF_FFT_SIZE)
 #define HRTF_FFT_N           1024
@@ -103,8 +103,8 @@ typedef struct {
     // Written by audio filter, read by UI
     _Atomic int32_t  num_channels;
     _Atomic int32_t  num_bed_channels;
-    _Atomic float    channel_rms[HRTF_MAX_CHANNELS];
-    _Atomic float    channel_peak[HRTF_MAX_CHANNELS];
+    _Atomic float    channel_rms[HRTF_SS_MAX_CHANNELS];
+    _Atomic float    channel_peak[HRTF_SS_MAX_CHANNELS];
     _Atomic int64_t  frame_counter;
     _Atomic double   current_pts;
     _Atomic int32_t  sample_rate;
@@ -119,7 +119,7 @@ typedef struct {
     _Atomic int32_t  objects_changed;
 
     // Written by UI, read by audio filter
-    HrtfSpeakerPos   speaker_pos[HRTF_MAX_CHANNELS];
+    HrtfSpeakerPos   speaker_pos[HRTF_SS_MAX_CHANNELS];
     _Atomic int32_t  speaker_pos_changed;
 
     char             sofa_path[512];
@@ -339,7 +339,14 @@ struct priv {
     int objcoding_ts_offset;                         // timeslot offset within current DD+ frame
     float objcoding_norm_scale;                      // smoothed energy normalization scale factor
 
+    // JOC object HRTF positioning state
+    float joc_smooth_az[OBJCODING_MAX_OBJECTS];      // smoothed azimuth per JOC object
+    float joc_smooth_el[OBJCODING_MAX_OBJECTS];      // smoothed elevation per JOC object
+    float joc_smooth_dist[OBJCODING_MAX_OBJECTS];    // smoothed distance per JOC object
+    int   joc_smooth_valid;                          // 1 after first position update
+
 };
+
 
 // ---------------------------------------------------------------------------
 // Convolver functions
@@ -1065,7 +1072,7 @@ static void update_object_positions_from_coefficients(struct priv *p) {
             p->num_bed_channels = bed_count;
             p->last_bed_mask = mask;
             if (p->shared) {
-                for (int ch = 0; ch < p->num_channels && ch < HRTF_MAX_CHANNELS; ch++)
+                for (int ch = 0; ch < p->num_channels && ch < HRTF_SS_MAX_CHANNELS; ch++)
                     p->shared->speaker_pos[ch] = p->speaker_pos[ch];
             }
             if (p->sofa) {
@@ -1252,7 +1259,67 @@ static void update_object_positions_from_objmeta(struct priv *p) {
         wg_R += gain * w_R;
     }
 
-    /* --- Phase 2: Convert centroid to az/el/dist per height channel --- */
+    /* --- Phase 2a: DD+ JOC direct object positioning --- */
+    /* When JOC is active, each reconstructed object gets its own HRTF at
+     * its exact OAMD position.  Object channels start at index
+     * num_bed_channels (i.e., 6 for 5.1). */
+    if (p->objcoding_active && p->objcoding_num_objects > 0 && p->sofa) {
+        const float JOC_SMOOTH = 0.80f;
+        int bed_ch = p->num_bed_channels > 0 ? p->num_bed_channels : 6;
+
+        for (int i = num_bed; i < num_obj && i < SPATIAL_EXT_MAX_OBJECTS; i++) {
+            SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[i];
+            int obj_idx = i - num_bed;  /* 0-based object index */
+            int ch = bed_ch + obj_idx;  /* channel in HRTF arrays */
+
+            if (ch >= HRTF_MAX_CHANNELS || obj_idx >= OBJCODING_MAX_OBJECTS)
+                break;
+            if (!obj->active)
+                continue;
+
+            /* DAMF → room-relative cartesian */
+            float rx = obj->x * room_w * 0.5f;
+            float ry = obj->y * room_d * 0.5f;
+            float rz = obj->z * room_h * 0.5f;
+
+            float dist = sqrtf(rx * rx + ry * ry + rz * rz);
+            if (dist < 0.3f) dist = 0.3f;
+
+            float new_az = atan2f(-rx, -ry) * (180.0f / (float)M_PI);
+            float new_el = asinf(fminf(1.0f, fmaxf(-1.0f, rz / dist)))
+                            * (180.0f / (float)M_PI);
+
+            /* Exponential smoothing */
+            if (p->joc_smooth_valid) {
+                p->joc_smooth_az[obj_idx]   = JOC_SMOOTH * p->joc_smooth_az[obj_idx]
+                                             + (1.0f - JOC_SMOOTH) * new_az;
+                p->joc_smooth_el[obj_idx]   = JOC_SMOOTH * p->joc_smooth_el[obj_idx]
+                                             + (1.0f - JOC_SMOOTH) * new_el;
+                p->joc_smooth_dist[obj_idx] = JOC_SMOOTH * p->joc_smooth_dist[obj_idx]
+                                             + (1.0f - JOC_SMOOTH) * dist;
+            } else {
+                p->joc_smooth_az[obj_idx]   = new_az;
+                p->joc_smooth_el[obj_idx]   = new_el;
+                p->joc_smooth_dist[obj_idx] = dist;
+            }
+
+            float faz  = p->joc_smooth_az[obj_idx];
+            float fel  = p->joc_smooth_el[obj_idx];
+            float fdst = p->joc_smooth_dist[obj_idx];
+
+            /* Only reload HRIR if position changed enough */
+            float daz = fabsf(faz - p->speaker_pos[ch].azimuth);
+            float del = fabsf(fel - p->speaker_pos[ch].elevation);
+            if (daz > 2.0f || del > 2.0f) {
+                p->speaker_pos[ch] = (HrtfSpeakerPos){faz, fel, fdst};
+                update_channel_hrir(p, ch);
+            }
+        }
+        p->joc_smooth_valid = 1;
+        goto shared_state_done;
+    }
+
+    /* --- Phase 2b: TrueHD centroid positioning for height channels --- */
 
     if (p->num_height_channels <= 0 || !p->sofa)
         goto shared_state_done;
@@ -1451,11 +1518,6 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
             else
                 HRTF_DBG("init_hrtf: GetProcAddress failed for g_objcoding_data\n");
 
-            g_spatial_residual_ptr = (SpatialResidualBuf *)GetProcAddress(hAvcodec, "g_spatial_residual");
-            if (g_spatial_residual_ptr)
-                HRTF_DBG("init_hrtf: resolved g_spatial_residual from avcodec-62.dll\n");
-            else
-                HRTF_DBG("init_hrtf: GetProcAddress failed for g_spatial_residual\n");
         } else {
             HRTF_DBG("init_hrtf: avcodec-62.dll not loaded\n");
         }
@@ -1536,6 +1598,10 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
         }
         p->speaker_pos[ch] = (HrtfSpeakerPos){0, 0, 2.0f};
     }
+    p->joc_smooth_valid = 0;
+    memset(p->joc_smooth_az, 0, sizeof(p->joc_smooth_az));
+    memset(p->joc_smooth_el, 0, sizeof(p->joc_smooth_el));
+    memset(p->joc_smooth_dist, 0, sizeof(p->joc_smooth_dist));
     HRTF_DBG("init_hrtf: object coding reconstruction state initialized, g_objcoding_data_ptr=%p\n",
               (void*)g_objcoding_data_ptr);
 
@@ -1606,14 +1672,21 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     // Height channel scaling is now handled in the decoder via output_shift.
     // Each AU applies its own bed_shift, avoiding timing mismatches.
 
-    /* Height channels carry full rematrixed speaker feeds (bed + residuals
-     * combined by the decoder's interpolating rematrix).  Dynamic HRTF
-     * positioning from OAMD metadata is applied per-channel above. */
+    /* When JOC objects are active, the reconstructed objects already contain
+     * all the audio from the 5.1 bed (extracted via mixing matrix inversion).
+     * Processing both bed AND objects would double the audio with different
+     * HRTF phases, causing comb filtering ("robotic" sound).
+     * Solution: skip bed channels (except LFE=ch3) when JOC is active. */
+    int joc_replaces_bed = (p->objcoding_active && p->objcoding_num_objects > 0
+                            && num_ch > bed_count);
 
     for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
         // Skip muted channel groups
         if (mute_bed && ch < bed_count) continue;
         if (mute_obj && ch >= bed_count) continue;
+
+        // When JOC objects replace bed, skip bed channels (keep LFE=3)
+        if (joc_replaces_bed && ch < bed_count && ch != 3) continue;
 
         HrtfChannelPair *pair = &p->channels[ch];
         int active = pair->active_idx;
@@ -1655,6 +1728,33 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
                 float s = channel_data[ch][i] * 0.5f;
                 out_l[i] += s;
                 out_r[i] += s;
+            }
+            continue;
+        }
+
+        /* TrueHD height channels: mix as direct stereo instead of HRTF.
+         * Height channels contain bed+object audio from the rematrix.
+         * Running them through HRTF at a different position than the bed
+         * creates comb filtering ("robotic" sound) because the bed
+         * component gets convolved with two different HRIRs.
+         *
+         * Instead: pan TFL→left, TFR→right with a height-appropriate
+         * gain, adding a subtle stereo width cue from the elevation. */
+        int is_height = 0;
+        for (int h = 0; h < p->num_height_channels; h++) {
+            if (p->height_ch_idx[h] == ch) { is_height = 1; break; }
+        }
+        if (is_height && !p->objcoding_active) {
+            float az = p->speaker_pos[ch].azimuth;
+            /* Simple pan: az>0 = left-biased, az<0 = right-biased */
+            float pan = 0.5f + az / 180.0f;  /* 0..1, 0.5=center */
+            if (pan < 0.0f) pan = 0.0f;
+            if (pan > 1.0f) pan = 1.0f;
+            float gain_l = pan * 0.5f;       /* attenuated to avoid excess energy */
+            float gain_r = (1.0f - pan) * 0.5f;
+            for (int i = 0; i < num_samples; i++) {
+                out_l[i] += channel_data[ch][i] * gain_l;
+                out_r[i] += channel_data[ch][i] * gain_r;
             }
             continue;
         }
@@ -1709,6 +1809,7 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
             if (mute_bed && ch < bed_count) continue;
             if (mute_obj && ch >= bed_count) continue;
+            if (joc_replaces_bed && ch < bed_count && ch != 3) continue;
             active_ch++;
         }
         if (active_ch < 6) active_ch = 6;
@@ -1949,7 +2050,7 @@ static void af_hrtf_process(struct mp_filter *f) {
         // Sync speaker positions to shared state so the UI visualizer
         // shows the correct layout (including height channels for 7.1.4)
         if (p->shared) {
-            for (int ch = 0; ch < in_channels && ch < HRTF_MAX_CHANNELS; ch++)
+            for (int ch = 0; ch < in_channels && ch < HRTF_SS_MAX_CHANNELS; ch++)
                 p->shared->speaker_pos[ch] = p->speaker_pos[ch];
         }
 
@@ -1992,7 +2093,7 @@ static void af_hrtf_process(struct mp_filter *f) {
 
         if (atomic_load_explicit(&p->shared->speaker_pos_changed,
                                   memory_order_relaxed)) {
-            for (int ch = 0; ch < p->num_channels && ch < HRTF_MAX_CHANNELS; ch++) {
+            for (int ch = 0; ch < p->num_channels && ch < HRTF_SS_MAX_CHANNELS; ch++) {
                 p->speaker_pos[ch] = p->shared->speaker_pos[ch];
                 update_channel_hrir(p, ch);
             }
@@ -2129,7 +2230,7 @@ static void af_hrtf_process(struct mp_filter *f) {
         // Write per-channel RMS/peak levels for UI meters
         uint8_t **rms_data = mp_aframe_get_data_ro(in);
         if (rms_data) {
-            for (int ch = 0; ch < in_channels && ch < HRTF_MAX_CHANNELS; ch++) {
+            for (int ch = 0; ch < in_channels && ch < HRTF_SS_MAX_CHANNELS; ch++) {
                 float sum_sq = 0, peak = 0;
                 float *ch_data = (float*)rms_data[ch];
                 for (int i = 0; i < in_samples; i++) {
@@ -2263,14 +2364,6 @@ static void af_hrtf_process(struct mp_filter *f) {
              * channels after the bed for HRTF spatialization. */
             int proc_channels = in_channels;
             int joc_objects = objcoding_reconstruct_objects(p, accum_ptrs, in_channels);
-            {
-                static int joc_diag = 0;
-                if (joc_diag < 10) {
-                    HRTF_DBG("JOC_DIAG[%d]: g_objcoding_data_ptr=%p joc_objects=%d in_channels=%d active=%d\n",
-                             joc_diag, (void*)g_objcoding_data_ptr, joc_objects, in_channels, p->objcoding_active);
-                    joc_diag++;
-                }
-            }
             if (joc_objects > 0) {
                 for (int i = 0; i < joc_objects && (in_channels + i) < HRTF_MAX_CHANNELS; i++)
                     accum_ptrs[in_channels + i] = p->objcoding_obj_buf[i];
@@ -2364,7 +2457,7 @@ static void af_hrtf_process(struct mp_filter *f) {
             }
 
             HrtfSpeakerPos tpos = {0.0f, 0.0f, 2.0f};
-            if (p->test_tone_ch >= 0 && p->test_tone_ch < HRTF_MAX_CHANNELS)
+            if (p->test_tone_ch >= 0 && p->test_tone_ch < HRTF_SS_MAX_CHANNELS)
                 tpos = p->shared->speaker_pos[p->test_tone_ch];
 
             float *hl = calloc(p->hrir_length, sizeof(float));
