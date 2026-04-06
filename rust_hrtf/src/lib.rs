@@ -99,6 +99,10 @@ pub struct ThdDecoder {
     /// Buffered decoded frames (bed + atmos paired)
     pending_bed: Vec<DecodedAccessUnit>,
     pending_atmos: Vec<DecodedAccessUnit>,
+    /// Persistent object positions (OAMD doesn't come every frame)
+    last_obj_pos: [ThdObjectPos; MAX_OBJECTS],
+    last_obj_count: usize,
+    last_ramp_duration: i32,
 }
 
 impl ThdDecoder {
@@ -111,6 +115,9 @@ impl ThdDecoder {
             is_atmos: false,
             pending_bed: Vec::new(),
             pending_atmos: Vec::new(),
+            last_obj_pos: [ThdObjectPos::default(); MAX_OBJECTS],
+            last_obj_count: 0,
+            last_ramp_duration: 0,
         }
     }
 
@@ -121,8 +128,9 @@ impl ThdDecoder {
                 Ok(frame) => {
                     match self.parser.parse(&frame) {
                         Ok(access_unit) => {
-                            // Decode presentation 0 (bed: stereo/5.1/7.1)
-                            match self.decoder_bed.decode_presentation(&access_unit, 0) {
+                            // Decode presentation 2 (bed: 7.1 or best available)
+                            // P0=stereo, P1=5.1, P2=7.1, P3=Atmos objects
+                            match self.decoder_bed.decode_presentation(&access_unit, 2) {
                                 Ok(decoded) => {
                                     self.pending_bed.push(decoded);
                                 }
@@ -187,32 +195,35 @@ impl ThdDecoder {
                 }
             }
 
-            // Extract OAMD positions
+            // Extract OAMD positions (persisted: OAMD doesn't come every AU)
             for oamd in &atmos.oamd {
                 if let Some(ref obj_elem) = oamd.object_element {
-                    // object_data is Vec<Vec<ObjectInfoBlock>>
-                    // Each inner Vec has blocks for one object
                     for (i, obj_blocks) in obj_elem.object_data.iter().enumerate() {
-                        if i >= MAX_OBJECTS {
-                            break;
-                        }
-                        // Get the last block's render info for current position
+                        if i >= MAX_OBJECTS { break; }
                         if let Some(last_block) = obj_blocks.last() {
                             let ri = &last_block.object_render_info;
-                            out.obj_pos[i].x = ri.pos3d[0] as f32;
-                            out.obj_pos[i].y = ri.pos3d[1] as f32;
-                            out.obj_pos[i].z = ri.pos3d[2] as f32;
-                            out.obj_pos[i].active = if last_block.b_object_not_active { 0 } else { 1 };
-                            out.obj_pos[i].size = ri.object_size[0] as f32;
-                            out.obj_pos[i].gain_db = last_block.object_basic_info.object_gain;
+                            self.last_obj_pos[i].x = ri.pos3d[0] as f32;
+                            self.last_obj_pos[i].y = ri.pos3d[1] as f32;
+                            self.last_obj_pos[i].z = ri.pos3d[2] as f32;
+                            self.last_obj_pos[i].active =
+                                if last_block.b_object_not_active { 0 } else { 1 };
+                            self.last_obj_pos[i].size = ri.object_size[0] as f32;
+                            self.last_obj_pos[i].gain_db =
+                                last_block.object_basic_info.object_gain;
                         }
                     }
-                    // Ramp duration from the first block update info
+                    self.last_obj_count = obj_elem.object_data.len().min(MAX_OBJECTS);
                     if let Some(bui) = obj_elem.md_update_info.block_update_info.first() {
-                        out.ramp_duration = bui.ramp_duration as c_int;
+                        self.last_ramp_duration = bui.ramp_duration as c_int;
                     }
                 }
             }
+
+            // Copy persisted positions to output
+            for i in 0..self.last_obj_count {
+                out.obj_pos[i] = self.last_obj_pos[i];
+            }
+            out.ramp_duration = self.last_ramp_duration;
         } else {
             out.is_atmos = 0;
             out.obj_count = 0;
