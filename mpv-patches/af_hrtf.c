@@ -1150,15 +1150,8 @@ static void update_object_positions_from_coefficients(struct priv *p) {
         atomic_store(&g_spatial_coeff_ptr->updated, 0);
 
         uint64_t mask = g_spatial_coeff_ptr->bed_mask;
-        /* Strip height speaker bits from the bed_mask.  In bed-only output
-         * mode, the decoder reports the spatial substream's mask (with TFL/TFR)
-         * but the audio only contains bed channels.  Processing phantom height
-         * channels causes artifacts from stale convolver state. */
-        {
-            uint64_t top_bits = (1ULL<<12)|(1ULL<<13)|(1ULL<<14)|(1ULL<<15)|
-                                (1ULL<<16)|(1ULL<<17)|(1ULL<<18)|(1ULL<<19)|(1ULL<<20);
-            mask &= ~top_bits;
-        }
+        /* Height speaker bits are now valid: the decoder ch_assign fix
+         * ensures correct channel mapping for the spatial substream. */
         if (mask && mask != p->last_bed_mask) {
             HRTF_DBG("update_obj_coeff: bed_mask changed 0x%llx -> 0x%llx, reloading positions\n",
                      (unsigned long long)p->last_bed_mask, (unsigned long long)mask);
@@ -1799,14 +1792,12 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     memset(out_l, 0, num_samples * sizeof(float));
     memset(out_r, 0, num_samples * sizeof(float));
 
-    /* Clamp effective channel count to bed channels when the decoder
-     * reports more channels than the bed actually contains (e.g., 16
-     * channels reported but only 8 with audio in bed-only mode).
-     * Processing silent channels wastes CPU and can produce artifacts
-     * from stale overlap-add buffers in their convolvers. */
-    int bed_limit = p->num_bed_channels;
-    if (bed_limit > 0 && bed_limit < num_ch)
-        num_ch = bed_limit;
+    /* Clamp to actual channels with audio: bed + height.
+     * Silent channels beyond that (e.g., ch 10-15 in a 10-channel
+     * TrueHD Atmos output) are skipped to avoid stale convolver artifacts. */
+    int active_limit = p->num_bed_channels + p->num_height_channels;
+    if (active_limit > 0 && active_limit < num_ch)
+        num_ch = active_limit;
 
     // Debug mute flags
     int mute_bed = p->shared ? atomic_load_explicit(&p->shared->mute_bed, memory_order_relaxed) : 0;
@@ -1850,6 +1841,11 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
      * The height channel energy is instead mixed into the bed channels
      * as a subtle overhead reinforcement: scale height content by a small
      * factor and add to the closest bed speaker pair (FL/FR for TFL/TFR). */
+    /* Height channels contain bed audio remixed through the interpolating
+     * rematrix.  Processing them at full level through separate HRIRs
+     * causes comb filtering (robotic sound) and clicks from AU-boundary
+     * coefficient discontinuities.  Skip them in the main HRTF path and
+     * mix a small fraction into the bed for subtle overhead presence. */
     int skip_height = (p->num_height_channels > 0 && !joc_replaces_bed);
 
     /* Mix height channel energy into corresponding bed channels.
