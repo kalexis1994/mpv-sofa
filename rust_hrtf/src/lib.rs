@@ -1,97 +1,250 @@
-//! C FFI wrapper for losslesshd lossless HD spatial decoder.
+//! C FFI wrapper for truehd TrueHD/Atmos decoder.
 //!
-//! Provides a simple C-compatible interface for:
-//! 1. Feeding raw lossless HD bitstream packets
-//! 2. Receiving decoded multichannel PCM
-//! 3. Receiving spatial object metadata (positions)
+//! Provides a C-compatible interface for real-time decoding of TrueHD Atmos
+//! bitstreams into separated bed channels + individual object audio with
+//! 3D position metadata (OAMD).
+//!
+//! Architecture:
+//!   Raw TrueHD packets → Extractor → Parser → Decoder
+//!     → Bed PCM (presentation 0: 2/6/8 ch)
+//!     → Object PCM (presentation 3: N objects)
+//!     → OAMD positions per object
 
 use std::ffi::c_int;
-use std::ptr;
 use std::slice;
 
-/// Maximum channels in decoded output
-const MAX_CHANNELS: usize = 16;
+use truehd::process::decode::{DecodedAccessUnit, Decoder};
+use truehd::process::extract::Extractor;
+use truehd::process::parse::Parser;
+
+/// Maximum channels in decoded output (bed + objects)
+const MAX_CHANNELS: usize = 24;
 /// Maximum spatial objects
-const MAX_OBJECTS: usize = 128;
+const MAX_OBJECTS: usize = 16;
+/// Samples per access unit (TrueHD max)
+const MAX_SAMPLES_PER_AU: usize = 160;
 
-/// spatial object position
+/// Object position from OAMD metadata
 #[repr(C)]
-pub struct LosslesshdObjectPos {
+#[derive(Clone, Copy, Default)]
+pub struct ThdObjectPos {
+    /// Position X: 0.0=left, 0.5=center, 1.0=right
     pub x: f32,
+    /// Position Y: 0.0=front, 0.5=center, 1.0=back
     pub y: f32,
+    /// Position Z: 0.0=bottom, 1.0=top
     pub z: f32,
+    /// Object gain in dB (-128 = muted)
+    pub gain_db: i8,
+    /// 1 if object is active this frame
+    pub active: c_int,
+    /// Object size (0=point source)
     pub size: f32,
-    pub valid: c_int,
 }
 
-/// Decoded audio frame
+/// Decoded audio frame with bed + objects
 #[repr(C)]
-pub struct LosslesshdFrame {
-    /// Per-channel sample data (planar float32)
-    pub channels: [*mut f32; MAX_CHANNELS],
-    /// Number of channels with valid data
-    pub num_channels: c_int,
-    /// Number of samples per channel
-    pub num_samples: c_int,
-    /// Sample rate
+pub struct ThdDecodedFrame {
+    /// Interleaved bed PCM samples (24-bit in i32): [sample][channel]
+    /// Bed channels: FL,FR,FC,LFE,BL,BR,SL,SR (up to 8)
+    pub bed_samples: [[i32; 8]; MAX_SAMPLES_PER_AU],
+    /// Number of bed channels (2, 6, or 8)
+    pub bed_channels: c_int,
+    /// Number of valid bed samples
+    pub bed_sample_count: c_int,
+
+    /// Object PCM samples: [sample][object]
+    /// Each object is a mono audio channel
+    pub obj_samples: [[i32; MAX_OBJECTS]; MAX_SAMPLES_PER_AU],
+    /// Number of active objects
+    pub obj_count: c_int,
+
+    /// Object positions from OAMD
+    pub obj_pos: [ThdObjectPos; MAX_OBJECTS],
+
+    /// Sample rate (48000)
     pub sample_rate: c_int,
-    /// Presentation timestamp (in timebase units)
-    pub pts: i64,
-
-    /// spatial object positions for this frame
-    pub objects: [LosslesshdObjectPos; MAX_OBJECTS],
-    /// Number of valid objects
-    pub num_objects: c_int,
-
-    /// Whether this is an spatial stream (vs regular lossless HD)
-    pub is_spatial: c_int,
+    /// 1 if Atmos content detected
+    pub is_atmos: c_int,
+    /// 1 if this is a duplicate frame (should be skipped)
+    pub is_duplicate: c_int,
+    /// OAMD ramp duration in samples
+    pub ramp_duration: c_int,
 }
 
-/// Opaque decoder context
-pub struct LosslesshdDecoder {
-    // TODO: Replace with actual losslesshd crate decoder when API stabilizes
-    // For now this is a skeleton that falls back to providing the raw PCM
-    // from the standard lossless HD bed while the losslesshd crate matures.
-    buffer: Vec<u8>,
-    sample_rate: u32,
-    initialized: bool,
-}
-
-impl LosslesshdDecoder {
-    fn new() -> Self {
-        LosslesshdDecoder {
-            buffer: Vec::with_capacity(65536),
+impl Default for ThdDecodedFrame {
+    fn default() -> Self {
+        Self {
+            bed_samples: [[0; 8]; MAX_SAMPLES_PER_AU],
+            bed_channels: 0,
+            bed_sample_count: 0,
+            obj_samples: [[0; MAX_OBJECTS]; MAX_SAMPLES_PER_AU],
+            obj_count: 0,
+            obj_pos: [ThdObjectPos::default(); MAX_OBJECTS],
             sample_rate: 48000,
-            initialized: false,
+            is_atmos: 0,
+            is_duplicate: 0,
+            ramp_duration: 0,
         }
     }
 }
 
-/// Create a new lossless HD spatial decoder instance.
-/// Returns an opaque pointer. Must be freed with `losslesshd_destroy`.
+/// Opaque decoder context
+pub struct ThdDecoder {
+    extractor: Extractor,
+    parser: Parser,
+    decoder_bed: Decoder,
+    decoder_atmos: Decoder,
+    is_atmos: bool,
+    /// Buffered decoded frames (bed + atmos paired)
+    pending_bed: Vec<DecodedAccessUnit>,
+    pending_atmos: Vec<DecodedAccessUnit>,
+}
+
+impl ThdDecoder {
+    fn new() -> Self {
+        ThdDecoder {
+            extractor: Extractor::default(),
+            parser: Parser::default(),
+            decoder_bed: Decoder::default(),
+            decoder_atmos: Decoder::default(),
+            is_atmos: false,
+            pending_bed: Vec::new(),
+            pending_atmos: Vec::new(),
+        }
+    }
+
+    fn process_buffered(&mut self) {
+        // Process all available frames from the extractor
+        while let Some(frame_result) = self.extractor.next() {
+            match frame_result {
+                Ok(frame) => {
+                    match self.parser.parse(&frame) {
+                        Ok(access_unit) => {
+                            // Decode presentation 0 (bed: stereo/5.1/7.1)
+                            match self.decoder_bed.decode_presentation(&access_unit, 0) {
+                                Ok(decoded) => {
+                                    self.pending_bed.push(decoded);
+                                }
+                                Err(e) => {
+                                    log::warn!("Bed decode error: {}", e);
+                                }
+                            }
+
+                            // Try presentation 3 (Atmos objects)
+                            match self.decoder_atmos.decode_presentation(&access_unit, 3) {
+                                Ok(decoded) => {
+                                    self.is_atmos = true;
+                                    self.pending_atmos.push(decoded);
+                                }
+                                Err(_) => {
+                                    // Not Atmos or decode error - no objects
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Parse error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Extract error: {}", e);
+                }
+            }
+        }
+    }
+
+    fn fill_frame(&mut self, out: &mut ThdDecodedFrame) -> bool {
+        if self.pending_bed.is_empty() {
+            return false;
+        }
+
+        let bed = self.pending_bed.remove(0);
+
+        // Fill bed audio
+        out.bed_channels = bed.channel_count as c_int;
+        out.bed_sample_count = bed.sample_length as c_int;
+        out.sample_rate = bed.sampling_frequency as c_int;
+        out.is_duplicate = if bed.is_duplicate { 1 } else { 0 };
+
+        for s in 0..bed.sample_length.min(MAX_SAMPLES_PER_AU) {
+            for ch in 0..bed.channel_count.min(8) {
+                out.bed_samples[s][ch] = bed.pcm_data[s][ch];
+            }
+        }
+
+        // Fill object audio + positions if Atmos
+        if !self.pending_atmos.is_empty() {
+            let atmos = self.pending_atmos.remove(0);
+            out.is_atmos = 1;
+
+            let obj_count = atmos.channel_count.min(MAX_OBJECTS);
+            out.obj_count = obj_count as c_int;
+
+            for s in 0..atmos.sample_length.min(MAX_SAMPLES_PER_AU) {
+                for obj in 0..obj_count {
+                    out.obj_samples[s][obj] = atmos.pcm_data[s][obj];
+                }
+            }
+
+            // Extract OAMD positions
+            for oamd in &atmos.oamd {
+                if let Some(ref obj_elem) = oamd.object_element {
+                    // object_data is Vec<Vec<ObjectInfoBlock>>
+                    // Each inner Vec has blocks for one object
+                    for (i, obj_blocks) in obj_elem.object_data.iter().enumerate() {
+                        if i >= MAX_OBJECTS {
+                            break;
+                        }
+                        // Get the last block's render info for current position
+                        if let Some(last_block) = obj_blocks.last() {
+                            let ri = &last_block.object_render_info;
+                            out.obj_pos[i].x = ri.pos3d[0] as f32;
+                            out.obj_pos[i].y = ri.pos3d[1] as f32;
+                            out.obj_pos[i].z = ri.pos3d[2] as f32;
+                            out.obj_pos[i].active = if last_block.b_object_not_active { 0 } else { 1 };
+                            out.obj_pos[i].size = ri.object_size[0] as f32;
+                            out.obj_pos[i].gain_db = last_block.object_basic_info.object_gain;
+                        }
+                    }
+                    // Ramp duration from the first block update info
+                    if let Some(bui) = obj_elem.md_update_info.block_update_info.first() {
+                        out.ramp_duration = bui.ramp_duration as c_int;
+                    }
+                }
+            }
+        } else {
+            out.is_atmos = 0;
+            out.obj_count = 0;
+        }
+
+        true
+    }
+}
+
+// === C FFI Functions ===
+
+/// Create a new TrueHD/Atmos decoder instance.
 #[no_mangle]
-pub extern "C" fn losslesshd_create() -> *mut LosslesshdDecoder {
-    let decoder = Box::new(LosslesshdDecoder::new());
+pub extern "C" fn thd_decoder_create() -> *mut ThdDecoder {
+    let decoder = Box::new(ThdDecoder::new());
     Box::into_raw(decoder)
 }
 
 /// Destroy a decoder instance.
 #[no_mangle]
-pub unsafe extern "C" fn losslesshd_destroy(ctx: *mut LosslesshdDecoder) {
+pub unsafe extern "C" fn thd_decoder_destroy(ctx: *mut ThdDecoder) {
     if !ctx.is_null() {
         drop(Box::from_raw(ctx));
     }
 }
 
-/// Feed raw lossless HD bitstream data to the decoder.
+/// Feed raw TrueHD bitstream data to the decoder.
 ///
-/// `data`: pointer to raw lossless HD packet data
-/// `size`: size in bytes
-///
-/// Returns 0 on success, negative on error.
+/// Returns 0 on success, -1 on error.
 #[no_mangle]
-pub unsafe extern "C" fn losslesshd_send_packet(
-    ctx: *mut LosslesshdDecoder,
+pub unsafe extern "C" fn thd_decoder_send_packet(
+    ctx: *mut ThdDecoder,
     data: *const u8,
     size: c_int,
 ) -> c_int {
@@ -102,62 +255,52 @@ pub unsafe extern "C" fn losslesshd_send_packet(
     let decoder = &mut *ctx;
     let packet = slice::from_raw_parts(data, size as usize);
 
-    // Buffer the packet data
-    decoder.buffer.extend_from_slice(packet);
-
-    // TODO: When losslesshd crate API is ready:
-    // decoder.inner.send_packet(packet);
+    decoder.extractor.push_bytes(packet);
+    decoder.process_buffered();
 
     0
 }
 
-/// Receive a decoded frame.
-///
-/// `frame`: pointer to a LosslesshdFrame to fill in.
+/// Receive a decoded frame with bed audio + object audio + positions.
 ///
 /// Returns:
-///   0  = frame available
-///   1  = need more input (call send_packet)
-///  -1  = error
+///   0 = frame available in `frame`
+///   1 = need more input (call send_packet)
+///  -1 = error
 #[no_mangle]
-pub unsafe extern "C" fn losslesshd_receive_frame(
-    ctx: *mut LosslesshdDecoder,
-    frame: *mut LosslesshdFrame,
+pub unsafe extern "C" fn thd_decoder_receive_frame(
+    ctx: *mut ThdDecoder,
+    frame: *mut ThdDecodedFrame,
 ) -> c_int {
     if ctx.is_null() || frame.is_null() {
         return -1;
     }
 
-    let _decoder = &mut *ctx;
+    let decoder = &mut *ctx;
     let frame = &mut *frame;
 
-    // Initialize frame to zero
-    frame.num_channels = 0;
-    frame.num_samples = 0;
-    frame.num_objects = 0;
-    frame.is_spatial = 0;
+    // Zero the frame
+    *frame = ThdDecodedFrame::default();
 
-    // TODO: Implement actual lossless HD spatial decoding using the losslesshd crate.
-    // The losslesshd crate (from the losslesshd project) is still maturing its API.
-    // When ready, this function will:
-    //
-    // 1. Decode the buffered lossless HD bitstream
-    // 2. Extract the 7.1 bed channels (always present)
-    // 3. If spatial: extract up to 16 object audio channels
-    // 4. If spatial: extract 3D positions (x,y,z) for each object
-    // 5. Fill the LosslesshdFrame with this data
-    //
-    // For the MVP, the host app will use FFmpeg (via mpv's ad_lavc) for
-    // basic lossless HD decoding (7.1 bed) and the af_hrtf filter for
-    // spatialization. The losslesshd decoder will be swapped in when the
-    // crate API is stable enough for real-time streaming decode.
-
-    // Signal "need more data" for now
-    1
+    if decoder.fill_frame(frame) {
+        0
+    } else {
+        1 // need more data
+    }
 }
 
-/// Get the version string.
+/// Check if the stream contains Atmos content.
+/// Only valid after at least one frame has been decoded.
 #[no_mangle]
-pub extern "C" fn losslesshd_version() -> *const std::ffi::c_char {
-    b"losslesshd_ffi 0.1.0 (skeleton)\0".as_ptr() as *const std::ffi::c_char
+pub unsafe extern "C" fn thd_decoder_is_atmos(ctx: *const ThdDecoder) -> c_int {
+    if ctx.is_null() {
+        return 0;
+    }
+    if (*ctx).is_atmos { 1 } else { 0 }
+}
+
+/// Get version string.
+#[no_mangle]
+pub extern "C" fn thd_decoder_version() -> *const std::ffi::c_char {
+    b"truehd_ffi 0.2.0 (truehd 0.4.0)\0".as_ptr() as *const std::ffi::c_char
 }
