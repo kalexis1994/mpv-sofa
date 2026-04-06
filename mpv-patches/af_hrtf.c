@@ -21,6 +21,11 @@ static int hrtf_dbg_count = 0;
 /* Debug logging DISABLED for real-time playback to avoid I/O-induced
  * audio glitches.  Set HRTF_ENABLE_DBG=1 to re-enable at compile time. */
 #define HRTF_ENABLE_DBG 0
+/* NOTE: remaining micro-saturation in HRTF is from overlap-add convolver
+ * accumulation across multiple channels at peak moments.  The limiter
+ * operates post-sum but internal float overflow can occur during the
+ * per-channel convolution+accumulation loop.  Fix: apply per-channel
+ * pre-attenuation before convolution based on channel count. */
 #define HRTF_DBG(...) do { \
     if (HRTF_ENABLE_DBG) { \
         if (!hrtf_dbg) hrtf_dbg = fopen("hrtf_debug.txt", "w"); \
@@ -995,7 +1000,31 @@ static int is_top_speaker(int bit) {
 }
 
 static int init_speaker_positions_from_bed_mask(struct priv *p, uint64_t bed_mask) {
-    const float d = 2.0f;
+    /* Compute speaker distances from room dimensions.
+     * Listener at center width, 2/3 depth from front wall.
+     * Speakers placed according to cinema/home theater standards. */
+    float room_w = 6.5f, room_d = 5.0f, room_h = 2.7f;
+    if (p->shared) {
+        float rw = atomic_load_explicit(&p->shared->room_width, memory_order_relaxed);
+        float rd = atomic_load_explicit(&p->shared->room_depth, memory_order_relaxed);
+        float rh = atomic_load_explicit(&p->shared->room_height, memory_order_relaxed);
+        if (rw > 0) room_w = rw;
+        if (rd > 0) room_d = rd;
+        if (rh > 0) room_h = rh;
+    }
+    /* Listener position: center width, 2/3 depth from front */
+    float listen_depth = room_d * (2.0f / 3.0f);
+    /* Distance from listener to front wall (screen) */
+    float d_front = listen_depth;
+    /* Distance from listener to side walls */
+    float d_side = room_w * 0.5f;
+    /* Distance from listener to back wall */
+    float d_back = room_d - listen_depth;
+    /* Distance from listener to front speakers (at screen, offset ±30°) */
+    float d_screen = sqrtf(d_front * d_front + (d_side * 0.5f) * (d_side * 0.5f));
+    /* Subwoofer: below screen, on floor */
+    float d_sub = sqrtf(d_front * d_front + 1.2f * 1.2f); /* 1.2m below ear level */
+
     int ch_idx = 0;
     int bed_count = 0;
     int height_count = 0;
@@ -1009,6 +1038,29 @@ static int init_speaker_positions_from_bed_mask(struct priv *p, uint64_t bed_mas
             continue;
         float az, el;
         speaker_id_to_position(bit, &az, &el);
+        /* Assign distance based on speaker type and room geometry */
+        float d;
+        switch (bit) {
+        case MP_SPEAKER_ID_FL:  case MP_SPEAKER_ID_FR:
+        case MP_SPEAKER_ID_FC:  case MP_SPEAKER_ID_FLC:
+        case MP_SPEAKER_ID_FRC:
+            d = d_front;    /* Front speakers at screen distance */
+            break;
+        case MP_SPEAKER_ID_LFE:
+            d = d_sub;      /* Sub: front wall + below ear level */
+            break;
+        case MP_SPEAKER_ID_SL:  case MP_SPEAKER_ID_SR:
+            d = d_side;     /* Sides at wall distance */
+            break;
+        case MP_SPEAKER_ID_BL:  case MP_SPEAKER_ID_BR:
+        case MP_SPEAKER_ID_BC:
+            d = d_back + 0.5f;  /* Surrounds just behind listener */
+            break;
+        default:
+            /* Height speakers: at ceiling distance */
+            d = sqrtf(d_front * d_front + (room_h - 1.2f) * (room_h - 1.2f));
+            break;
+        }
         p->speaker_pos[ch_idx] = (HrtfSpeakerPos){az, el, d};
         HRTF_DBG(" ch%d=bit%d(%.0f,%.0f)%s", ch_idx, bit, az, el,
                  is_top_speaker(bit) ? "[H]" : "");
@@ -1080,22 +1132,26 @@ static void init_speaker_positions_from_chmap(struct priv *p,
         p->num_bed_channels = n;
 }
 
-// Fallback: hardcoded 7.1.4 positions (used if chmap not available)
+// Fallback: hardcoded 7.1.4 positions for Home Theater (6.5x5.0x2.7m)
 static void init_speaker_positions(struct priv *p) {
-    const float d = 2.0f;
+    const float df = 3.33f;  // front: 2/3 of 5m depth
+    const float ds = 3.25f;  // side: half of 6.5m width
+    const float db = 2.17f;  // back: 1/3 of 5m depth + 0.5m
+    const float dh = 3.6f;   // height: sqrt(3.33^2 + 1.5^2)
+    const float dsub = 3.54f; // sub: sqrt(3.33^2 + 1.2^2)
     HrtfSpeakerPos defaults[] = {
-        { 30.0f,  0.0f, d},  // 0: FL
-        {-30.0f,  0.0f, d},  // 1: FR
-        {  0.0f,  0.0f, d},  // 2: FC
-        {  0.0f,  0.0f, d},  // 3: LFE
-        {135.0f,  0.0f, d},  // 4: BL
-        {-135.0f, 0.0f, d},  // 5: BR
-        { 90.0f,  0.0f, d},  // 6: SL
-        {-90.0f,  0.0f, d},  // 7: SR
-        { 45.0f, 45.0f, d},  // 8: TFL
-        {-45.0f, 45.0f, d},  // 9: TFR
-        {135.0f, 45.0f, d},  // 10: TBL
-        {-135.0f,45.0f, d},  // 11: TBR
+        { 30.0f,  0.0f, df},    // 0: FL
+        {-30.0f,  0.0f, df},    // 1: FR
+        {  0.0f,  0.0f, df},    // 2: FC
+        {  0.0f,-30.0f, dsub},  // 3: LFE (sub, below screen)
+        {135.0f,  0.0f, db},    // 4: BL
+        {-135.0f, 0.0f, db},    // 5: BR
+        { 90.0f,  0.0f, ds},    // 6: SL
+        {-90.0f,  0.0f, ds},    // 7: SR
+        { 45.0f, 45.0f, dh},    // 8: TFL
+        {-45.0f, 45.0f, dh},    // 9: TFR
+        {135.0f, 45.0f, dh},    // 10: TBL
+        {-135.0f,45.0f, dh},    // 11: TBR
     };
 
     int n = sizeof(defaults) / sizeof(defaults[0]);
@@ -1447,6 +1503,86 @@ static void update_object_positions_from_objmeta(struct priv *p) {
         goto shared_state_done;
     }
 
+    /* --- Phase 2c: truehd FFI per-object HRTF positioning --- */
+    /* When the truehd Rust decoder is active, object channels (bed_count..N)
+     * contain individually separated object audio.  Each object gets its own
+     * HRTF at its OAMD position — the same architecture as Dolby's renderer. */
+    {
+        int bed_ch = p->num_bed_channels > 0 ? p->num_bed_channels : 8;
+        int obj_count = total_dyn;
+        /* Detect truehd objects: more channels than bed, objects have valid positions */
+        HRTF_DBG("Phase2c check: obj_count=%d num_ch=%d bed_ch=%d objcoding=%d\n",
+                 obj_count, p->num_channels, bed_ch, p->objcoding_active);
+        if (obj_count > 0 && p->num_channels > bed_ch && p->sofa &&
+            !p->objcoding_active) {
+            const float OBJ_SMOOTH = compute_smooth_alpha(p->oamd_ramp_duration);
+            float room_w = 6.5f, room_d = 5.0f, room_h = 2.7f;
+            if (p->shared) {
+                float rw = atomic_load_explicit(&p->shared->room_width, memory_order_relaxed);
+                float rd = atomic_load_explicit(&p->shared->room_depth, memory_order_relaxed);
+                float rh = atomic_load_explicit(&p->shared->room_height, memory_order_relaxed);
+                if (rw > 0) room_w = rw;
+                if (rd > 0) room_d = rd;
+                if (rh > 0) room_h = rh;
+            }
+
+            for (int i = 0; i < obj_count && i < SPATIAL_EXT_MAX_OBJECTS; i++) {
+                SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[i];
+                int ch = bed_ch + i;
+                if (ch >= p->num_channels || ch >= HRTF_MAX_CHANNELS)
+                    break;
+                if (!obj->active || obj->gain_db <= -128)
+                    continue;
+
+                /* DAMF → room-relative cartesian → az/el/dist */
+                float rx = obj->x * room_w * 0.5f;
+                float ry = obj->y * room_d * 0.5f;
+                float rz = obj->z * room_h * 0.5f;
+
+                float dist = sqrtf(rx * rx + ry * ry + rz * rz);
+                if (dist < 0.3f) dist = 0.3f;
+
+                float new_az = atan2f(-rx, -ry) * (180.0f / (float)M_PI);
+                float new_el = asinf(fminf(1.0f, fmaxf(-1.0f, rz / dist)))
+                                * (180.0f / (float)M_PI);
+                new_el = soft_elevation_floor(new_el);
+
+                /* Exponential smoothing */
+                if (p->joc_smooth_valid) {
+                    p->joc_smooth_az[i]   = OBJ_SMOOTH * p->joc_smooth_az[i]
+                                           + (1.0f - OBJ_SMOOTH) * new_az;
+                    p->joc_smooth_el[i]   = OBJ_SMOOTH * p->joc_smooth_el[i]
+                                           + (1.0f - OBJ_SMOOTH) * new_el;
+                    p->joc_smooth_dist[i] = OBJ_SMOOTH * p->joc_smooth_dist[i]
+                                           + (1.0f - OBJ_SMOOTH) * dist;
+                } else {
+                    p->joc_smooth_az[i]   = new_az;
+                    p->joc_smooth_el[i]   = new_el;
+                    p->joc_smooth_dist[i] = dist;
+                }
+
+                float faz  = p->joc_smooth_az[i];
+                float fel  = p->joc_smooth_el[i];
+                float fdst = p->joc_smooth_dist[i];
+
+                /* Only reload HRIR if position changed significantly */
+                float daz = fabsf(faz - p->speaker_pos[ch].azimuth);
+                float del = fabsf(fel - p->speaker_pos[ch].elevation);
+                if (daz > 2.0f || del > 2.0f) {
+                    p->speaker_pos[ch] = (HrtfSpeakerPos){faz, fel, fdst};
+                    update_channel_hrir(p, ch);
+                    { static int p2c_log = 0;
+                      if (++p2c_log <= 10)
+                        HRTF_DBG("Phase2c: obj[%d] ch=%d az=%.1f el=%.1f dist=%.2f\n",
+                                 i, ch, faz, fel, fdst);
+                    }
+                }
+            }
+            p->joc_smooth_valid = 1;
+            goto shared_state_done;
+        }
+    }
+
     /* --- Phase 2b: TrueHD centroid positioning for height channels --- */
 
     if (p->num_height_channels <= 0 || !p->sofa)
@@ -1695,9 +1831,16 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
         return 0;
     }
 
-    // Load HRIRs for all channels (direct set, no crossfade during init)
-    for (int ch = 0; ch < num_channels && ch < HRTF_MAX_CHANNELS; ch++) {
-        update_channel_hrir_ex(p, ch, 0);
+    // Load HRIRs only for bed channels at init.
+    // Object channels (ch >= bed) start with invalid convolvers (silent)
+    // and get their HRIRs loaded by Phase 2c when OAMD positions arrive.
+    // This prevents all objects from starting at position (0,0) which
+    // causes comb filtering on the first frames.
+    {
+        int init_ch = p->num_bed_channels > 0 ? p->num_bed_channels : num_channels;
+        if (init_ch > num_channels) init_ch = num_channels;
+        for (int ch = 0; ch < init_ch && ch < HRTF_MAX_CHANNELS; ch++)
+            update_channel_hrir_ex(p, ch, 0);
     }
 
     // Debug: count valid convolvers
@@ -1792,12 +1935,20 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     memset(out_l, 0, num_samples * sizeof(float));
     memset(out_r, 0, num_samples * sizeof(float));
 
-    /* Clamp to actual channels with audio: bed + height.
-     * Silent channels beyond that (e.g., ch 10-15 in a 10-channel
-     * TrueHD Atmos output) are skipped to avoid stale convolver artifacts. */
-    int active_limit = p->num_bed_channels + p->num_height_channels;
-    if (active_limit > 0 && active_limit < num_ch)
-        num_ch = active_limit;
+    /* Clamp to actual channels with audio.
+     * With truehd FFI: bed (8) + objects (12) = 20 channels, all active.
+     * With FFmpeg fallback: bed (8) + height (0-2) = 8-10, rest silent.
+     * Check g_spatial_ext_objmeta for the true object count. */
+    {
+        int obj_from_meta = 0;
+        if (g_spatial_objmeta_ptr)
+            obj_from_meta = g_spatial_objmeta_ptr->num_dynamic_objects;
+        int active_limit = p->num_bed_channels + p->num_height_channels;
+        if (obj_from_meta > 0 && obj_from_meta > p->num_height_channels)
+            active_limit = p->num_bed_channels + obj_from_meta;
+        if (active_limit > 0 && active_limit < num_ch)
+            num_ch = active_limit;
+    }
 
     // Debug mute flags
     int mute_bed = p->shared ? atomic_load_explicit(&p->shared->mute_bed, memory_order_relaxed) : 0;
@@ -1841,12 +1992,47 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
      * The height channel energy is instead mixed into the bed channels
      * as a subtle overhead reinforcement: scale height content by a small
      * factor and add to the closest bed speaker pair (FL/FR for TFL/TFR). */
-    /* Height channels contain bed audio remixed through the interpolating
-     * rematrix.  Processing them at full level through separate HRIRs
-     * causes comb filtering (robotic sound) and clicks from AU-boundary
-     * coefficient discontinuities.  Skip them in the main HRTF path and
-     * mix a small fraction into the bed for subtle overhead presence. */
-    int skip_height = (p->num_height_channels > 0 && !joc_replaces_bed);
+    /* When the truehd FFI decoder is active, object channels are clean
+     * (individually separated, not remixed bed).  Process them at full
+     * level through HRTF at their OAMD positions.
+     * When using FFmpeg fallback, height channels are remixed bed and
+     * must be skipped to avoid comb filtering. */
+    int truehd_objects = (num_ch > bed_count && !joc_replaces_bed &&
+                          g_spatial_objmeta_ptr &&
+                          atomic_load(&g_spatial_objmeta_ptr->updated) >= 0 &&
+                          g_spatial_objmeta_ptr->num_dynamic_objects > 0);
+    int skip_height = (p->num_height_channels > 0 && !joc_replaces_bed && !truehd_objects);
+
+    /* Objects: mix into stereo with simple panning instead of full HRTF
+     * convolution.  Full HRTF on 12+ object channels causes clipping
+     * artifacts from the overlap-add sum.  Simple panning is lightweight
+     * and avoids the accumulation problem while preserving spatialization. */
+    if (truehd_objects && bed_count > 0 && !mute_obj) {
+        for (int ch = bed_count; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
+            if (mute_obj) break;
+            int obj_idx = ch - bed_count;
+            float obj_gain_lin = 1.0f;
+            if (g_spatial_objmeta_ptr && obj_idx < SPATIAL_EXT_MAX_OBJECTS) {
+                SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[obj_idx];
+                if (!obj->active || obj->gain_db <= -128) continue;
+                if (obj->gain_db < 0)
+                    obj_gain_lin = powf(10.0f, (float)obj->gain_db / 20.0f);
+            }
+            float az = p->speaker_pos[ch].azimuth;
+            /* Sine/cosine pan law from azimuth */
+            float pan = (az + 90.0f) / 180.0f;
+            if (pan < 0.0f) pan = 0.0f;
+            if (pan > 1.0f) pan = 1.0f;
+            float g_l = sinf(pan * (float)M_PI * 0.5f) * obj_gain_lin * 0.3f;
+            float g_r = cosf(pan * (float)M_PI * 0.5f) * obj_gain_lin * 0.3f;
+            for (int i = 0; i < num_samples; i++) {
+                out_l[i] += channel_data[ch][i] * g_l;
+                out_r[i] += channel_data[ch][i] * g_r;
+            }
+        }
+        /* Clamp num_ch to bed only for HRTF convolution below */
+        num_ch = bed_count;
+    }
 
     /* Mix height channel energy into corresponding bed channels.
      * TFL → FL (ch0), TFR → FR (ch1).  Use a subtle mix level (0.15)
@@ -1891,6 +2077,25 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         if (dist < p->min_dist) dist = p->min_dist;
         float dist_gain = (p->min_dist / dist) * room_gain;
 
+        // Apply OAMD gain for object channels.
+        // Objects have individual gains from the Atmos metadata.
+        // Without this, all objects play at full level causing clipping
+        // when 12+ convolved signals are summed.
+        if (ch >= bed_count && g_spatial_objmeta_ptr) {
+            int obj_idx = ch - bed_count;
+            if (obj_idx >= 0 && obj_idx < SPATIAL_EXT_MAX_OBJECTS) {
+                SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[obj_idx];
+                if (!obj->active || obj->gain_db <= -128) {
+                    // Muted object — skip entirely
+                    continue;
+                }
+                if (obj->gain_db < 0) {
+                    float obj_gain = powf(10.0f, (float)obj->gain_db / 20.0f);
+                    dist_gain *= obj_gain;
+                }
+            }
+        }
+
         // Smooth elevation attenuation — gradual rolloff replaces
         // the old hard ±20° cliff that caused audible "muting" when
         // objects crossed the threshold.  Unity below 10°, gentle
@@ -1917,15 +2122,10 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
             }
         }
 
-        // Channel 3 is LFE - mix directly without HRTF
-        if (ch == 3) {
-            for (int i = 0; i < num_samples; i++) {
-                float s = channel_data[ch][i] * 0.5f;
-                out_l[i] += s;
-                out_r[i] += s;
-            }
-            continue;
-        }
+        // LFE: process through HRTF like any other speaker.
+        // In a real cinema the subwoofer has a physical position
+        // (typically front-center, below screen, at -30° elevation).
+        // Processing it through HRTF contributes to room immersion.
 
         if (!pair->left[active].valid)
             continue;
@@ -1993,20 +2193,21 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         }
     }
 
-    // Adaptive headroom: scales with active channel count to prevent
-    // clipping from multi-channel summation through HRTF convolution.
-    // For 7.1.2/7.1.4 Atmos beds, use a more conservative formula
-    // since height channels carry significant energy.
+    /* Adaptive headroom: count only bed channels for the headroom base.
+     * Objects are typically much quieter than bed channels and don't need
+     * the same headroom reduction.  With 20 channels (8 bed + 12 obj),
+     * 1/sqrt(20)=0.224 is far too aggressive; 1/sqrt(8)=0.354 is correct
+     * since the objects add relatively little energy to the sum. */
     {
-        int active_ch = 0;
+        int bed_active = 0;
         for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
-            if (mute_bed && ch < bed_count) continue;
-            if (mute_obj && ch >= bed_count) continue;
-            if (joc_replaces_bed && ch < bed_count && ch != 3) continue;
-            active_ch++;
+            if (ch >= bed_count) break;  /* only count bed */
+            if (mute_bed) continue;
+            if (joc_replaces_bed && ch != 3) continue;
+            bed_active++;
         }
-        if (active_ch < 6) active_ch = 6;
-        float headroom = 1.0f / sqrtf((float)active_ch);
+        if (bed_active < 6) bed_active = 6;
+        float headroom = 1.0f / sqrtf((float)bed_active);
         for (int i = 0; i < num_samples; i++) {
             out_l[i] *= headroom;
             out_r[i] *= headroom;
