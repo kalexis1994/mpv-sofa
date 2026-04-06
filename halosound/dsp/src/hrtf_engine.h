@@ -30,7 +30,8 @@ void halo_set_speaker_pos(HaloEngine* engine, int ch, float az, float el, float 
 void halo_set_room(HaloEngine* engine, float width, float depth, float height,
                    float decay, float damping, float wet, float absorption);
 
-/* Apply room preset: 0=Studio, 1=Home Theater, 2=Cinema, 3=Concert Hall */
+/* Apply room preset: 0=Studio, 1=Home Theater, 2=Cinema, 3=Concert Hall,
+ * 4=Living Room, 5=Screening Room, 6=IMAX, 7=Dolby Cinema, 8=None (Dry) */
 void halo_set_room_preset(HaloEngine* engine, int preset);
 
 /* Process audio block.

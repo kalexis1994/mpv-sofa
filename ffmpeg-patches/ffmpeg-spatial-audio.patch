@@ -7,6 +7,7 @@ index e85dac3..7c2e714 100644
  #include "config_components.h"
  
  #include <stdint.h>
++#include <math.h>
 +#include <string.h>
  
  #include "avcodec.h"
@@ -27,8 +28,11 @@ index e85dac3..7c2e714 100644
 + * 1 = per-AU adaptive integer headroom (can introduce abrupt level steps).
 + * 0 = use decoder output_shift as-is (no dynamic per-AU gain stepping). */
 +#define THD_SPATIAL_ADAPTIVE_HEADROOM 0
-+/* Fixed safety attenuation applied in spatial extract path (bits). */
-+#define THD_SPATIAL_FIXED_ATTEN_BITS 2
++/* Fixed safety attenuation applied in spatial extract path (bits).
++ * Keep disabled: the spatial 0x31ec substream already carries its own
++ * output_shift, and extra attenuation skews the extracted objects/height
++ * balance away from the source decode. */
++#define THD_SPATIAL_FIXED_ATTEN_BITS 0
 +/* Per-AU output_shift smoothing: slew-rate limits shift changes to
 + * avoid discontinuities at AU boundaries when spatial coefficients change.
 + * Disabled: the per-AU crossfade (below) already smooths transitions,
@@ -102,11 +106,14 @@ index e85dac3..7c2e714 100644
 +    unsigned int bed_max_ch;
 +
 +    /// Height channel crossfade state for AU boundary smoothing.
-+    /// Saves the last SPATIAL_XFADE_LEN samples of each height channel
-+    /// from the previous AU so we can crossfade at the next AU boundary.
-+#define SPATIAL_XFADE_LEN 20
++    /// Saves the last sample of each height channel from the previous AU
++    /// so we can crossfade at the next AU boundary.
++#define SPATIAL_XFADE_LEN 48
 +    int32_t prev_height_tail[SPATIAL_XFADE_LEN][MAX_CHANNELS];
 +    int     prev_height_tail_valid;
++
++    /// Degraded mode transition fade state.
++    int     spatial_was_degraded;
 +
 +    /// Per-block coefficient state for spatial interpolating rematrix.
 +    /// Each AU can contain multiple blocks with different seed/delta;
@@ -135,10 +142,9 @@ index e85dac3..7c2e714 100644
 +    int8_t  spatial_shift_smooth[MAX_CHANNELS];
 +    uint8_t spatial_shift_smooth_valid;
 +
-+    /// Per-AU output_shift crossfade: when output_shift changes between AUs,
-+    /// we pre-scale sample_buffer within the AU to smoothly transition from
-+    /// the old gain to the new gain, avoiding a level discontinuity at the
-+    /// AU boundary that sounds like "objects bugging out".
++    /// Legacy per-AU output_shift crossfade state. Kept only for older
++    /// experiments; the spatial extractor now follows the stream's own
++    /// output_shift instead of synthesizing height gain from the bed.
 +    int8_t  prev_pack_shift[MAX_CHANNELS];
 +    uint8_t prev_pack_shift_valid;
 +
@@ -666,15 +672,28 @@ index e85dac3..7c2e714 100644
          return AVERROR_INVALIDDATA;
      }
  
-+    /* Spatial robustness: if spatial and bed block lengths diverge, clamp
-+     * to the safe overlap to avoid rematrixing beyond valid bed injection. */
++    /* Spatial robustness: if spatial and bed block lengths diverge, handle
++     * the mismatch gracefully.  Small mismatches (1-2 samples) are padded
++     * with zero-order hold to avoid truncation clicks.  Large mismatches
++     * are clamped to the safe overlap. */
 +    if (m->extract_objects && substr >= 3 && m->bed_blockpos > 0 &&
 +        s->blockpos != m->bed_blockpos) {
-+        unsigned int clamped = FFMIN(s->blockpos, m->bed_blockpos);
-+        av_log(avctx, AV_LOG_WARNING,
-+               "spatial/bed blockpos mismatch (%u vs %u), clamping to %u\n",
-+               s->blockpos, m->bed_blockpos, clamped);
-+        s->blockpos = clamped;
++        int diff = (int)s->blockpos - (int)m->bed_blockpos;
++        if (diff > 0 && diff <= 2) {
++            /* Bed shorter by 1-2 samples: pad bed_buffer with last sample */
++            for (unsigned int i = m->bed_blockpos; i < s->blockpos; i++)
++                memcpy(m->bed_buffer[i], m->bed_buffer[m->bed_blockpos - 1],
++                       sizeof(m->bed_buffer[0]));
++            m->bed_blockpos = s->blockpos;
++        } else if (diff < 0 && diff >= -2) {
++            /* Spatial shorter by 1-2 samples: let AU crossfade handle it */
++        } else {
++            unsigned int clamped = FFMIN(s->blockpos, m->bed_blockpos);
++            av_log(avctx, AV_LOG_WARNING,
++                   "spatial/bed blockpos mismatch (%u vs %u), clamping to %u\n",
++                   s->blockpos, m->bed_blockpos, clamped);
++            s->blockpos = clamped;
++        }
 +    }
 +
 +    /* When extract_objects is enabled, always output MAX_CHANNELS (16) for
@@ -742,11 +761,15 @@ index e85dac3..7c2e714 100644
 +         * audio from the rematrix output.  Re-inject bed after rematrix
 +         * to restore clean bed channels.
 +         *
-+         * Height channels need manual scaling by bed_shift (applied here
-+         * in integer with clamp, then crossfaded at AU boundaries to
-+         * smooth discontinuities from coefficient changes). */
-+        /* Compute bed_shift and set up output_shift per channel. */
++         * Height/object channels keep the spatial substream's own
++         * output_shift; only re-injected bed channels are overridden to
++         * match the clean bed audio we splice in from substream 2. */
++        /* Compute bed_shift and preserve the spatial substream's native
++         * output_shift.  Only bed channels need to be overridden to match the
++         * clean bed audio re-injected from the previous substream. */
 +        int8_t bed_shift = 0;
++        int8_t spatial_output_shift[MAX_CHANNELS];
++        memcpy(spatial_output_shift, s->output_shift, sizeof(spatial_output_shift));
 +        if (m->bed_blockpos > 0) {
 +            SubStream *bed_s_os = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
 +            AVChannelLayout bed_layout_os;
@@ -767,18 +790,8 @@ index e85dac3..7c2e714 100644
 +            av_channel_layout_uninit(&bed_layout_os);
 +        }
 +
-+        /* Set output_shift using the spatial substream's ch_assign mapping.
-+         * pack_output reads output_shift[ch_assign[out_ch]], so we must
-+         * index by ch_assign, NOT by thd_channel_order index.
-+         *
-+         * Height channels: reduced shift (bed_shift-2) to prevent overflow
-+         * since the rematrix can amplify bed audio by 2-4×.
-+         * Bed channels: use the bed substream's own output_shift values. */
-+        {
-+            int8_t height_shift = bed_shift > 2 ? bed_shift - 2 : 0;
-+            for (unsigned int ch = 0; ch < MAX_CHANNELS; ch++)
-+                s->output_shift[ch] = height_shift;
-+        }
++        /* Start from the spatial substream's parsed output_shift. */
++        memcpy(s->output_shift, spatial_output_shift, sizeof(s->output_shift));
 +
 +        if (m->bed_blockpos > 0) {
 +            SubStream *bed_s_sh = &m->substream[FFMIN(m->max_decoded_substream - 1, 2)];
@@ -840,6 +853,15 @@ index e85dac3..7c2e714 100644
 +                }
 +            }
 +            av_channel_layout_uninit(&bed_layout_safe);
++
++            /* A2: Track degraded mode transitions.  The actual audio fade
++             * is handled by the HRTF filter (B9) which detects num_matrices
++             * dropping to 0 and applies a smooth fade-out/in.  Here we just
++             * track the state so recovery can be detected. */
++            m->spatial_was_degraded = 1;
++        } else if (!m->spatial_degraded && m->spatial_num_blocks > 0) {
++            /* Track recovery from degraded: the HRTF filter will fade in. */
++            m->spatial_was_degraded = 0;
 +        }
 +
 +        /* Pre-inject bed audio + rematrix + post-inject bed.
@@ -981,17 +1003,22 @@ index e85dac3..7c2e714 100644
 +                    new_first = m->sample_buffer[0][ch];
 +                    jump = new_first - prev_last;
 +
-+                    /* Only crossfade if the jump is significant (> 1/256 of
-+                     * full scale, ~0.004).  Small jumps are inaudible and
-+                     * crossfading them would just smear the audio. */
-+                    if (jump > -1024 && jump < 1024)
++                    /* Only crossfade if the jump is significant.  Lower
++                     * threshold catches smaller but still audible clicks. */
++                    if (jump > -256 && jump < 256)
 +                        continue;
 +
++                    /* Equal-power (cosine) crossfade: preserves constant
++                     * energy across the transition, unlike linear which
++                     * creates a -6dB dip at the midpoint. */
 +                    for (unsigned int i = 0; i < xfade_len; i++) {
 +                        double t = (double)(i + 1) / (double)(xfade_len + 1);
++                        double phase = t * M_PI * 0.5;
++                        double g_new = sin(phase);
++                        double g_old = cos(phase);
 +                        int32_t new_val = m->sample_buffer[i][ch];
 +                        m->sample_buffer[i][ch] = (int32_t)(
-+                            (double)prev_last * (1.0 - t) + (double)new_val * t);
++                            (double)prev_last * g_old + (double)new_val * g_new);
 +                    }
 +                }
 +            }
@@ -1275,56 +1302,9 @@ index e85dac3..7c2e714 100644
 +#endif
 +        }
 +
-+        /* Per-AU output_shift crossfade: when the shift changes between AUs,
-+         * the output gain jumps by 2^(delta_shift) = 6dB per bit.  Even with
-+         * slew-rate smoothing (1 bit/AU), this 6dB step in 40 samples (0.83ms)
-+         * sounds like spatial corruption.
-+         *
-+         * Fix: pre-scale sample_buffer to smoothly ramp from old_gain to
-+         * new_gain within the AU.  At sample 0 the gain matches the previous
-+         * AU's level; at the last sample it matches the new shift.  The
-+         * subsequent pack_output applies new_shift uniformly, so the net
-+         * effect is a smooth gain transition across the AU boundary. */
-+        if (m->prev_pack_shift_valid && s->blockpos > 1) {
-+            uint8_t xfade_used[MAX_CHANNELS] = {0};
-+            for (unsigned int out_ch2 = 0; out_ch2 <= effective_max_ch; out_ch2++) {
-+                int mc = atmos_ch_assign[out_ch2];
-+                if (mc >= 0 && mc < MAX_CHANNELS)
-+                    xfade_used[mc] = 1;
-+            }
-+            for (unsigned int mc = 0; mc < MAX_CHANNELS; mc++) {
-+                int old_s, new_s;
-+                double old_gain, new_gain;
-+
-+                if (!xfade_used[mc])
-+                    continue;
-+                old_s = m->prev_pack_shift[mc];
-+                new_s = safe_output_shift[mc];
-+                if (old_s == new_s)
-+                    continue;
-+
-+                /* Clamp to valid range */
-+                if (old_s < 0) old_s = 0;
-+                if (old_s > 30) old_s = 30;
-+                if (new_s < 0) new_s = 0;
-+                if (new_s > 30) new_s = 30;
-+
-+                old_gain = (double)(1LL << old_s);
-+                new_gain = (double)(1LL << new_s);
-+
-+                /* Ramp: at i=0 ratio=old_gain/new_gain (continues prev level),
-+                 * at i=blockpos-1 ratio=1.0 (settles to new level). */
-+                for (unsigned int i2 = 0; i2 < s->blockpos; i2++) {
-+                    double t = (double)i2 / (double)(s->blockpos - 1);
-+                    double ratio = (old_gain + (new_gain - old_gain) * t)
-+                                   / new_gain;
-+                    m->sample_buffer[i2][mc] =
-+                        (int32_t)((double)m->sample_buffer[i2][mc] * ratio);
-+                }
-+            }
-+        }
-+        memcpy(m->prev_pack_shift, safe_output_shift, sizeof(m->prev_pack_shift));
-+        m->prev_pack_shift_valid = 1;
++        /* Keep the stream's own spatial output_shift; synthetic AU-to-AU
++         * crossfades mask decoder bugs and can themselves create artifacts. */
++        m->prev_pack_shift_valid = 0;
 +
 +        s->lossless_check_data = m->pack_output(s->lossless_check_data,
 +                                                s->blockpos,
@@ -2384,11 +2364,22 @@ index e85dac3..7c2e714 100644
 +                        output_substr--;
 +                }
 +            } else if (spatial_blockpos != m->bed_blockpos) {
-+                unsigned int clamped = FFMIN(spatial_blockpos, m->bed_blockpos);
-+                av_log(m->avctx, AV_LOG_WARNING,
-+                       "spatial/bed blockpos mismatch in AU (%u vs %u), clamping to %u\n",
-+                       spatial_blockpos, m->bed_blockpos, clamped);
-+                m->substream[output_substr].blockpos = clamped;
++                int diff2 = (int)spatial_blockpos - (int)m->bed_blockpos;
++                if (diff2 > 0 && diff2 <= 2) {
++                    /* Pad bed_buffer with last sample for small overshoot */
++                    for (unsigned int pi = m->bed_blockpos; pi < spatial_blockpos; pi++)
++                        memcpy(m->bed_buffer[pi], m->bed_buffer[m->bed_blockpos - 1],
++                               sizeof(m->bed_buffer[0]));
++                    m->bed_blockpos = spatial_blockpos;
++                } else if (diff2 >= -2) {
++                    /* Spatial slightly shorter: AU crossfade handles it */
++                } else {
++                    unsigned int clamped = FFMIN(spatial_blockpos, m->bed_blockpos);
++                    av_log(m->avctx, AV_LOG_WARNING,
++                           "spatial/bed blockpos mismatch in AU (%u vs %u), clamping to %u\n",
++                           spatial_blockpos, m->bed_blockpos, clamped);
++                    m->substream[output_substr].blockpos = clamped;
++                }
 +            }
 +        }
 +        if (m->extract_objects && output_substr < 3) {
@@ -2435,6 +2426,7 @@ index e85dac3..7c2e714 100644
  
      m->params_valid = 0;
 +    m->spatial_degraded = 0;
++    m->spatial_was_degraded = 0;
 +    m->objmeta_updated_au = 0;
 +    m->spatial_shift_smooth_valid = 0;
 +    memset(m->spatial_shift_smooth, 0, sizeof(m->spatial_shift_smooth));

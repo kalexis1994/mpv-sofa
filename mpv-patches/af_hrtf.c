@@ -64,6 +64,7 @@ static ObjCodingMixData *g_objcoding_data_ptr = NULL;
 #define HRTF_FFT_N           1024
 
 #define HRTF_CROSSFADE_LEN   1024
+#define HEIGHT_FADE_LEN      256   // height channel degraded fade (one HRTF block)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -183,6 +184,7 @@ typedef struct {
     HrtfConvolver right[2];
     int active_idx;           // 0 or 1
     int crossfade_remaining;  // samples left in crossfade
+    int crossfade_total;      // actual crossfade length for current transition
     float crossfade_prev_l[HRTF_BLOCK_SIZE]; // previous output for crossfade
     float crossfade_prev_r[HRTF_BLOCK_SIZE];
 } HrtfChannelPair;
@@ -304,6 +306,13 @@ struct priv {
     float min_dist;                           // minimum speaker distance
     float out_limiter_gain;                   // smoothed output limiter gain
 
+    // Height channel continuity filter: smooths AU-boundary discontinuities
+    // in TrueHD rematrix output (~1200 clicks/sec that sound as constant buzz).
+    // Per-channel one-pole state tracks the signal; when a large jump occurs
+    // at an AU boundary, the filter briefly engages to smooth the transition.
+    float height_cont_state[HRTF_MAX_CHANNELS]; // continuity tracker (previous sample)
+    int   height_cont_valid;                     // 1 after first sample processed
+
     // spatial object rendering
     float object_az[HRTF_MAX_CHANNELS];      // cached azimuth per object channel
     float object_el[HRTF_MAX_CHANNELS];      // cached elevation per object channel
@@ -344,6 +353,13 @@ struct priv {
     float joc_smooth_el[OBJCODING_MAX_OBJECTS];      // smoothed elevation per JOC object
     float joc_smooth_dist[OBJCODING_MAX_OBJECTS];    // smoothed distance per JOC object
     int   joc_smooth_valid;                          // 1 after first position update
+
+    // OAMD ramp duration for adaptive crossfade/smoothing
+    int   oamd_ramp_duration;    // last ramp_duration from OAMD (samples), 0=unknown
+
+    // Height channel degraded mode fade state
+    int   height_was_active;     // height channels had signal in previous update
+    int   height_fade_remaining; // >0 = fade-out samples left, <0 = fade-in samples left
 
 };
 
@@ -755,6 +771,44 @@ static int load_sofa(struct priv *p, const char *path) {
     return 0;
 }
 
+static float sample_hrir_lagrange4(const float *src, int len, float pos)
+{
+    if (pos < 0.0f || pos >= (float)len)
+        return 0.0f;
+
+    int base = (int)floorf(pos);
+    float frac = pos - (float)base;
+    int idx0 = base - 1;
+    int idx1 = base;
+    int idx2 = base + 1;
+    int idx3 = base + 2;
+
+    float s0 = (idx0 >= 0 && idx0 < len) ? src[idx0] : 0.0f;
+    float s1 = (idx1 >= 0 && idx1 < len) ? src[idx1] : 0.0f;
+    float s2 = (idx2 >= 0 && idx2 < len) ? src[idx2] : 0.0f;
+    float s3 = (idx3 >= 0 && idx3 < len) ? src[idx3] : 0.0f;
+
+    float c0 = -frac * (frac - 1.0f) * (frac - 2.0f) / 6.0f;
+    float c1 = (frac + 1.0f) * (frac - 1.0f) * (frac - 2.0f) / 2.0f;
+    float c2 = -(frac + 1.0f) * frac * (frac - 2.0f) / 2.0f;
+    float c3 = (frac + 1.0f) * frac * (frac - 1.0f) / 6.0f;
+
+    return c0 * s0 + c1 * s1 + c2 * s2 + c3 * s3;
+}
+
+static void shift_hrir_fractional(const float *src, int len, float delay_samples,
+                                  float *dst)
+{
+    memset(dst, 0, len * sizeof(float));
+    if (delay_samples < 0.0f)
+        delay_samples = 0.0f;
+
+    for (int i = 0; i < len; i++) {
+        float src_pos = (float)i - delay_samples;
+        dst[i] = sample_hrir_lagrange4(src, len, src_pos);
+    }
+}
+
 static void get_hrir_for_position(struct priv *p, float azimuth, float elevation,
                                   float distance, float *hrir_l, float *hrir_r) {
     if (!p->sofa) {
@@ -795,40 +849,38 @@ static void get_hrir_for_position(struct priv *p, float azimuth, float elevation
         }
     }
 
-    // Apply ITD: convert delays to samples, normalize to relative
-    // (one ear at 0, the other at the ITD difference)
+    // Apply ITD with fractional-sample precision so the HRIR onset keeps the
+    // fine time-of-arrival cues that are lost when delays are quantized.
     float min_delay = delay_l < delay_r ? delay_l : delay_r;
-    int dl = (int)((delay_l - min_delay) * p->sample_rate + 0.5f);
-    int dr = (int)((delay_r - min_delay) * p->sample_rate + 0.5f);
+    float dl = (delay_l - min_delay) * p->sample_rate;
+    float dr = (delay_r - min_delay) * p->sample_rate;
 
-    int max_shift = p->hrir_length / 4;  // safety clamp
+    float max_shift = (float)(p->hrir_length / 4);  // safety clamp
+    if (dl < 0.0f) dl = 0.0f;
+    if (dr < 0.0f) dr = 0.0f;
     if (dl > max_shift) dl = max_shift;
     if (dr > max_shift) dr = max_shift;
 
     int len = p->hrir_length;
 
-    // Window the HRIR tail: cosine fade-out over the last 40% to reduce
-    // measurement-room ringing and coloration from long HRIR tails.
+    // Taper only the very end of the HRIR tail. The previous 40% fade-out was
+    // removing useful pinna/room cues and flattening the image.
     {
-        int fade_start = (int)(len * 0.6f);
-        int fade_len = len - fade_start;
+        int fade_len = (int)(len * 0.125f);
+        if (fade_len < 4)
+            fade_len = len < 4 ? len : 4;
+        int fade_start = len - fade_len;
+        int fade_denom = fade_len > 1 ? (fade_len - 1) : 1;
         for (int i = fade_start; i < len; i++) {
-            float t = (float)(i - fade_start) / (float)fade_len;
+            float t = (float)(i - fade_start) / (float)fade_denom;
             float w = 0.5f * (1.0f + cosf(t * (float)M_PI));  // 1 → 0
             ir_l[i] *= w;
             ir_r[i] *= w;
         }
     }
 
-    // Left ear: shift HRIR right by dl samples (prepend zeros)
-    memset(hrir_l, 0, len * sizeof(float));
-    if (len - dl > 0)
-        memcpy(hrir_l + dl, ir_l, (len - dl) * sizeof(float));
-
-    // Right ear: shift HRIR right by dr samples
-    memset(hrir_r, 0, len * sizeof(float));
-    if (len - dr > 0)
-        memcpy(hrir_r + dr, ir_r, (len - dr) * sizeof(float));
+    shift_hrir_fractional(ir_l, len, dl, hrir_l);
+    shift_hrir_fractional(ir_r, len, dr, hrir_r);
 
     free(ir_l);
     free(ir_r);
@@ -874,7 +926,15 @@ static void update_channel_hrir_ex(struct priv *p, int ch, int crossfade) {
         // overlap, so the old HRIR's tail rings out naturally through the
         // fade.  The new convolver ramps in from silence — no discontinuity.
 
-        pair->crossfade_remaining = HRTF_CROSSFADE_LEN;
+        /* Adaptive crossfade length from OAMD ramp_duration.
+         * Short ramp → short crossfade (responsive).
+         * Long/unknown ramp → full crossfade (safe). */
+        int xfade = p->oamd_ramp_duration;
+        if (xfade < 64)  xfade = 64;
+        if (xfade > HRTF_CROSSFADE_LEN) xfade = HRTF_CROSSFADE_LEN;
+        if (p->oamd_ramp_duration <= 0) xfade = HRTF_CROSSFADE_LEN;
+        pair->crossfade_total = xfade;
+        pair->crossfade_remaining = xfade;
         pair->active_idx = next;
     } else {
         // Direct set on active slot (init/reload or first-time setup)
@@ -1050,6 +1110,31 @@ static void init_speaker_positions(struct priv *p) {
 // Forward declaration (defined below)
 static void update_min_dist(struct priv *p);
 
+// Soft elevation floor: smoothly pulls elevation toward a minimum threshold
+// without the hard discontinuity of a simple clamp.
+// Below 20°: quadratic blend toward 15° floor.  At 20°+: no change.
+static inline float soft_elevation_floor(float el) {
+    if (el >= 20.0f) return el;
+    float t = (20.0f - el) / 20.0f;
+    if (t > 1.0f) t = 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    float blend = t * t;
+    return el * (1.0f - blend) + 15.0f * blend;
+}
+
+// Compute exponential smoothing alpha from OAMD ramp_duration.
+// Short ramp → low alpha (fast tracking).  Long ramp → high alpha (heavy smooth).
+// Update interval ~240 samples (5ms at 48kHz) = typical OAMD cadence.
+static inline float compute_smooth_alpha(int ramp_duration) {
+    const float UPDATE_INTERVAL = 240.0f;
+    if (ramp_duration <= 0)
+        return 0.85f;  // fallback when OAMD not available
+    float ratio = (float)ramp_duration / UPDATE_INTERVAL;
+    if (ratio < 0.5f)  return 0.0f;   // snap to target (fast object)
+    if (ratio > 10.0f) return 0.95f;  // heavy smoothing (slow object)
+    return (ratio - 0.5f) / 9.5f * 0.95f;
+}
+
 static void update_object_positions_from_coefficients(struct priv *p) {
     /* The spatial rematrix already renders all spatial effects (object panning,
      * height channels) into the 7.1 speaker feeds (channels 0-7).  The HRTF
@@ -1065,6 +1150,15 @@ static void update_object_positions_from_coefficients(struct priv *p) {
         atomic_store(&g_spatial_coeff_ptr->updated, 0);
 
         uint64_t mask = g_spatial_coeff_ptr->bed_mask;
+        /* Strip height speaker bits from the bed_mask.  In bed-only output
+         * mode, the decoder reports the spatial substream's mask (with TFL/TFR)
+         * but the audio only contains bed channels.  Processing phantom height
+         * channels causes artifacts from stale convolver state. */
+        {
+            uint64_t top_bits = (1ULL<<12)|(1ULL<<13)|(1ULL<<14)|(1ULL<<15)|
+                                (1ULL<<16)|(1ULL<<17)|(1ULL<<18)|(1ULL<<19)|(1ULL<<20);
+            mask &= ~top_bits;
+        }
         if (mask && mask != p->last_bed_mask) {
             HRTF_DBG("update_obj_coeff: bed_mask changed 0x%llx -> 0x%llx, reloading positions\n",
                      (unsigned long long)p->last_bed_mask, (unsigned long long)mask);
@@ -1076,7 +1170,8 @@ static void update_object_positions_from_coefficients(struct priv *p) {
                     p->shared->speaker_pos[ch] = p->speaker_pos[ch];
             }
             if (p->sofa) {
-                for (int ch = 0; ch < p->num_channels && ch < HRTF_MAX_CHANNELS; ch++)
+                int reload_count = bed_count > 0 ? bed_count : p->num_channels;
+                for (int ch = 0; ch < reload_count && ch < HRTF_MAX_CHANNELS; ch++)
                     update_channel_hrir_ex(p, ch, 0);
                 update_min_dist(p);
             }
@@ -1103,6 +1198,21 @@ static void update_object_positions_from_coefficients(struct priv *p) {
             }
         }
     }
+
+    /* Detect degraded mode transitions: when num_matrices drops to 0,
+     * height channels lose their spatial content.  Trigger a fade-out
+     * so the convolver overlap tail rings out smoothly instead of
+     * creating a hard discontinuity.  On recovery, trigger fade-in. */
+    int height_active_now = (g_spatial_coeff_ptr->num_matrices > 0 &&
+                             p->num_height_channels > 0);
+    if (p->height_was_active && !height_active_now) {
+        p->height_fade_remaining = HEIGHT_FADE_LEN;  /* positive = fade-out */
+        HRTF_DBG("height degraded: starting fade-out (%d samples)\n", HEIGHT_FADE_LEN);
+    } else if (!p->height_was_active && height_active_now && p->height_fade_remaining >= 0) {
+        p->height_fade_remaining = -HEIGHT_FADE_LEN; /* negative = fade-in */
+        HRTF_DBG("height restored: starting fade-in (%d samples)\n", HEIGHT_FADE_LEN);
+    }
+    p->height_was_active = height_active_now;
 }
 
 /** Read real-time OAMD object positions and compute gain-weighted centroid
@@ -1123,6 +1233,10 @@ static void update_object_positions_from_objmeta(struct priv *p) {
     if (!atomic_load(&g_spatial_objmeta_ptr->updated))
         return;
     atomic_store(&g_spatial_objmeta_ptr->updated, 0);
+
+    /* Read OAMD ramp_duration for adaptive crossfade/smoothing */
+    if (g_spatial_objmeta_ptr->ramp_duration > 0)
+        p->oamd_ramp_duration = (int)g_spatial_objmeta_ptr->ramp_duration;
 
     int num_obj = g_spatial_objmeta_ptr->num_objects;
     int num_bed = g_spatial_objmeta_ptr->num_bed_objects;
@@ -1192,10 +1306,15 @@ static void update_object_positions_from_objmeta(struct priv *p) {
     float wx_L = 0, wy_L = 0, wz_L = 0, wg_L = 0;
     float wx_R = 0, wy_R = 0, wz_R = 0, wg_R = 0;
 
-    /* Dominant object gating: track top-gain objects */
+    /* Dominant object gating: track top-gain objects globally and per L/R side.
+     * Per-side dominant gives each height speaker its own best-match object,
+     * improving spatial precision when objects are spread across the soundfield. */
     int dominant_count = 0;
     int dominant_idx = -1;
     float max_gain_db = -200.0f;
+
+    int dominant_idx_L = -1, dominant_idx_R = -1;
+    float max_gain_db_L = -200.0f, max_gain_db_R = -200.0f;
 
     for (int i = num_bed; i < num_obj && i < SPATIAL_EXT_MAX_OBJECTS; i++) {
         SpatialExtObjectPos *obj = &g_spatial_objmeta_ptr->objects[i];
@@ -1238,10 +1357,25 @@ static void update_object_positions_from_objmeta(struct priv *p) {
                 max_gain_db = obj->gain_db;
                 dominant_idx = i;
             }
+            /* Per-side dominant: objects with x < 0 contribute to left,
+             * x > 0 to right, centered objects to both sides. */
+            float w_L_test = fmaxf(0.0f, 0.5f - dx * 0.5f);
+            float w_R_test = fmaxf(0.0f, 0.5f + dx * 0.5f);
+            if (w_L_test > 0.3f && obj->gain_db > max_gain_db_L) {
+                max_gain_db_L = obj->gain_db;
+                dominant_idx_L = i;
+            }
+            if (w_R_test > 0.3f && obj->gain_db > max_gain_db_R) {
+                max_gain_db_R = obj->gain_db;
+                dominant_idx_R = i;
+            }
         }
 
-        /* Linear gain for centroid weighting */
-        float gain = powf(10.0f, (float)obj->gain_db / 20.0f);
+        /* Energy-weighted (gain²) centroid weighting: emphasizes loud
+         * objects more strongly than linear gain weighting, giving
+         * better spatial precision when one object dominates. */
+        float gain_lin = powf(10.0f, (float)obj->gain_db / 20.0f);
+        float gain = gain_lin * gain_lin;
 
         /* L/R panning weights based on horizontal position:
          * x=-1 (left) → w_L=1, w_R=0; x=+1 (right) → w_L=0, w_R=1 */
@@ -1264,7 +1398,7 @@ static void update_object_positions_from_objmeta(struct priv *p) {
      * its exact OAMD position.  Object channels start at index
      * num_bed_channels (i.e., 6 for 5.1). */
     if (p->objcoding_active && p->objcoding_num_objects > 0 && p->sofa) {
-        const float JOC_SMOOTH = 0.80f;
+        const float JOC_SMOOTH = compute_smooth_alpha(p->oamd_ramp_duration);
         int bed_ch = p->num_bed_channels > 0 ? p->num_bed_channels : 6;
 
         for (int i = num_bed; i < num_obj && i < SPATIAL_EXT_MAX_OBJECTS; i++) {
@@ -1288,6 +1422,7 @@ static void update_object_positions_from_objmeta(struct priv *p) {
             float new_az = atan2f(-rx, -ry) * (180.0f / (float)M_PI);
             float new_el = asinf(fminf(1.0f, fmaxf(-1.0f, rz / dist)))
                             * (180.0f / (float)M_PI);
+            new_el = soft_elevation_floor(new_el);
 
             /* Exponential smoothing */
             if (p->joc_smooth_valid) {
@@ -1324,13 +1459,19 @@ static void update_object_positions_from_objmeta(struct priv *p) {
     if (p->num_height_channels <= 0 || !p->sofa)
         goto shared_state_done;
 
-    /* Smoothing factor: ~85% retention → ~15ms time constant at typical
-     * OAMD update rate (~5ms). Prevents spatial "jumps". */
-    const float SMOOTH = 0.85f;
+    /* Adaptive smoothing factor from OAMD ramp_duration.
+     * Short ramp → low alpha (fast tracking for rapid objects).
+     * Long/unknown ramp → high alpha (smooth slow movements). */
+    const float SMOOTH = compute_smooth_alpha(p->oamd_ramp_duration);
 
     for (int h = 0; h < p->num_height_channels && h < HRTF_MAX_CHANNELS; h++) {
         int ch = p->height_ch_idx[h];
         if (ch < 0 || ch >= HRTF_MAX_CHANNELS)
+            continue;
+
+        /* Skip HRIR updates while height is fading out — let the
+         * convolver ring out its overlap tail naturally. */
+        if (p->height_fade_remaining > 0)
             continue;
 
         /* Determine target position for this height channel.
@@ -1342,10 +1483,12 @@ static void update_object_positions_from_objmeta(struct priv *p) {
         float cx, cy, cz;
         float wg = use_left ? wg_L : wg_R;
 
-        if (dominant_count <= 2 && dominant_count > 0 && dominant_idx >= 0) {
-            /* Dominant object gating: when 1-2 objects active, position
-             * directly at the dominant object for maximum precision. */
-            SpatialExtObjectPos *dom = &g_spatial_objmeta_ptr->objects[dominant_idx];
+        /* Per-side dominant: use the loudest object on this height speaker's
+         * side for direct positioning.  Falls back to centroid when 5+ objects
+         * are evenly spread or no per-side dominant exists. */
+        int per_side_dom = use_left ? dominant_idx_L : dominant_idx_R;
+        if (dominant_count <= 4 && dominant_count > 0 && per_side_dom >= 0) {
+            SpatialExtObjectPos *dom = &g_spatial_objmeta_ptr->objects[per_side_dom];
             cx = dom->x;
             cy = dom->y;
             cz = dom->z;
@@ -1379,7 +1522,7 @@ static void update_object_positions_from_objmeta(struct priv *p) {
 
         /* Ensure height objects maintain some minimum elevation so they
          * don't collapse into the ear-level bed plane. */
-        if (new_el < 15.0f) new_el = 15.0f;
+        new_el = soft_elevation_floor(new_el);
 
         /* Apply exponential smoothing */
         if (p->height_smooth_valid) {
@@ -1471,6 +1614,7 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
         HrtfChannelPair *pair = &p->channels[ch];
         pair->active_idx = 0;
         pair->crossfade_remaining = 0;
+        pair->crossfade_total = HRTF_CROSSFADE_LEN;
         for (int i = 0; i < 2; i++) {
             convolver_init(&pair->left[i]);
             convolver_init(&pair->right[i]);
@@ -1592,6 +1736,7 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
         HrtfChannelPair *pair = &p->channels[ch];
         pair->active_idx = 0;
         pair->crossfade_remaining = 0;
+        pair->crossfade_total = HRTF_CROSSFADE_LEN;
         for (int k = 0; k < 2; k++) {
             convolver_init(&pair->left[k]);
             convolver_init(&pair->right[k]);
@@ -1599,6 +1744,9 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
         p->speaker_pos[ch] = (HrtfSpeakerPos){0, 0, 2.0f};
     }
     p->joc_smooth_valid = 0;
+    p->oamd_ramp_duration = 0;
+    p->height_was_active = 0;
+    p->height_fade_remaining = 0;
     memset(p->joc_smooth_az, 0, sizeof(p->joc_smooth_az));
     memset(p->joc_smooth_el, 0, sizeof(p->joc_smooth_el));
     memset(p->joc_smooth_dist, 0, sizeof(p->joc_smooth_dist));
@@ -1651,6 +1799,15 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     memset(out_l, 0, num_samples * sizeof(float));
     memset(out_r, 0, num_samples * sizeof(float));
 
+    /* Clamp effective channel count to bed channels when the decoder
+     * reports more channels than the bed actually contains (e.g., 16
+     * channels reported but only 8 with audio in bed-only mode).
+     * Processing silent channels wastes CPU and can produce artifacts
+     * from stale overlap-add buffers in their convolvers. */
+    int bed_limit = p->num_bed_channels;
+    if (bed_limit > 0 && bed_limit < num_ch)
+        num_ch = bed_limit;
+
     // Debug mute flags
     int mute_bed = p->shared ? atomic_load_explicit(&p->shared->mute_bed, memory_order_relaxed) : 0;
     int mute_obj = p->shared ? atomic_load_explicit(&p->shared->mute_objects, memory_order_relaxed) : 0;
@@ -1680,6 +1837,44 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     int joc_replaces_bed = (p->objcoding_active && p->objcoding_num_objects > 0
                             && num_ch > bed_count);
 
+    /* TrueHD Atmos height channels (TFL/TFR) are ~75-80% remixed bed audio
+     * (R²=0.73-0.81 linear regression against bed channels).  Processing
+     * them through separate HRIRs alongside the bed creates comb filtering
+     * that sounds robotic/metallic.
+     *
+     * Solution: SKIP height channels in the HRTF convolution.  The OAMD
+     * object positions are used to dynamically adjust the bed channels'
+     * HRTF elevation (in update_object_positions_from_objmeta), giving
+     * overhead spatial cues WITHOUT comb filtering.
+     *
+     * The height channel energy is instead mixed into the bed channels
+     * as a subtle overhead reinforcement: scale height content by a small
+     * factor and add to the closest bed speaker pair (FL/FR for TFL/TFR). */
+    int skip_height = (p->num_height_channels > 0 && !joc_replaces_bed);
+
+    /* Mix height channel energy into corresponding bed channels.
+     * TFL → FL (ch0), TFR → FR (ch1).  Use a subtle mix level (0.15)
+     * to add overhead presence without introducing comb filtering.
+     * This runs BEFORE HRTF convolution so the mixed content gets
+     * the bed speaker's HRTF (whose elevation is dynamically adjusted
+     * by OAMD), not a separate overhead HRTF. */
+    if (skip_height) {
+        for (int h = 0; h < p->num_height_channels && h < HRTF_MAX_CHANNELS; h++) {
+            int hch = p->height_ch_idx[h];
+            if (hch < 0 || hch >= num_ch) continue;
+            /* Map height channel to closest bed channel:
+             * positive azimuth (left) → FL (ch0)
+             * negative azimuth (right) → FR (ch1) */
+            float az = p->speaker_pos[hch].azimuth;
+            int target_bed = (az >= 0.0f) ? 0 : 1;
+            if (target_bed < num_ch) {
+                float mix = 0.15f;
+                for (int i = 0; i < num_samples; i++)
+                    channel_data[target_bed][i] += channel_data[hch][i] * mix;
+            }
+        }
+    }
+
     for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
         // Skip muted channel groups
         if (mute_bed && ch < bed_count) continue;
@@ -1687,6 +1882,10 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
 
         // When JOC objects replace bed, skip bed channels (keep LFE=3)
         if (joc_replaces_bed && ch < bed_count && ch != 3) continue;
+
+        // Skip TrueHD height channels — they cause comb filtering
+        // because they contain remixed bed audio (see comment above).
+        if (skip_height && ch >= bed_count && ch != 3) continue;
 
         HrtfChannelPair *pair = &p->channels[ch];
         int active = pair->active_idx;
@@ -1732,37 +1931,12 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
             continue;
         }
 
-        /* TrueHD height channels: mix as direct stereo instead of HRTF.
-         * Height channels contain bed+object audio from the rematrix.
-         * Running them through HRTF at a different position than the bed
-         * creates comb filtering ("robotic" sound) because the bed
-         * component gets convolved with two different HRIRs.
-         *
-         * Instead: pan TFL→left, TFR→right with a height-appropriate
-         * gain, adding a subtle stereo width cue from the elevation. */
-        int is_height = 0;
-        for (int h = 0; h < p->num_height_channels; h++) {
-            if (p->height_ch_idx[h] == ch) { is_height = 1; break; }
-        }
-        if (is_height && !p->objcoding_active) {
-            float az = p->speaker_pos[ch].azimuth;
-            /* Simple pan: az>0 = left-biased, az<0 = right-biased */
-            float pan = 0.5f + az / 180.0f;  /* 0..1, 0.5=center */
-            if (pan < 0.0f) pan = 0.0f;
-            if (pan > 1.0f) pan = 1.0f;
-            float gain_l = pan * 0.5f;       /* attenuated to avoid excess energy */
-            float gain_r = (1.0f - pan) * 0.5f;
-            for (int i = 0; i < num_samples; i++) {
-                out_l[i] += channel_data[ch][i] * gain_l;
-                out_r[i] += channel_data[ch][i] * gain_r;
-            }
-            continue;
-        }
-
         if (!pair->left[active].valid)
             continue;
 
-        // Convolve this channel with left and right HRIRs
+        // Consistent binaural path: every non-LFE source uses the same
+        // HRIR renderer, whether it comes from bed speakers, height feeds,
+        // or reconstructed object channels.
         convolver_process(&pair->left[active], channel_data[ch], block_l);
         convolver_process(&pair->right[active], channel_data[ch], block_r);
 
@@ -1779,7 +1953,8 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
                         // Equal-power crossfade: maintains constant energy
                         // even when old and new HRIRs are uncorrelated,
                         // preventing the audible dip of a linear fade.
-                        float phase = (1.0f - (float)pair->crossfade_remaining / HRTF_CROSSFADE_LEN)
+                        int xf_total = pair->crossfade_total > 0 ? pair->crossfade_total : HRTF_CROSSFADE_LEN;
+                        float phase = (1.0f - (float)pair->crossfade_remaining / (float)xf_total)
                                       * ((float)M_PI * 0.5f);
                         float g_new = sinf(phase);
                         float g_old = cosf(phase);
@@ -1790,6 +1965,28 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
                 }
             } else {
                 pair->crossfade_remaining = 0;
+            }
+        }
+
+        /* Height channel degraded fade: smoothly fade out height channels
+         * when the decoder enters degraded mode (no spatial rematrix),
+         * and fade in when it recovers.  Prevents overlap-add tail
+         * discontinuities from abrupt height silence/restoration. */
+        if (ch >= bed_count && p->height_fade_remaining != 0) {
+            for (int i = 0; i < num_samples; i++) {
+                if (p->height_fade_remaining > 0) {
+                    /* Fade-out: 1→0 over HEIGHT_FADE_LEN samples */
+                    float fade = (float)p->height_fade_remaining / (float)HEIGHT_FADE_LEN;
+                    block_l[i] *= fade;
+                    block_r[i] *= fade;
+                    p->height_fade_remaining--;
+                } else if (p->height_fade_remaining < 0) {
+                    /* Fade-in: 0→1 over HEIGHT_FADE_LEN samples */
+                    float fade = 1.0f - (float)(-p->height_fade_remaining) / (float)HEIGHT_FADE_LEN;
+                    block_l[i] *= fade;
+                    block_r[i] *= fade;
+                    p->height_fade_remaining++;
+                }
             }
         }
 
@@ -2346,9 +2543,50 @@ static void af_hrtf_process(struct mp_filter *f) {
         int n = space < avail ? space : avail;
 
         if (n > 0) {
-            for (int ch = 0; ch < in_channels && ch < HRTF_MAX_CHANNELS; ch++)
+            for (int ch = 0; ch < in_channels && ch < HRTF_MAX_CHANNELS; ch++) {
                 memcpy(p->input_accum[ch] + p->input_accum_pos,
                        (float*)in_data[ch] + in_read, n * sizeof(float));
+
+                /* Frame boundary continuity: TrueHD height channels have
+                 * discontinuities at ~89% of AU boundaries (~1200/sec)
+                 * because the rematrix coefficients jump between AUs.
+                 * These accumulate into a constant buzz/hum.
+                 *
+                 * For height channels (ch >= bed_count): apply a longer
+                 * cosine splice (up to 16 samples) to smooth the jump.
+                 * For bed channels: short 4-sample linear blend suffices
+                 * since bed audio has natural continuity. */
+                if (in_read == 0 && p->prev_frame_tail_valid) {
+                    float prev = p->prev_frame_tail[ch];
+                    float curr = p->input_accum[ch][p->input_accum_pos];
+                    float jump = fabsf(curr - prev);
+                    int is_height_ch = (ch >= p->num_bed_channels && ch != 3);
+
+                    float threshold = is_height_ch ? 0.0005f : 0.001f;
+                    int max_blend = is_height_ch ? 16 : 4;
+
+                    if (jump > threshold) {
+                        int blend_n = n < max_blend ? n : max_blend;
+                        for (int b = 0; b < blend_n; b++) {
+                            float t = (float)(b + 1) / (float)(blend_n + 1);
+                            /* Cosine window for height (equal-power),
+                             * linear for bed (simpler, sufficient). */
+                            float g_new, g_old;
+                            if (is_height_ch) {
+                                float phase = t * ((float)M_PI * 0.5f);
+                                g_new = sinf(phase);
+                                g_old = cosf(phase);
+                            } else {
+                                g_new = t;
+                                g_old = 1.0f - t;
+                            }
+                            int idx = p->input_accum_pos + b;
+                            p->input_accum[ch][idx] = prev * g_old
+                                                    + p->input_accum[ch][idx] * g_new;
+                        }
+                    }
+                }
+            }
             p->input_accum_pos += n;
             in_read += n;
         }
@@ -2415,6 +2653,21 @@ static void af_hrtf_process(struct mp_filter *f) {
     for (int i = 0; i < in_samples; i++) {
         out_l[i] *= master_vol;
         out_r[i] *= master_vol;
+    }
+
+    // Crossfeed: mix a small fraction of opposite channel to reduce
+    // the hyper-lateralization inherent in HRTF-based binaural rendering.
+    // Without crossfeed, sources at 30° have 8-11 dB L/R difference,
+    // making the stereo image unnaturally wide for headphone listening.
+    // 10% crossfeed narrows the image to a natural speaker-like width.
+    {
+        const float xfeed = 0.10f;
+        for (int i = 0; i < in_samples; i++) {
+            float l = out_l[i];
+            float r = out_r[i];
+            out_l[i] = l * (1.0f - xfeed) + r * xfeed;
+            out_r[i] = r * (1.0f - xfeed) + l * xfeed;
+        }
     }
 
     // NOTE: debug logging is done AFTER the limiter (below)

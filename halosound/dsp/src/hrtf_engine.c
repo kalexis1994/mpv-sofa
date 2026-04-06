@@ -328,6 +328,16 @@ void halo_set_room_preset(HaloEngine *e, int preset) {
         { 22.0f, 16.0f, 9.0f, 0.25f, 0.55f, 0.4f, 0.09f, 25.0f, 1.6f },
         /* 3: Concert Hall */
         { 35.0f, 25.0f, 14.0f, 0.15f, 0.82f, 0.3f, 0.16f, 40.0f, 2.2f },
+        /* 4: Living Room */
+        { 5.0f, 4.0f, 2.5f, 0.55f,  0.18f, 0.65f, 0.022f, 6.0f, 1.0f },
+        /* 5: Screening Room */
+        { 10.0f, 7.0f, 3.5f, 0.40f, 0.38f, 0.55f, 0.05f, 12.0f, 1.2f },
+        /* 6: IMAX */
+        { 30.0f, 22.0f, 18.0f, 0.18f, 0.70f, 0.35f, 0.13f, 35.0f, 2.0f },
+        /* 7: Dolby Cinema */
+        { 18.0f, 14.0f, 8.0f, 0.45f, 0.40f, 0.55f, 0.06f, 18.0f, 1.4f },
+        /* 8: None (Dry) */
+        { 0.0f, 0.0f, 0.0f, 1.0f,   0.0f, 1.0f, 0.0f, 0.0f, 1.0f },
     };
 
     int num_presets = sizeof(presets) / sizeof(presets[0]);
