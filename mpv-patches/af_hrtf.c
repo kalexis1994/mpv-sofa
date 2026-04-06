@@ -260,6 +260,8 @@ struct priv {
     // libmysofa
     struct MYSOFA_EASY *sofa;
     int hrir_length;
+    float *dfc_filter;   // diffuse-field compensation (freq domain, PFFFT format)
+    int    dfc_valid;     // 1 if DFC filter computed
 
     // Per-channel convolvers (double-buffered)
     HrtfChannelPair channels[HRTF_MAX_CHANNELS];
@@ -755,6 +757,104 @@ static void er_destroy(EarlyReflections *er) {
 // SOFA HRIR loading
 // ---------------------------------------------------------------------------
 
+/* Compute diffuse-field equalization filter from SOFA data.
+ * The DFC removes per-SOFA spectral coloration so that all SOFA
+ * files produce consistent spatial positioning regardless of the
+ * measurement head/dummy used.
+ *
+ * Process:
+ * 1. Sample HRIRs at N uniformly distributed directions
+ * 2. Compute average power spectrum across all directions and ears
+ * 3. Invert it → DFC filter (applied to each HRIR on retrieval)
+ *
+ * Result stored in p->dfc_filter_l/r (frequency domain, PFFFT format) */
+static void compute_diffuse_field_eq(struct priv *p) {
+    if (!p->sofa || p->hrir_length <= 0)
+        return;
+
+    int len = p->hrir_length;
+    int fft_n = HRTF_FFT_N;
+
+    /* Allocate accumulator for average power spectrum */
+    float *avg_power = pffft_aligned_malloc(fft_n * sizeof(float));
+    float *tmp_td = pffft_aligned_malloc(fft_n * sizeof(float));
+    float *tmp_fd = pffft_aligned_malloc(fft_n * sizeof(float));
+    float *work = pffft_aligned_malloc(fft_n * sizeof(float));
+    PFFFT_Setup *fft = pffft_new_setup(fft_n, PFFFT_REAL);
+
+    memset(avg_power, 0, fft_n * sizeof(float));
+
+    /* Sample directions: azimuth every 30°, elevation -30° to 60° every 30° */
+    float *ir_l = calloc(len, sizeof(float));
+    float *ir_r = calloc(len, sizeof(float));
+    int n_dirs = 0;
+
+    for (float el = -30.0f; el <= 60.0f; el += 30.0f) {
+        for (float az = 0.0f; az < 360.0f; az += 30.0f) {
+            float az_rad = az * (float)(M_PI / 180.0);
+            float el_rad = el * (float)(M_PI / 180.0);
+            float x = cosf(el_rad) * cosf(az_rad);
+            float y = cosf(el_rad) * sinf(az_rad);
+            float z = sinf(el_rad);
+            float dl = 0, dr = 0;
+
+            mysofa_getfilter_float(p->sofa, x, y, z, ir_l, ir_r, &dl, &dr);
+
+            /* Accumulate power spectrum for both ears */
+            for (int ear = 0; ear < 2; ear++) {
+                float *ir = (ear == 0) ? ir_l : ir_r;
+                memset(tmp_td, 0, fft_n * sizeof(float));
+                memcpy(tmp_td, ir, len * sizeof(float));
+                pffft_transform(fft, tmp_td, tmp_fd, work, PFFFT_FORWARD);
+
+                /* Accumulate |H(f)|^2 (power) */
+                /* PFFFT real format: [DC, f1_re, f1_im, f2_re, f2_im, ..., Nyquist] */
+                avg_power[0] += tmp_fd[0] * tmp_fd[0]; /* DC */
+                avg_power[1] += tmp_fd[1] * tmp_fd[1]; /* Nyquist */
+                for (int k = 2; k < fft_n; k += 2) {
+                    float re = tmp_fd[k];
+                    float im = tmp_fd[k + 1];
+                    avg_power[k] += re * re + im * im;
+                    avg_power[k + 1] += re * re + im * im; /* same power for re/im slot */
+                }
+            }
+            n_dirs++;
+        }
+    }
+
+    /* Average and compute inverse sqrt (= magnitude inverse) */
+    float scale_dirs = 1.0f / (float)(n_dirs * 2); /* n_dirs × 2 ears */
+    p->dfc_filter = pffft_aligned_malloc(fft_n * sizeof(float));
+
+    /* DC and Nyquist */
+    float dc_avg = avg_power[0] * scale_dirs;
+    float ny_avg = avg_power[1] * scale_dirs;
+    p->dfc_filter[0] = (dc_avg > 1e-12f) ? 1.0f / sqrtf(dc_avg) : 1.0f;
+    p->dfc_filter[1] = (ny_avg > 1e-12f) ? 1.0f / sqrtf(ny_avg) : 1.0f;
+
+    for (int k = 2; k < fft_n; k += 2) {
+        float pwr = avg_power[k] * scale_dirs;
+        float inv = (pwr > 1e-12f) ? 1.0f / sqrtf(pwr) : 1.0f;
+        /* Clamp to prevent extreme boost at low-energy frequencies */
+        if (inv > 10.0f) inv = 10.0f;
+        p->dfc_filter[k] = inv;
+        p->dfc_filter[k + 1] = inv;
+    }
+
+    p->dfc_valid = 1;
+    HRTF_DBG("DFC computed: %d directions, filter[0]=%.3f filter[512]=%.3f\n",
+              n_dirs, p->dfc_filter[0],
+              fft_n > 512 ? p->dfc_filter[512] : 0.0f);
+
+    pffft_destroy_setup(fft);
+    pffft_aligned_free(avg_power);
+    pffft_aligned_free(tmp_td);
+    pffft_aligned_free(tmp_fd);
+    pffft_aligned_free(work);
+    free(ir_l);
+    free(ir_r);
+}
+
 static int load_sofa(struct priv *p, const char *path) {
     int filter_length = 0;
     int err;
@@ -762,6 +862,11 @@ static int load_sofa(struct priv *p, const char *path) {
     if (p->sofa) {
         mysofa_close(p->sofa);
         p->sofa = NULL;
+    }
+    if (p->dfc_filter) {
+        pffft_aligned_free(p->dfc_filter);
+        p->dfc_filter = NULL;
+        p->dfc_valid = 0;
     }
 
     p->sofa = mysofa_open(path, (float)p->sample_rate, &filter_length, &err);
@@ -773,6 +878,10 @@ static int load_sofa(struct priv *p, const char *path) {
 
     p->hrir_length = filter_length;
     HRTF_DBG("SOFA loaded OK: path=%s hrir_len=%d\n", path, filter_length);
+
+    /* Compute diffuse-field equalization for consistent spatial image */
+    compute_diffuse_field_eq(p);
+
     return 0;
 }
 
@@ -840,6 +949,45 @@ static void get_hrir_for_position(struct priv *p, float azimuth, float elevation
     mysofa_getfilter_float(p->sofa, coords[0], coords[1], coords[2],
                            ir_l, ir_r, &delay_l, &delay_r);
 
+    int len = p->hrir_length;
+
+    /* Apply diffuse-field equalization: multiply HRIR spectrum by DFC filter.
+     * This removes per-SOFA spectral coloration, making all SOFA files
+     * produce consistent spatial positioning. */
+    if (p->dfc_valid && p->dfc_filter) {
+        int fft_n = HRTF_FFT_N;
+        float *td = pffft_aligned_malloc(fft_n * sizeof(float));
+        float *fd = pffft_aligned_malloc(fft_n * sizeof(float));
+        float *work = pffft_aligned_malloc(fft_n * sizeof(float));
+        PFFFT_Setup *fft = pffft_new_setup(fft_n, PFFFT_REAL);
+
+        for (int ear = 0; ear < 2; ear++) {
+            float *ir = (ear == 0) ? ir_l : ir_r;
+
+            memset(td, 0, fft_n * sizeof(float));
+            memcpy(td, ir, len * sizeof(float));
+            pffft_transform(fft, td, fd, work, PFFFT_FORWARD);
+
+            fd[0] *= p->dfc_filter[0];
+            fd[1] *= p->dfc_filter[1];
+            for (int k = 2; k < fft_n; k += 2) {
+                float g = p->dfc_filter[k];
+                fd[k]     *= g;
+                fd[k + 1] *= g;
+            }
+
+            pffft_transform(fft, fd, td, work, PFFFT_BACKWARD);
+            float inv_n = 1.0f / (float)fft_n;
+            for (int i = 0; i < len; i++)
+                ir[i] = td[i] * inv_n;
+        }
+
+        pffft_destroy_setup(fft);
+        pffft_aligned_free(td);
+        pffft_aligned_free(fd);
+        pffft_aligned_free(work);
+    }
+
     /* One-time diagnostic: print coords + delays for first 16 HRIR lookups
      * so we can verify the SOFA coordinate convention. For FC (az=0) the
      * delays should be equal (source on median plane). */
@@ -865,8 +1013,6 @@ static void get_hrir_for_position(struct priv *p, float azimuth, float elevation
     if (dr < 0.0f) dr = 0.0f;
     if (dl > max_shift) dl = max_shift;
     if (dr > max_shift) dr = max_shift;
-
-    int len = p->hrir_length;
 
     // Taper only the very end of the HRIR tail. The previous 40% fade-out was
     // removing useful pinna/room cues and flattening the image.
