@@ -2108,8 +2108,14 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
             }
         }
 
+        /* Pre-convolution gain: combines distance attenuation with headroom.
+         * Applying headroom BEFORE convolution (instead of after the sum)
+         * prevents the HRIR's frequency-domain amplification (~2-3x at
+         * pinna resonances) from pushing the convolution output above 1.0.
+         * This eliminates the "vinyl crackle" micro-clipping artifact. */
+        float pre_gain = dist_gain / sqrtf((float)(bed_count > 4 ? bed_count : 4));
         for (int i = 0; i < num_samples; i++)
-            channel_data[ch][i] *= dist_gain;
+            channel_data[ch][i] *= pre_gain;
 
         // Air absorption — one-pole lowpass (skip LFE)
         if (ch != 3) {
@@ -2193,26 +2199,9 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         }
     }
 
-    /* Adaptive headroom: count only bed channels for the headroom base.
-     * Objects are typically much quieter than bed channels and don't need
-     * the same headroom reduction.  With 20 channels (8 bed + 12 obj),
-     * 1/sqrt(20)=0.224 is far too aggressive; 1/sqrt(8)=0.354 is correct
-     * since the objects add relatively little energy to the sum. */
-    {
-        int bed_active = 0;
-        for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
-            if (ch >= bed_count) break;  /* only count bed */
-            if (mute_bed) continue;
-            if (joc_replaces_bed && ch != 3) continue;
-            bed_active++;
-        }
-        if (bed_active < 6) bed_active = 6;
-        float headroom = 1.0f / sqrtf((float)bed_active);
-        for (int i = 0; i < num_samples; i++) {
-            out_l[i] *= headroom;
-            out_r[i] *= headroom;
-        }
-    }
+    /* Headroom is now applied pre-convolution (in the per-channel loop above)
+     * so no post-sum attenuation is needed.  This prevents HRIR frequency
+     * amplification from causing internal clipping during the convolution. */
 
 }
 
@@ -2744,16 +2733,10 @@ static void af_hrtf_process(struct mp_filter *f) {
                 memcpy(p->input_accum[ch] + p->input_accum_pos,
                        (float*)in_data[ch] + in_read, n * sizeof(float));
 
-                /* Frame boundary continuity: TrueHD height channels have
-                 * discontinuities at ~89% of AU boundaries (~1200/sec)
-                 * because the rematrix coefficients jump between AUs.
-                 * These accumulate into a constant buzz/hum.
-                 *
-                 * For height channels (ch >= bed_count): apply a longer
-                 * cosine splice (up to 16 samples) to smooth the jump.
-                 * For bed channels: short 4-sample linear blend suffices
-                 * since bed audio has natural continuity. */
-                if (in_read == 0 && p->prev_frame_tail_valid) {
+                /* Frame boundary smoothing DISABLED — was causing crackling
+                 * by modifying normal audio at 1200 Hz rate (threshold too
+                 * low: 0.001 catches legitimate signal transitions). */
+                if (0 && in_read == 0 && p->prev_frame_tail_valid) {
                     float prev = p->prev_frame_tail[ch];
                     float curr = p->input_accum[ch][p->input_accum_pos];
                     float jump = fabsf(curr - prev);
@@ -3011,48 +2994,26 @@ static void af_hrtf_process(struct mp_filter *f) {
         }
     }
 
-    // Transparent safety limiter (sample-wise envelope).
-    // Avoids frame-wide gain dips that can sound like transient "cuts".
+    /* Soft clipper: uses tanh-based saturation instead of hard clipping.
+     * Hard clipping (the previous approach) cuts peaks flat, creating
+     * harmonic distortion that sounds like electrical crackling.
+     * Soft clipping rounds the peaks smoothly, preserving the waveform
+     * shape and eliminating the "vinyl crackle" artifact.
+     *
+     * No envelope follower (limiter) — it caused gain pumping artifacts
+     * from its 2ms attack / 200ms release time constants. The soft
+     * clipper handles peak control instantaneously without pumping. */
     {
-        const float ceiling = 0.90f; // leave headroom for DAC/output stages
-        const float sr = (float)(p->sample_rate > 0 ? p->sample_rate : 48000);
-        const float attack_tc = 0.002f;   // ~2 ms attack
-        const float release_tc = 0.200f;  // ~200 ms release
-        const float attack_a = expf(-1.0f / (sr * attack_tc));
-        const float release_a = expf(-1.0f / (sr * release_tc));
-        float g = p->out_limiter_gain;
-
-        if (!(g > 0.0f) || g > 1.0f)
-            g = 1.0f;
-
+        const float drive = 0.85f;  /* how much signal hits the saturator */
         for (int i = 0; i < in_samples; i++) {
-            float l = out_l[i];
-            float r = out_r[i];
-            float peak = fabsf(l) > fabsf(r) ? fabsf(l) : fabsf(r);
-            float target = 1.0f;
+            float l = out_l[i] * drive;
+            float r = out_r[i] * drive;
 
-            if (peak > ceiling && peak > 1e-12f)
-                target = ceiling / peak;
-
-            if (target < g)
-                g = attack_a * g + (1.0f - attack_a) * target;
-            else
-                g = release_a * g + (1.0f - release_a) * target;
-
-            l *= g;
-            r *= g;
-
-            // Hard safety clamp to guarantee no sample overs.
-            if (l > ceiling) l = ceiling;
-            else if (l < -ceiling) l = -ceiling;
-            if (r > ceiling) r = ceiling;
-            else if (r < -ceiling) r = -ceiling;
-
-            out_l[i] = l;
-            out_r[i] = r;
+            /* Soft clip via tanh: smoothly saturates peaks above ~0.85
+             * without the harsh harmonics of hard clipping. */
+            out_l[i] = tanhf(l);
+            out_r[i] = tanhf(r);
         }
-
-        p->out_limiter_gain = g;
     }
 
     // Debug: track peaks across ALL frames.
