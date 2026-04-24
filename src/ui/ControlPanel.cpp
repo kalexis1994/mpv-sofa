@@ -41,6 +41,7 @@ struct RoomPreset {
     float reverb_damping;         // 0-1 HF absorption
     float reverb_predelay;        // ms
     float room_gain;              // volume compensation for distance (1.0 = nearfield ref)
+    float er_level;               // 0-1 ambisonic ER send level
     HrtfPosition positions[12];
 };
 
@@ -53,6 +54,7 @@ static const RoomPreset roomPresets[] = {
      4.5f, 3.5f, 2.8f, 0.65f,
      0.10f, 0.014f, 0.7f, 2.0f,  // very dry, almost no reverb
      1.0f,  // room_gain: reference level (nearfield)
+     0.05f, // er_level: tiny — treated room has few reflections
      {
         { 30.0f,   0.0f, 1.2f},  // FL  - nearfield monitors on desk
         {-30.0f,   0.0f, 1.2f},  // FR
@@ -76,6 +78,7 @@ static const RoomPreset roomPresets[] = {
      6.5f, 5.0f, 2.7f, 0.35f,
      0.45f, 0.068f, 0.5f, 8.0f,  // moderate reverb, carpeted room
      1.0f,  // room_gain: standard home reference
+     0.25f, // er_level: modest — domestic reflection density
      {
         { 30.0f,   0.0f, 3.0f},  // FL  - flanking TV/screen
         {-30.0f,   0.0f, 3.0f},  // FR
@@ -99,10 +102,11 @@ static const RoomPreset roomPresets[] = {
      22.0f, 16.0f, 9.0f, 0.25f,
      0.55f, 0.09f, 0.4f, 20.0f,  // noticeable reverb, long pre-delay
      2.0f,  // room_gain: +6dB compensates for ~3x speaker distances
+     0.50f, // er_level: strong reflections, the "cinema envelopment"
      {
-        { 25.0f,   0.0f, 10.0f}, // FL  - behind screen L, ~10m from center seats
-        {-25.0f,   0.0f, 10.0f}, // FR  - behind screen R
-        {  0.0f,   0.0f,  9.0f}, // FC  - behind screen center
+        { 25.0f,  15.0f, 10.0f}, // FL  - behind screen L (mid-screen ~15° above ear)
+        {-25.0f,  15.0f, 10.0f}, // FR  - behind screen R
+        {  0.0f,  15.0f,  9.0f}, // FC  - behind screen center
         {  0.0f,  -5.0f,  9.0f}, // LFE - subwoofer behind screen
         {150.0f,   5.0f,  6.0f}, // BL  - rear wall, slightly elevated
         {-150.0f,  5.0f,  6.0f}, // BR
@@ -123,10 +127,11 @@ static const RoomPreset roomPresets[] = {
      26.0f, 30.0f, 18.0f, 0.28f,
      0.60f, 0.10f, 0.35f, 25.0f,  // controlled reverb, premium acoustic standards
      3.0f,  // room_gain: +9.5dB compensates for ~5x speaker distances
+     0.55f, // er_level: bigger room, deeper pre-delay pocket
      {
-        { 25.0f,   0.0f, 14.0f}, // FL  - behind perforated screen L
-        {-25.0f,   0.0f, 14.0f}, // FR  - behind perforated screen R
-        {  0.0f,   0.0f, 13.0f}, // FC  - behind screen center
+        { 25.0f,  13.0f, 14.0f}, // FL  - behind screen L (22m screen ~13° above ear)
+        {-25.0f,  13.0f, 14.0f}, // FR  - behind screen R
+        {  0.0f,  13.0f, 13.0f}, // FC  - behind screen center
         {  0.0f,  -5.0f, 13.0f}, // LFE - sub array behind screen
         {150.0f,   5.0f,  9.0f}, // BL  - rear wall surrounds
         {-150.0f,  5.0f,  9.0f}, // BR
@@ -147,10 +152,11 @@ static const RoomPreset roomPresets[] = {
      36.0f, 42.0f, 26.0f, 0.25f,
      0.70f, 0.13f, 0.30f, 35.0f,  // more reverb from massive volume
      4.0f,  // room_gain: +12dB compensates for ~7x speaker distances
+     0.60f, // er_level: massive volume, strong spatial envelopment
      {
-        { 22.0f,   0.0f, 18.0f}, // FL  - behind 30m perforated screen L
-        {-22.0f,   0.0f, 18.0f}, // FR  - behind 30m perforated screen R
-        {  0.0f,   0.0f, 17.0f}, // FC  - behind screen center
+        { 22.0f,  18.0f, 18.0f}, // FL  - behind 30m screen L (~18° above ear)
+        {-22.0f,  18.0f, 18.0f}, // FR  - behind 30m screen R
+        {  0.0f,  18.0f, 17.0f}, // FC  - behind screen center
         {  0.0f,  -5.0f, 17.0f}, // LFE - sub array behind screen
         {155.0f,   5.0f, 12.0f}, // BL  - rear wall surrounds
         {-155.0f,  5.0f, 12.0f}, // BR
@@ -170,6 +176,7 @@ static const RoomPreset roomPresets[] = {
      35.0f, 25.0f, 14.0f, 0.15f,
      0.82f, 0.16f, 0.25f, 35.0f,  // long reverb tail, warm, long pre-delay
      3.5f,  // room_gain: +11dB compensates for ~6x speaker distances
+     0.65f, // er_level: lively hall, prominent early reflections
      {
         { 35.0f,   5.0f, 20.0f}, // FL  - stage PA left
         {-35.0f,   5.0f, 20.0f}, // FR  - stage PA right
@@ -433,6 +440,15 @@ void ControlPanel::render() {
         atomic_store(&m_state->room_absorption, room.absorption);
         atomic_store(&m_state->room_gain, room.room_gain);
         atomic_store(&m_state->room_changed, 1);
+
+        // Apply ambisonic ER send — bigger rooms → more reflection energy
+        atomic_store(&m_state->er_level, room.er_level);
+
+        // Screen baffling: auto-enable for cinema-class presets (Cinema=2,
+        // Large Format=3, Giant Screen=4).  Perforated projection screens
+        // add the subtle HF rolloff that cues "speakers behind a screen".
+        atomic_store(&m_state->screen_baffling,
+                     (m_selectedRoom >= 2 && m_selectedRoom <= 4) ? 1 : 0);
     }
     if (m_selectedRoom >= 0 && m_selectedRoom < numRoomPresets) {
         const auto& room = roomPresets[m_selectedRoom];
@@ -476,6 +492,61 @@ void ControlPanel::render() {
             atomic_store(&m_state->reverb_predelay, predelay);
             atomic_store(&m_state->reverb_changed, 1);
         }
+    }
+
+    // Ambisonic early reflections — spatialised first-order reflections
+    // (Steam Audio-style).  Sends a mono bus of the dry sources through six
+    // image-source taps, each encoded into B-format (W,Y,Z,X) by its image
+    // direction, then decoded to binaural via precomputed SH-HRIR filters.
+    float erLevel = atomic_load(&m_state->er_level);
+    if (ImGui::SliderFloat("ER Wet (Ambisonic)", &erLevel, 0.0f, 1.0f, "%.2f")) {
+        atomic_store(&m_state->er_level, erLevel);
+    }
+
+    // Crossfeed (signed).  Positive = classical narrowing (dilutes HRTF cues,
+    // pulls sides back).  Negative = stereo widener (amplifies ILD, pushes
+    // sides outward).  Useful when a generic HRTF doesn't lateralise enough.
+    float xfeed = atomic_load(&m_state->crossfeed);
+    if (ImGui::SliderFloat("Crossfeed (broadband)", &xfeed, -0.3f, 0.3f, "%.2f")) {
+        atomic_store(&m_state->crossfeed, xfeed);
+    }
+
+    // Bauer crossfeed: LF-only contralateral bleed.  Fixes "frontals feel
+    // collapsed to one side" without blurring side/rear sources — the HF
+    // localisation cues stay intact.
+    float bauer = atomic_load(&m_state->bauer_crossfeed);
+    if (ImGui::SliderFloat("Bauer crossfeed (LF only)", &bauer, 0.0f, 0.5f, "%.2f")) {
+        atomic_store(&m_state->bauer_crossfeed, bauer);
+    }
+
+    // Channel order: SMPTE (Atmos / DCI / cinema) vs WAVE (raw 7.1 files).
+    // FFmpeg exposes Dolby content in WAVE order but the audio payload is
+    // still in SMPTE order — the SL/BL and SR/BR pairs end up at the wrong
+    // angle unless we swap them.  Toggling this swaps speaker positions 4↔6
+    // and 5↔7 in the shared state and signals the filter to reload HRIRs.
+    bool smpte = atomic_load(&m_state->channel_order_smpte) != 0;
+    if (ImGui::Checkbox("SMPTE channel order (Atmos / cinema)", &smpte)) {
+        atomic_store(&m_state->channel_order_smpte, smpte ? 1 : 0);
+        int numCh = atomic_load(&m_state->num_channels);
+        if (numCh >= 8) {
+            HrtfPosition t;
+            t = m_state->speaker_pos[4]; m_state->speaker_pos[4] = m_state->speaker_pos[6]; m_state->speaker_pos[6] = t;
+            t = m_state->speaker_pos[5]; m_state->speaker_pos[5] = m_state->speaker_pos[7]; m_state->speaker_pos[7] = t;
+            atomic_store(&m_state->speaker_pos_changed, 1);
+        }
+    }
+
+    // Screen baffling — simulate perforated cinema screen on FL/FR/FC.
+    bool baffle = atomic_load(&m_state->screen_baffling) != 0;
+    if (ImGui::Checkbox("Screen baffling (cinema HF rolloff on FL/FR/FC)", &baffle)) {
+        atomic_store(&m_state->screen_baffling, baffle ? 1 : 0);
+    }
+
+    // Frontal pinna boost — fights HRTF front/back confusion by injecting
+    // the characteristic pinna resonance of a frontal source.
+    bool pinna = atomic_load(&m_state->front_pinna_boost) != 0;
+    if (ImGui::Checkbox("Frontal pinna boost (anti front-back confusion)", &pinna)) {
+        atomic_store(&m_state->front_pinna_boost, pinna ? 1 : 0);
     }
 
     ImGui::Separator();

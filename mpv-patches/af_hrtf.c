@@ -87,6 +87,13 @@ static ObjCodingMixData *g_objcoding_data_ptr = NULL;
 #define ER_MAX_DELAY    8192   // ~170ms at 48kHz
 #define SPEED_OF_SOUND  343.0f
 
+// Ambisonic early-reflections constants.  Mirrors Steam Audio's
+// AmbisonicsPanningEffect (core/src/core/ambisonics_panning_effect.cpp) and
+// AmbisonicsBinauralEffect precompute (core/src/core/hrtf_database.cpp).
+#define AMBI_ORDER        1
+#define AMBI_NUM_CH       ((AMBI_ORDER + 1) * (AMBI_ORDER + 1))   // 4 for order 1
+#define AMBI_NUM_SPEAKERS 24   // Sloane t-design, http://neilsloane.com/sphdesigns/dim3/des.3.24.7.txt
+
 // ---------------------------------------------------------------------------
 // Shared state (for communication with host app visualizer)
 // ---------------------------------------------------------------------------
@@ -153,6 +160,13 @@ typedef struct {
 
     _Atomic int32_t  mute_bed;
     _Atomic int32_t  mute_objects;
+
+    _Atomic float    er_level;           // 0..1  wet level for ambisonic early reflections
+    _Atomic float    crossfeed;          // -0.3..0.3 binaural crossfeed amount
+    _Atomic int32_t  channel_order_smpte; // 1 = swap SL/BL and SR/BR to fix Atmos content
+    _Atomic int32_t  screen_baffling;     // 1 = HF shelf on FL/FR/FC (behind screen)
+    _Atomic int32_t  front_pinna_boost;   // 1 = synthetic frontal pinna EQ on FL/FR/FC
+    _Atomic float    bauer_crossfeed;     // 0..0.5 LF-only crossfeed for frontal grounding
 } HrtfSharedState;
 
 // ---------------------------------------------------------------------------
@@ -228,14 +242,32 @@ typedef struct {
 // Early reflections (image-source method, 6 first-order taps)
 // ---------------------------------------------------------------------------
 
+// Early-reflections using an ambisonic bus (Steam Audio approach).
+// Each tap encodes a delayed sample of a shared mono room-send into B-format
+// with its real-SH basis evaluated at the image-source direction; the bus is
+// decoded to binaural at the end of the block via precomputed SH-HRIR filters.
 typedef struct {
-    float *buf_l, *buf_r;           // circular delay buffers
-    int buf_size;                    // ER_MAX_DELAY
-    int write_pos;
-    int delays[ER_NUM_TAPS];        // delay in samples per tap
-    float gain_l[ER_NUM_TAPS];      // per-tap gain for L
-    float gain_r[ER_NUM_TAPS];      // per-tap gain for R
-    int num_taps;
+    // Mono delay line (shared by all taps).
+    float *delay_buf;
+    int    delay_size;
+    int    write_pos;
+
+    // Per-tap definitions.
+    int    num_taps;
+    int    tap_delays[ER_NUM_TAPS];                         // delay in samples
+    float  tap_gain[ER_NUM_TAPS];                            // absorption / distance
+    float  tap_sh[ER_NUM_TAPS][AMBI_NUM_CH];                 // precomputed SH basis
+
+    // B-format bus — one block-sized buffer per ambisonic channel (W,Y,Z,X for order 1).
+    float *bus[AMBI_NUM_CH];
+
+    // Ambisonic→binaural decoder: one HRIR-sized convolver per (SH channel, ear).
+    // Filters are filled by compute_ambi_decoder_hrirs() from min-phase HRIRs
+    // projected onto the 24-point Sloane t-design.
+    HrtfConvolver dec_l[AMBI_NUM_CH];
+    HrtfConvolver dec_r[AMBI_NUM_CH];
+
+    int decoder_valid;   // 1 after compute_ambi_decoder_hrirs succeeds
     int initialized;
 } EarlyReflections;
 
@@ -310,6 +342,19 @@ struct priv {
 
     // Distance attenuation / air absorption
     float air_abs_state[HRTF_MAX_CHANNELS];  // one-pole lowpass state
+    float screen_baffle_state[3];             // screen-baffle LP state for FL/FR/FC
+    // Frontal pinna EQ: peak ~4 kHz, notch ~8 kHz (two cascaded biquads).
+    // Per-channel x[n-1], x[n-2], y[n-1], y[n-2] state for each biquad.
+    float pinna_peak_state[3][4];             // [ch][x1,x2,y1,y2]
+    float pinna_notch_state[3][4];
+    // Bauer crossfeed: short stereo delay line + per-ear one-pole LP.
+    // Delay ~14 samples at 48 kHz (~290 µs head width), LP fc ~700 Hz.
+#define BAUER_DELAY_LEN 32
+    float bauer_buf_l[BAUER_DELAY_LEN];
+    float bauer_buf_r[BAUER_DELAY_LEN];
+    int   bauer_pos;
+    float bauer_lp_l;
+    float bauer_lp_r;
     float min_dist;                           // minimum speaker distance
     float out_limiter_gain;                   // smoothed output limiter gain
 
@@ -651,105 +696,365 @@ static void reverb_destroy(ReverbState *r) {
 }
 
 // ---------------------------------------------------------------------------
-// Early reflections functions
+// Real spherical harmonics (order 0-1, ACN ordering, full N3D normalisation).
+//
+// Coefficients match the Google spherical-harmonics library that Steam Audio
+// wraps in core/src/core/sh/spherical_harmonics.cc.  Google's convention is
+// +x forward, +y left, +z up — which is ALSO our audio convention (the same
+// one libmysofa uses), so no coordinate transform is needed here.  We feed
+// the SH basis directly with (x_audio, y_audio, z_audio).
+// ---------------------------------------------------------------------------
+
+static void sh_eval_order1(float x_audio, float y_audio, float z_audio,
+                           float out_sh[AMBI_NUM_CH]) {
+    // Our audio frame matches Google-SH, so this is an identity pass-through.
+    // ACN ordering: [0]=Y_0^0, [1]=Y_1^-1 (y), [2]=Y_1^0 (z), [3]=Y_1^1 (x).
+    out_sh[0] = 0.282094791773878f;                     // 0.5 * sqrt(1/pi)
+    out_sh[1] = 0.488602511902920f * y_audio;           // sqrt(3/(4pi)) * y
+    out_sh[2] = 0.488602511902920f * z_audio;           // sqrt(3/(4pi)) * z
+    out_sh[3] = 0.488602511902920f * x_audio;           // sqrt(3/(4pi)) * x
+}
+
+// 24-point spherical t-design (t=7), coordinates lifted verbatim from Steam
+// Audio's AmbisonicsPanningEffect::kVirtualSpeakers.  Steam Audio stores
+// these in its own internal world frame: +x=right, +y=up, +z=back
+// (see core/src/core/sh.cpp:55-57, the Steam→Google converter is
+// (-z, -x, y)).  We must convert each entry to our audio frame before use.
+static const float kVirtualSpeakers[AMBI_NUM_SPEAKERS][3] = {
+    { .8662468181078206f,  .4225186537611115f,  .2666354015167047f},
+    { .8662468181078206f, -.4225186537611115f, -.2666354015167047f},
+    { .8662468181078206f,  .2666354015167047f, -.4225186537611115f},
+    { .8662468181078206f, -.2666354015167047f,  .4225186537611115f},
+    {-.8662468181078206f,  .4225186537611115f, -.2666354015167047f},
+    {-.8662468181078206f, -.4225186537611115f,  .2666354015167047f},
+    {-.8662468181078206f,  .2666354015167047f,  .4225186537611115f},
+    {-.8662468181078206f, -.2666354015167047f, -.4225186537611115f},
+    { .2666354015167047f,  .8662468181078206f,  .4225186537611115f},
+    {-.2666354015167047f,  .8662468181078206f, -.4225186537611115f},
+    {-.4225186537611115f,  .8662468181078206f,  .2666354015167047f},
+    { .4225186537611115f,  .8662468181078206f, -.2666354015167047f},
+    {-.2666354015167047f, -.8662468181078206f,  .4225186537611115f},
+    { .2666354015167047f, -.8662468181078206f, -.4225186537611115f},
+    { .4225186537611115f, -.8662468181078206f,  .2666354015167047f},
+    {-.4225186537611115f, -.8662468181078206f, -.2666354015167047f},
+    { .4225186537611115f,  .2666354015167047f,  .8662468181078206f},
+    {-.4225186537611115f, -.2666354015167047f,  .8662468181078206f},
+    { .2666354015167047f, -.4225186537611115f,  .8662468181078206f},
+    {-.2666354015167047f,  .4225186537611115f,  .8662468181078206f},
+    { .4225186537611115f, -.2666354015167047f, -.8662468181078206f},
+    {-.4225186537611115f,  .2666354015167047f, -.8662468181078206f},
+    { .2666354015167047f,  .4225186537611115f, -.8662468181078206f},
+    {-.2666354015167047f, -.4225186537611115f, -.8662468181078206f},
+};
+
+// Convert a Steam Audio world-space direction (+x=right, +y=up, +z=back) to
+// our audio frame (+x=front, +y=left, +z=up) and return (azimuth_deg,
+// elevation_deg) suitable for get_hrir_for_position.
+//   x_audio  (front) = -z_steam   (negate back → front)
+//   y_audio  (left)  = -x_steam   (negate right → left)
+//   z_audio  (up)    =  y_steam
+static void steam_speaker_to_audio_az_el(const float s[3],
+                                         float *az_deg, float *el_deg) {
+    float xa = -s[2];
+    float ya = -s[0];
+    float za =  s[1];
+    float r = sqrtf(xa*xa + ya*ya + za*za);
+    if (r < 1e-9f) r = 1e-9f;
+    float az = atan2f(ya, xa);           // audio az: 0 = front (+x), +pi/2 = left (+y)
+    float el = asinf(za / r);            // audio el: 0 = ear level, +pi/2 = up (+z)
+    *az_deg = az * 180.0f / (float)M_PI;
+    *el_deg = el * 180.0f / (float)M_PI;
+}
+
+// Same conversion, returning the audio-space unit vector so we can feed it to
+// sh_eval_order1 directly (in our frame = Google-SH frame).
+static void steam_speaker_to_audio_xyz(const float s[3],
+                                       float *xa, float *ya, float *za) {
+    *xa = -s[2];
+    *ya = -s[0];
+    *za =  s[1];
+}
+
+// Minimum-phase conversion via the cepstral method, matching Steam Audio's
+// HRTFDatabase::convertToMinimumPhase() (core/src/core/hrtf_database.cpp:695).
+// Uses PFFFT so the HRIR length must be a supported PFFFT size; we round
+// internally to HRTF_FFT_N.  Input: len-sample HRIR.  Output: len-sample
+// minimum-phase HRIR.  Both have the same magnitude spectrum.
+static void hrir_to_minimum_phase(const float *hrir_in, int len, float *hrir_out) {
+    const int N = HRTF_FFT_N;
+    const float kMinMagThresh = 1e-5f;
+
+    PFFFT_Setup *fft = pffft_new_setup(N, PFFFT_REAL);
+    float *td   = pffft_aligned_malloc(N * sizeof(float));
+    float *fd   = pffft_aligned_malloc(N * sizeof(float));
+    float *work = pffft_aligned_malloc(N * sizeof(float));
+
+    // 1. FFT of HRIR.
+    memset(td, 0, N * sizeof(float));
+    memcpy(td, hrir_in, (len < N ? len : N) * sizeof(float));
+    pffft_transform_ordered(fft, td, fd, work, PFFFT_FORWARD);
+
+    // 2. Log|H(f)|, thresholded (avoid log(0) near notches).
+    // PFFFT ordered real format: [DC, Nyquist, re1, im1, re2, im2, ...].
+    float maxmag = 1e-30f;
+    float mag0 = fabsf(fd[0]);
+    float magN = fabsf(fd[1]);
+    if (mag0 > maxmag) maxmag = mag0;
+    if (magN > maxmag) maxmag = magN;
+    for (int k = 2; k < N; k += 2) {
+        float m = sqrtf(fd[k]*fd[k] + fd[k+1]*fd[k+1]);
+        if (m > maxmag) maxmag = m;
+    }
+    float thr = kMinMagThresh * maxmag;
+
+    float *logmag = pffft_aligned_malloc(N * sizeof(float));
+    memset(logmag, 0, N * sizeof(float));
+    logmag[0] = logf(mag0 > thr ? mag0 : thr);
+    logmag[1] = logf(magN > thr ? magN : thr);
+    for (int k = 2; k < N; k += 2) {
+        float m = sqrtf(fd[k]*fd[k] + fd[k+1]*fd[k+1]);
+        if (m < thr) m = thr;
+        float lm = logf(m);
+        logmag[k]     = lm;
+        logmag[k + 1] = 0.0f;           // zero imaginary (we'll Hilbert via fold)
+    }
+
+    // 3. IFFT of log|H| → real cepstrum.
+    pffft_transform_ordered(fft, logmag, td, work, PFFFT_BACKWARD);
+    float inv_n = 1.0f / (float)N;
+    for (int i = 0; i < N; i++) td[i] *= inv_n;
+
+    // 4. Fold causal part (minimum-phase cepstrum): keep c[0], double c[1..N/2-1],
+    //    zero the anti-causal half.  This is the Hilbert-transform-in-cepstrum step.
+    //    Matches Steam Audio's fold with numSamples even.
+    float *cepstrum = pffft_aligned_malloc(N * sizeof(float));
+    cepstrum[0] = td[0];
+    cepstrum[N / 2] = td[N / 2];
+    for (int k = 1; k < N / 2; k++) {
+        cepstrum[k]           = td[k] + td[N - k];   // causal half doubled
+        cepstrum[N - k]       = 0.0f;                // anti-causal zeroed
+    }
+    // Note: the above assumes even N (HRTF_FFT_N=1024 is even).
+
+    // 5. FFT of folded cepstrum.
+    pffft_transform_ordered(fft, cepstrum, fd, work, PFFFT_FORWARD);
+
+    // 6. exp() — we need complex exp of the folded-cepstrum spectrum.
+    //    fd is real-input FFT output: [DC(real), Nyq(real), re, im, re, im, ...].
+    //    For DC and Nyquist (pure-real bins) exp is just expf().  For other bins
+    //    (a + j b) → exp(a)·(cos b + j sin b).
+    float *expfd = pffft_aligned_malloc(N * sizeof(float));
+    expfd[0] = expf(fd[0]);
+    expfd[1] = expf(fd[1]);
+    for (int k = 2; k < N; k += 2) {
+        float a = fd[k];
+        float b = fd[k + 1];
+        float ea = expf(a);
+        expfd[k]     = ea * cosf(b);
+        expfd[k + 1] = ea * sinf(b);
+    }
+
+    // 7. IFFT → minimum-phase time-domain HRIR.
+    pffft_transform_ordered(fft, expfd, td, work, PFFFT_BACKWARD);
+    for (int i = 0; i < len; i++) hrir_out[i] = td[i] * inv_n;
+
+    pffft_aligned_free(logmag);
+    pffft_aligned_free(cepstrum);
+    pffft_aligned_free(expfd);
+    pffft_aligned_free(td);
+    pffft_aligned_free(fd);
+    pffft_aligned_free(work);
+    pffft_destroy_setup(fft);
+}
+
+// Forward decl: needs sofa+dfc to already be ready.
+static void get_hrir_for_position(struct priv *p, float azimuth, float elevation,
+                                  float distance, float *hrir_l, float *hrir_r);
+
+// Precompute SH-HRIR basis filters for the ambisonic→binaural decoder.
+// Matches HRTFDatabase::precomputeAmbisonicsHRTFs (core/src/core/hrtf_database.cpp:479):
+// for each SH channel i = (l, m) in ACN order and each ear, accumulate over the
+// 24-point Sloane t-design:
+//     basis_i[ear] += (4π/N) · SH_i(speaker_dir) · HRIR_minphase(speaker_dir)[ear]
+// Then load the resulting time-domain impulse responses into the decoder
+// convolvers (conv_set_hrir handles zero-pad + FFT to PFFFT Z-format).
+static void compute_ambi_decoder_hrirs(struct priv *p) {
+    EarlyReflections *er = &p->er;
+    if (!er->initialized || !p->sofa || p->hrir_length <= 0) return;
+
+    const int len = p->hrir_length;
+    const float w = (4.0f * (float)M_PI) / (float)AMBI_NUM_SPEAKERS;
+
+    float *basis_l[AMBI_NUM_CH];
+    float *basis_r[AMBI_NUM_CH];
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        basis_l[i] = calloc(len, sizeof(float));
+        basis_r[i] = calloc(len, sizeof(float));
+    }
+
+    float *ir_l   = calloc(len, sizeof(float));
+    float *ir_r   = calloc(len, sizeof(float));
+    float *mph_l  = calloc(len, sizeof(float));
+    float *mph_r  = calloc(len, sizeof(float));
+
+    for (int s = 0; s < AMBI_NUM_SPEAKERS; s++) {
+        const float *sv = kVirtualSpeakers[s];
+
+        // Sample HRIRs at this direction using the existing path (DFC + ITD).
+        float az_deg, el_deg;
+        steam_speaker_to_audio_az_el(sv, &az_deg, &el_deg);
+        get_hrir_for_position(p, az_deg, el_deg, 1.0f, ir_l, ir_r);
+
+        // Remove ITD/excess phase before SH projection (Steam Audio step).
+        hrir_to_minimum_phase(ir_l, len, mph_l);
+        hrir_to_minimum_phase(ir_r, len, mph_r);
+
+        // SH basis at this virtual speaker direction (ACN order, N3D norm).
+        // kVirtualSpeakers are in Steam Audio world space; convert to audio
+        // (== Google) frame before evaluating the basis.
+        float xa, ya, za;
+        steam_speaker_to_audio_xyz(sv, &xa, &ya, &za);
+        float sh[AMBI_NUM_CH];
+        sh_eval_order1(xa, ya, za, sh);
+
+        for (int i = 0; i < AMBI_NUM_CH; i++) {
+            float weight = w * sh[i];
+            for (int k = 0; k < len; k++) {
+                basis_l[i][k] += weight * mph_l[k];
+                basis_r[i][k] += weight * mph_r[k];
+            }
+        }
+    }
+
+    // Push each SH-HRIR basis into its convolver.
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        convolver_set_hrir(&er->dec_l[i], basis_l[i], len);
+        convolver_set_hrir(&er->dec_r[i], basis_r[i], len);
+        er->dec_l[i].valid = 1;
+        er->dec_r[i].valid = 1;
+    }
+    er->decoder_valid = 1;
+
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        free(basis_l[i]);
+        free(basis_r[i]);
+    }
+    free(ir_l);
+    free(ir_r);
+    free(mph_l);
+    free(mph_r);
+
+    HRTF_DBG("SH-HRIR decoder: %d virtual speakers, order=%d, channels=%d\n",
+             AMBI_NUM_SPEAKERS, AMBI_ORDER, AMBI_NUM_CH);
+}
+
+// ---------------------------------------------------------------------------
+// Early reflections — ambisonic bus (encoder + binaural decoder)
 // ---------------------------------------------------------------------------
 
 static void er_init(EarlyReflections *er) {
     memset(er, 0, sizeof(*er));
-    er->buf_size = ER_MAX_DELAY;
-    er->buf_l = calloc(ER_MAX_DELAY, sizeof(float));
-    er->buf_r = calloc(ER_MAX_DELAY, sizeof(float));
+    er->delay_size = ER_MAX_DELAY;
+    er->delay_buf = calloc(ER_MAX_DELAY, sizeof(float));
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        er->bus[i] = calloc(HRTF_BLOCK_SIZE, sizeof(float));
+        convolver_init(&er->dec_l[i]);
+        convolver_init(&er->dec_r[i]);
+    }
     er->initialized = 1;
 }
 
 static void er_update(EarlyReflections *er, float width, float depth,
-                       float height, float absorption, int sample_rate) {
+                      float height, float absorption, int sample_rate) {
     if (!er->initialized) return;
 
-    // Listener position: centered width, 2/3 depth, ear height 1.2m
+    // Listener: centered width, 2/3 depth, ear height 1.2 m.
     float ear_height = 1.2f;
     float listener_depth_frac = 2.0f / 3.0f;
 
-    // 6 image-source distances (extra path length beyond direct sound)
-    // Tap 0: left wall   — image distance = room width (centered listener)
-    // Tap 1: right wall  — same
-    // Tap 2: floor       — 2 * ear_height
-    // Tap 3: ceiling     — 2 * (height - ear_height)
-    // Tap 4: front wall  — 2 * (listener_depth_frac * depth)
-    // Tap 5: back wall   — 2 * ((1 - listener_depth_frac) * depth)
-    float extra[ER_NUM_TAPS];
-    extra[0] = width;                                  // left wall
-    extra[1] = width;                                  // right wall
-    extra[2] = 2.0f * ear_height;                      // floor
-    extra[3] = 2.0f * (height - ear_height);           // ceiling
-    extra[4] = 2.0f * (listener_depth_frac * depth);   // front wall
-    extra[5] = 2.0f * ((1.0f - listener_depth_frac) * depth); // back wall
+    // 6 first-order image sources, in audio coords:
+    //   +x = front, +y = left, +z = up.
+    // Direction = unit vector from listener to image source.
+    // Extra path length = 2 × perpendicular distance from listener to wall.
+    struct { float extra; float x, y, z; } taps[ER_NUM_TAPS] = {
+        { width,                                    0.0f,  1.0f,  0.0f}, // left wall
+        { width,                                    0.0f, -1.0f,  0.0f}, // right wall
+        { 2.0f * ear_height,                        0.0f,  0.0f, -1.0f}, // floor
+        { 2.0f * (height - ear_height),             0.0f,  0.0f,  1.0f}, // ceiling
+        { 2.0f * (listener_depth_frac * depth),     1.0f,  0.0f,  0.0f}, // front wall
+        { 2.0f * ((1.0f - listener_depth_frac) * depth), -1.0f, 0.0f, 0.0f}, // back wall
+    };
 
     er->num_taps = ER_NUM_TAPS;
-
     for (int i = 0; i < ER_NUM_TAPS; i++) {
-        int d = (int)(extra[i] / SPEED_OF_SOUND * (float)sample_rate + 0.5f);
+        int d = (int)(taps[i].extra / SPEED_OF_SOUND * (float)sample_rate + 0.5f);
         if (d < 1) d = 1;
         if (d >= ER_MAX_DELAY) d = ER_MAX_DELAY - 1;
-        er->delays[i] = d;
+        er->tap_delays[i] = d;
+        er->tap_gain[i] = (1.0f - absorption) / (1.0f + taps[i].extra);
 
-        float gain = (1.0f - absorption) / (1.0f + extra[i]);
-
-        if (i <= 1) {
-            // Lateral reflections: pan towards the reflecting wall
-            float loud = 0.8f * gain;
-            float quiet = 0.3f * gain;
-            if (i == 0) {
-                // Left wall: boost left ear
-                er->gain_l[i] = loud;
-                er->gain_r[i] = quiet;
-            } else {
-                // Right wall: boost right ear
-                er->gain_l[i] = quiet;
-                er->gain_r[i] = loud;
-            }
-        } else {
-            // Floor, ceiling, front, back: equal L/R
-            er->gain_l[i] = gain * 0.6f;
-            er->gain_r[i] = gain * 0.6f;
-        }
+        sh_eval_order1(taps[i].x, taps[i].y, taps[i].z, er->tap_sh[i]);
     }
 }
 
-static void er_process(EarlyReflections *er, float *l, float *r, int n) {
+// One-block process: encode mono room-send into ambisonic bus, convolve each
+// SH channel with its precomputed SH-HRIR, sum into binaural out.
+// The decoder's convolver already applies the per-order max-rE scalar implicitly
+// (it's baked into the precomputed basis for order 1 with uniform weighting).
+static void er_process_ambi(EarlyReflections *er, const float *mono_in,
+                            float *out_l, float *out_r, int n) {
+    if (!er->initialized || !er->decoder_valid || er->num_taps <= 0) return;
+
+    // 1. Encode: for each sample of the block, write mono_in into the delay
+    //    line and read each tap's delayed sample into W/Y/Z/X buses.
+    for (int i = 0; i < AMBI_NUM_CH; i++)
+        memset(er->bus[i], 0, n * sizeof(float));
+
     for (int i = 0; i < n; i++) {
-        // Write current sample into circular buffer
-        er->buf_l[er->write_pos] = l[i];
-        er->buf_r[er->write_pos] = r[i];
-
-        // Accumulate all taps
-        float sum_l = 0, sum_r = 0;
+        er->delay_buf[er->write_pos] = mono_in[i];
         for (int t = 0; t < er->num_taps; t++) {
-            int read_pos = er->write_pos - er->delays[t];
-            if (read_pos < 0) read_pos += er->buf_size;
-            sum_l += er->buf_l[read_pos] * er->gain_l[t];
-            sum_r += er->buf_r[read_pos] * er->gain_r[t];
+            int rp = er->write_pos - er->tap_delays[t];
+            if (rp < 0) rp += er->delay_size;
+            float s = er->delay_buf[rp] * er->tap_gain[t];
+            er->bus[0][i] += s * er->tap_sh[t][0];
+            er->bus[1][i] += s * er->tap_sh[t][1];
+            er->bus[2][i] += s * er->tap_sh[t][2];
+            er->bus[3][i] += s * er->tap_sh[t][3];
         }
+        if (++er->write_pos >= er->delay_size) er->write_pos = 0;
+    }
 
-        // Add reflections to output
-        l[i] += sum_l;
-        r[i] += sum_r;
+    // 2. Decode: each bus × its SH-HRIR → sum to stereo output.
+    float tmp_l[HRTF_BLOCK_SIZE];
+    float tmp_r[HRTF_BLOCK_SIZE];
+    int block = n < HRTF_BLOCK_SIZE ? n : HRTF_BLOCK_SIZE;
 
-        if (++er->write_pos >= er->buf_size)
-            er->write_pos = 0;
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        convolver_process(&er->dec_l[i], er->bus[i], tmp_l);
+        convolver_process(&er->dec_r[i], er->bus[i], tmp_r);
+        for (int k = 0; k < block; k++) {
+            out_l[k] += tmp_l[k];
+            out_r[k] += tmp_r[k];
+        }
     }
 }
 
 static void er_clear(EarlyReflections *er) {
     if (!er->initialized) return;
-    if (er->buf_l) memset(er->buf_l, 0, er->buf_size * sizeof(float));
-    if (er->buf_r) memset(er->buf_r, 0, er->buf_size * sizeof(float));
+    if (er->delay_buf) memset(er->delay_buf, 0, er->delay_size * sizeof(float));
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        if (er->bus[i]) memset(er->bus[i], 0, HRTF_BLOCK_SIZE * sizeof(float));
+    }
     er->write_pos = 0;
 }
 
 static void er_destroy(EarlyReflections *er) {
-    free(er->buf_l);
-    free(er->buf_r);
+    free(er->delay_buf);
+    for (int i = 0; i < AMBI_NUM_CH; i++) {
+        free(er->bus[i]);
+        convolver_destroy(&er->dec_l[i]);
+        convolver_destroy(&er->dec_r[i]);
+    }
     memset(er, 0, sizeof(*er));
 }
 
@@ -1130,7 +1435,16 @@ static void speaker_id_to_position(int speaker_id, float *az, float *el) {
     case MP_SPEAKER_ID_TBR:  *az =-135.0f; *el =  45.0f; break;
     case MP_SPEAKER_ID_SDL:  *az =  90.0f; *el =  45.0f; break;
     case MP_SPEAKER_ID_SDR:  *az = -90.0f; *el =  45.0f; break;
-    default:                 *az =   0.0f; *el =   0.0f; break;
+    default:
+        // Unknown speaker ID — park it high up and behind (180°, 60°) so it
+        // doesn't contaminate the FC/frontal stage where (0°, 0°) lives.
+        // Log so we can add the ID to the switch above.
+        fprintf(stderr,
+                "[af_hrtf] WARNING: unknown speaker id %d → placing at "
+                "(180°, 60°); consider adding it to speaker_id_to_position\n",
+                speaker_id);
+        *az = 180.0f; *el = 60.0f;
+        break;
     }
 }
 
@@ -1276,6 +1590,22 @@ static void init_speaker_positions_from_chmap(struct priv *p,
     // If all channels are known speakers (e.g. 7.1.4), treat them all as bed
     if (known_count == n)
         p->num_bed_channels = n;
+}
+
+// Swap speaker positions for channels whose audio payload is in SMPTE order
+// (FL FR FC LFE SL SR BL BR ...) while the chmap/bed_mask reports them in
+// WAVE/bit order (FL FR FC LFE BL BR SL SR ...).  This is the default for
+// Dolby Atmos / DCI cinema content: FFmpeg reshuffles the layout mask into
+// bit order but does not remap the audio samples, so channel 4 carries the
+// "SL" waveform even though FFmpeg calls it BL.  Swapping the position of
+// channels 4↔6 and 5↔7 (and 10↔10 no-op for TBL/TSL, kept for symmetry)
+// puts the audio at the direction the content creator intended.
+static void apply_smpte_channel_order(struct priv *p) {
+    if (p->num_channels >= 8) {
+        HrtfSpeakerPos t;
+        t = p->speaker_pos[4]; p->speaker_pos[4] = p->speaker_pos[6]; p->speaker_pos[6] = t;
+        t = p->speaker_pos[5]; p->speaker_pos[5] = p->speaker_pos[7]; p->speaker_pos[7] = t;
+    }
 }
 
 // Fallback: hardcoded 7.1.4 positions for Home Theater (6.5x5.0x2.7m)
@@ -2038,6 +2368,10 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
     // Initialize reverb and sync initial params from shared state
     reverb_init(&p->reverb, sample_rate);
     er_init(&p->er);
+    // Precompute ambisonic-binaural decoder filters from current SOFA.
+    // Steam Audio HRTFDatabase::precomputeAmbisonicsHRTFs() runs once per HRTF
+    // load; we mirror that here.  Must come after load_sofa + er_init.
+    compute_ambi_decoder_hrirs(p);
     if (p->shared) {
         float rv_decay = atomic_load_explicit(&p->shared->reverb_decay,
                                                memory_order_relaxed);
@@ -2203,6 +2537,20 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         }
     }
 
+    // Mono room-send bus for the ambisonic early-reflections pipeline.
+    // Accumulated below (after dist attenuation + air absorption) from every
+    // non-LFE source we actually render.  Feeds er_process_ambi() once at the
+    // end of the block — Steam Audio-style separation of source energy from
+    // reflection spatialisation.
+    float mono_send[HRTF_BLOCK_SIZE];
+    memset(mono_send, 0, sizeof(mono_send));
+    float er_send_level = 0.0f;
+    if (p->shared)
+        er_send_level = atomic_load_explicit(&p->shared->er_level,
+                                              memory_order_relaxed);
+    if (er_send_level < 0.0f) er_send_level = 0.0f;
+    if (er_send_level > 1.0f) er_send_level = 1.0f;
+
     for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
         // Skip muted channel groups
         if (mute_bed && ch < bed_count) continue;
@@ -2274,10 +2622,81 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
             }
         }
 
+        // Screen baffling: perforated cinema screens absorb ~3 dB >2 kHz on
+        // front speakers (FL=0, FR=1, FC=2).  Applied as one-pole LP mixed
+        // 35% with dry for a gentle shelf.  Bypassed for LFE and surrounds.
+        if (ch < 3 && p->shared &&
+            atomic_load_explicit(&p->shared->screen_baffling,
+                                  memory_order_relaxed)) {
+            const float fc_shelf = 3500.0f;
+            const float mix = 0.35f;
+            float coeff = 1.0f - expf(-2.0f * (float)M_PI * fc_shelf /
+                                       (float)p->sample_rate);
+            for (int i = 0; i < num_samples; i++) {
+                p->screen_baffle_state[ch] =
+                    coeff * channel_data[ch][i] +
+                    (1.0f - coeff) * p->screen_baffle_state[ch];
+                channel_data[ch][i] =
+                    channel_data[ch][i] * (1.0f - mix) +
+                    p->screen_baffle_state[ch] * mix;
+            }
+        }
+
+        // Frontal pinna boost: +4 dB peak at 4 kHz, -3 dB notch at 8 kHz on
+        // FL/FR/FC.  Applied as two cascaded RBJ peaking-EQ biquads.  The
+        // peak/notch pattern mimics the characteristic response of an ear
+        // facing a frontal source, giving the brain a strong "this is front"
+        // cue that generic HRTFs otherwise fail to provide.
+        if (ch < 3 && p->shared &&
+            atomic_load_explicit(&p->shared->front_pinna_boost,
+                                  memory_order_relaxed)) {
+            const float Fs = (float)p->sample_rate;
+            // Biquad 1: peak, f=4kHz, Q=2.0, gain=+4 dB
+            // Biquad 2: notch/cut, f=8kHz, Q=2.0, gain=-3 dB
+            struct { float f; float Q; float gain_db; } eq[2] = {
+                {4000.0f, 2.0f, +4.0f},
+                {8000.0f, 2.0f, -3.0f},
+            };
+            float (*st[2])[4] = { p->pinna_peak_state, p->pinna_notch_state };
+
+            for (int b = 0; b < 2; b++) {
+                float A  = powf(10.0f, eq[b].gain_db / 40.0f);
+                float w0 = 2.0f * (float)M_PI * eq[b].f / Fs;
+                float cw = cosf(w0), sw = sinf(w0);
+                float alpha = sw / (2.0f * eq[b].Q);
+                // RBJ peaking EQ
+                float b0 = 1.0f + alpha * A;
+                float b1 = -2.0f * cw;
+                float b2 = 1.0f - alpha * A;
+                float a0 = 1.0f + alpha / A;
+                float a1 = -2.0f * cw;
+                float a2 = 1.0f - alpha / A;
+                float ib0 = b0 / a0, ib1 = b1 / a0, ib2 = b2 / a0;
+                float ia1 = a1 / a0, ia2 = a2 / a0;
+                float *s = st[b][ch];
+                for (int i = 0; i < num_samples; i++) {
+                    float x = channel_data[ch][i];
+                    float y = ib0 * x + ib1 * s[0] + ib2 * s[1]
+                            - ia1 * s[2] - ia2 * s[3];
+                    s[1] = s[0]; s[0] = x;
+                    s[3] = s[2]; s[2] = y;
+                    channel_data[ch][i] = y;
+                }
+            }
+        }
+
         // LFE: process through HRTF like any other speaker.
         // In a real cinema the subwoofer has a physical position
         // (typically front-center, below screen, at -30° elevation).
         // Processing it through HRTF contributes to room immersion.
+
+        // Room-send accumulation for ambisonic ER (skip LFE — subwoofers
+        // don't excite high-frequency reflections usefully).
+        if (ch != 3 && er_send_level > 0.0f) {
+            float rs = er_send_level;
+            for (int i = 0; i < num_samples; i++)
+                mono_send[i] += channel_data[ch][i] * rs;
+        }
 
         if (!pair->left[active].valid)
             continue;
@@ -2349,6 +2768,14 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
      * so no post-sum attenuation is needed.  This prevents HRIR frequency
      * amplification from causing internal clipping during the convolution. */
 
+    // Ambisonic spatialised early reflections.  Adds its binaural output
+    // directly into out_l/out_r so the downstream crossfeed + limiter see
+    // the combined direct+reflected signal — matching the way Steam Audio
+    // sums AmbisonicsBinauralEffect into the binaural mix.
+    if (er_send_level > 0.0f && p->er.initialized && p->er.decoder_valid
+        && p->er.num_taps > 0) {
+        er_process_ambi(&p->er, mono_send, out_l, out_r, num_samples);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2569,12 +2996,41 @@ static void af_hrtf_process(struct mp_filter *f) {
         // Override default speaker positions with actual channel layout.
         // Apply chmap first for ALL channels (including height/objects),
         // then override bed channels with bed_mask (authoritative).
+        // Positional mapping.  FFmpeg's mp_chmap is the authoritative source
+        // for the layout of the frame we're processing — it tells us which
+        // speaker ID is at each channel index of the actual PCM data.  The
+        // Atmos decoder also publishes a bed_mask, but that describes the
+        // BED SUBSTREAM (a TrueHD internal layout), which may be narrower
+        // than the 16-channel frame we actually receive when the stream has
+        // FLC/FRC or extended channels.  Applying bed_mask unconditionally
+        // used to override chmap with WRONG positions for streams where
+        // num_channels > popcount(bed_mask): e.g. ch6 gets audio the frame
+        // labels FLC but bed_mask would place SL there.
+        //
+        // Strategy: trust chmap when it's available and fully-known.  Only
+        // fall back to bed_mask if chmap is empty / mostly unknown.
+        bool chmap_ok = false;
         if (in_chmap.num > 0) {
             init_speaker_positions_from_chmap(p, &in_chmap);
+            int known = 0;
+            for (int i = 0; i < in_chmap.num; i++)
+                if (is_known_speaker(in_chmap.speaker[i])) known++;
+            // Consider chmap trustworthy if at least ~75% of channels map to
+            // a known speaker ID.  Leaves room for a couple of exotic IDs.
+            chmap_ok = (known * 4 >= in_chmap.num * 3);
         }
-        if (g_spatial_coeff_ptr && g_spatial_coeff_ptr->bed_mask) {
+        if (!chmap_ok && g_spatial_coeff_ptr && g_spatial_coeff_ptr->bed_mask) {
             int bed_count = init_speaker_positions_from_bed_mask(p, g_spatial_coeff_ptr->bed_mask);
             p->num_bed_channels = bed_count;
+        }
+        // Dolby/DCI content uses SMPTE channel order but FFmpeg exposes it
+        // in WAVE/bit order without remapping the audio samples.  Swap the
+        // SL↔BL and SR↔BR positions so the audio lands at the intended
+        // direction.  Gated by a runtime flag (default ON) so users with
+        // raw WAVE-ordered 7.1 files can turn it off.
+        if (p->shared && atomic_load_explicit(&p->shared->channel_order_smpte,
+                                               memory_order_relaxed)) {
+            apply_smpte_channel_order(p);
         }
         // Sync speaker positions to shared state so the UI visualizer
         // shows the correct layout (including height channels for 7.1.4)
@@ -2712,6 +3168,8 @@ static void af_hrtf_process(struct mp_filter *f) {
                 for (int ch = 0; ch < p->num_channels && ch < HRTF_MAX_CHANNELS; ch++)
                     update_channel_hrir_ex(p, ch, 0);
                 update_min_dist(p);
+                // Rebuild SH-HRIR decoder for the new SOFA.
+                compute_ambi_decoder_hrirs(p);
             }
             atomic_store_explicit(&p->shared->sofa_path_changed, 0,
                                   memory_order_relaxed);
@@ -2983,24 +3441,72 @@ static void af_hrtf_process(struct mp_filter *f) {
 
     // Crossfeed: mix a small fraction of opposite channel to reduce
     // the hyper-lateralization inherent in HRTF-based binaural rendering.
-    // Without crossfeed, sources at 30° have 8-11 dB L/R difference,
-    // making the stereo image unnaturally wide for headphone listening.
-    // 10% crossfeed narrows the image to a natural speaker-like width.
-    {
-        const float xfeed = 0.10f;
-        for (int i = 0; i < in_samples; i++) {
-            float l = out_l[i];
-            float r = out_r[i];
-            out_l[i] = l * (1.0f - xfeed) + r * xfeed;
-            out_r[i] = r * (1.0f - xfeed) + l * xfeed;
+    // Signed value: positive = classical crossfeed (narrows image, can pull
+    // side sources toward the back); negative = stereo widener (subtracts
+    // the contralateral signal, amplifying ILD so sides feel more lateral).
+    // At ±0.30 artifacts appear (phasing / thin center); keep modest.
+    if (p->shared) {
+        float xfeed = atomic_load_explicit(&p->shared->crossfeed,
+                                            memory_order_relaxed);
+        if (xfeed < -0.3f) xfeed = -0.3f;
+        if (xfeed >  0.3f) xfeed =  0.3f;
+        if (xfeed != 0.0f) {
+            for (int i = 0; i < in_samples; i++) {
+                float l = out_l[i];
+                float r = out_r[i];
+                out_l[i] = l * (1.0f - xfeed) + r * xfeed;
+                out_r[i] = r * (1.0f - xfeed) + l * xfeed;
+            }
+        }
+    }
+
+    // Bauer (frequency-selective) crossfeed.  Adds a delayed low-passed copy
+    // of each channel into the opposite ear — models natural LF diffraction
+    // around the head.  Unlike the broadband crossfeed above, this preserves
+    // HF localisation cues (ITD/ILD >700 Hz) so side/rear sources stay put,
+    // while LF body bleeds over to the contralateral ear — grounding frontal
+    // sources that would otherwise feel collapsed to one side.
+    if (p->shared) {
+        float amt = atomic_load_explicit(&p->shared->bauer_crossfeed,
+                                          memory_order_relaxed);
+        if (amt < 0.0f) amt = 0.0f;
+        if (amt > 0.5f) amt = 0.5f;
+        if (amt > 0.0f) {
+            const float fc = 700.0f;
+            float alpha = 1.0f - expf(-2.0f * (float)M_PI * fc /
+                                       (float)p->sample_rate);
+            // ITD-like delay: ~290 µs = 14 samples at 48 kHz
+            int delay = (int)(0.00029f * (float)p->sample_rate + 0.5f);
+            if (delay < 1) delay = 1;
+            if (delay >= BAUER_DELAY_LEN) delay = BAUER_DELAY_LEN - 1;
+
+            for (int i = 0; i < in_samples; i++) {
+                // Write current output into delay line
+                p->bauer_buf_l[p->bauer_pos] = out_l[i];
+                p->bauer_buf_r[p->bauer_pos] = out_r[i];
+                int rp = p->bauer_pos - delay;
+                if (rp < 0) rp += BAUER_DELAY_LEN;
+
+                // Low-pass the delayed contralateral signal
+                float dl = p->bauer_buf_l[rp];
+                float dr = p->bauer_buf_r[rp];
+                p->bauer_lp_l += alpha * (dl - p->bauer_lp_l);
+                p->bauer_lp_r += alpha * (dr - p->bauer_lp_r);
+
+                // Cross-feed LP'd L into R and vice versa.
+                out_l[i] += amt * p->bauer_lp_r;
+                out_r[i] += amt * p->bauer_lp_l;
+
+                if (++p->bauer_pos >= BAUER_DELAY_LEN) p->bauer_pos = 0;
+            }
         }
     }
 
     // NOTE: debug logging is done AFTER the limiter (below)
 
-    // Apply early reflections
-    if (p->er.initialized && p->er.num_taps > 0)
-        er_process(&p->er, out_l, out_r, in_samples);
+    // Early reflections are now applied inside process_block() via the
+    // ambisonic er_process_ambi() pipeline (Steam Audio-style).  Nothing
+    // to do here — they are already mixed into out_l/out_r.
 
     // Apply reverb
     if (p->reverb.enabled && p->reverb.initialized)

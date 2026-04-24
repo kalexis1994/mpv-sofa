@@ -84,6 +84,41 @@ typedef struct HrtfSharedState {
     HRTF_ATOMIC(int32_t)  mute_bed;           // 1 = mute channels 0-7 (bed)
     HRTF_ATOMIC(int32_t)  mute_objects;       // 1 = mute channels 8+ (objects)
 
+    // Ambisonic early-reflections send level (0..1).  0 = dry, 1 = wet.
+    HRTF_ATOMIC(float)    er_level;
+
+    // Binaural crossfeed amount (-0.3..0.3).
+    // Positive (e.g. 0.10) = classical crossfeed, narrows image.
+    // Negative (e.g. -0.10) = stereo widener, amplifies ILD so sides feel
+    // more lateral (useful when generic HRTF under-lateralises).
+    HRTF_ATOMIC(float)    crossfeed;
+
+    // Channel order convention.  Most Atmos/Dolby/DCI content is encoded in
+    // SMPTE order (FL FR FC LFE SL SR BL BR) but FFmpeg exposes it in its
+    // native WAVE/bit order (FL FR FC LFE BL BR SL SR).  When this flag is
+    // 1, we swap speaker positions for the SL/BL and SR/BR pairs so that
+    // channels land at the direction their audio was labelled for.
+    HRTF_ATOMIC(int32_t)  channel_order_smpte;
+
+    // Cinema screen baffling.  Perforated projection screens attenuate 2-4 dB
+    // above 2 kHz for sources placed behind them (FL/FR/FC).  When enabled we
+    // apply a gentle high-shelf to those three channels only.
+    HRTF_ATOMIC(int32_t)  screen_baffling;
+
+    // Frontal pinna enhancement: +4 dB peak ~4 kHz, -3 dB notch ~8 kHz applied
+    // to FL/FR/FC.  Mimics the characteristic HF resonance the pinna produces
+    // for sources directly in front, overriding the generic-HRTF front/back
+    // ambiguity that causes frontals to feel lateral or behind.  Default on.
+    HRTF_ATOMIC(int32_t)  front_pinna_boost;
+
+    // Bauer crossfeed amount (0..0.5).  Mixes a delayed low-passed (~700 Hz)
+    // copy of each channel into the opposite ear, simulating the natural
+    // low-frequency diffraction around the head.  Unlike broadband crossfeed
+    // this preserves HRTF localization cues at HF, only adding body to the
+    // contralateral ear — fixes "frontals collapse hard to the side" without
+    // blurring side/rear sources.  Default 0.15.
+    HRTF_ATOMIC(float)    bauer_crossfeed;
+
 } HrtfSharedState;
 
 // Global shared state instance (allocated by host app, passed to mpv via option)

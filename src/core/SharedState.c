@@ -23,6 +23,29 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     atomic_store(&s->reverb_damping, 0.5f);
     atomic_store(&s->reverb_predelay, 10.0f);
 
+    // Ambisonic early-reflections wet send (Steam Audio-style spatialised ER).
+    atomic_store(&s->er_level, 0.3f);
+
+    // Crossfeed: start at 0 now that the HRTF pipeline is correct.  Users
+    // can dial in a tiny amount if stereo music sounds too lateralised.
+    atomic_store(&s->crossfeed, 0.0f);
+
+    // Default OFF so we respect FFmpeg's reported chmap.  Enable from the UI
+    // when playing Atmos/DCI content where SL/BL and SR/BR arrive swapped.
+    atomic_store(&s->channel_order_smpte, 0);
+
+    // Screen baffling off by default; enabled automatically with Cinema/LF/GS
+    // presets once the ControlPanel syncs.
+    atomic_store(&s->screen_baffling, 0);
+
+    // Frontal pinna boost on by default — single biggest lever for fixing
+    // front/back confusion with a non-individual HRTF.
+    atomic_store(&s->front_pinna_boost, 1);
+
+    // Bauer crossfeed: gentle default, gives the contralateral ear body for
+    // frontal sources without blurring lateralised side/rear sources.
+    atomic_store(&s->bauer_crossfeed, 0.15f);
+
     hrtf_shared_state_init_714(s);
     return s;
 }
