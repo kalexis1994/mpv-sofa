@@ -4,6 +4,7 @@ build-*/
 build_test/
 out/
 ffmpeg-build/
+dist/
 
 # IDE
 .vs/

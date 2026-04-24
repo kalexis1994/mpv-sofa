@@ -5,8 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# Output directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Output directories — final runtime goes to dist/ (clean, shippable).
+# CMake build/ keeps only its intermediate artefacts (CMakeFiles, CMakeCache).
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/dist)
 
 # Options
 option(USE_SYSTEM_GLFW "Use system-installed GLFW" OFF)
