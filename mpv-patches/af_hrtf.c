@@ -2692,10 +2692,29 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
 
         // Room-send accumulation for ambisonic ER (skip LFE — subwoofers
         // don't excite high-frequency reflections usefully).
+        //
+        // Distance-weighted send.  The physical direct/reverb ratio follows
+        // `direct ∝ 1/dist` while the reverberant field is approximately
+        // constant throughout the room, so the WET send rises with distance:
+        //     wet(dist) = dist / (dist + τ)
+        // where τ is the critical distance (direct == reverb) — around 3 m
+        // for a typical cinema/home-theatre geometry.  That gives:
+        //     dist = 0   → 0     (pure dry, source at the head)
+        //     dist = 1 m → 0.25
+        //     dist = 3 m → 0.5   (half-wet)
+        //     dist = 10 m → 0.77
+        //     dist → ∞   → 1     (fully wet, ambient bed)
+        // Combined with the direct path's own 1/dist attenuation, this is
+        // the cue a listener uses to judge depth — a close whisper stays
+        // dry and forward, a distant rumble washes out into the room.
         if (ch != 3 && er_send_level > 0.0f) {
-            float rs = er_send_level;
-            for (int i = 0; i < num_samples; i++)
-                mono_send[i] += channel_data[ch][i] * rs;
+            const float tau = 3.0f;
+            float dist_send = dist / (dist + tau);
+            float rs = er_send_level * dist_send;
+            if (rs > 0.0f) {
+                for (int i = 0; i < num_samples; i++)
+                    mono_send[i] += channel_data[ch][i] * rs;
+            }
         }
 
         if (!pair->left[active].valid)
