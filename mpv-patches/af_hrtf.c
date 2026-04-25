@@ -90,8 +90,11 @@ static ObjCodingMixData *g_objcoding_data_ptr = NULL;
 // Ambisonic early-reflections constants.  Mirrors Steam Audio's
 // AmbisonicsPanningEffect (core/src/core/ambisonics_panning_effect.cpp) and
 // AmbisonicsBinauralEffect precompute (core/src/core/hrtf_database.cpp).
-#define AMBI_ORDER        1
-#define AMBI_NUM_CH       ((AMBI_ORDER + 1) * (AMBI_ORDER + 1))   // 4 for order 1
+// Order 3 → 16 SH channels, 32 SH-HRIR convolutions per block.  Steam Audio
+// runs at order 3 by default; the 24-point Sloane t-design (t=7) has enough
+// resolution to faithfully decode up to order 3 via SAD.
+#define AMBI_ORDER        3
+#define AMBI_NUM_CH       ((AMBI_ORDER + 1) * (AMBI_ORDER + 1))   // 16 for order 3
 #define AMBI_NUM_SPEAKERS 24   // Sloane t-design, http://neilsloane.com/sphdesigns/dim3/des.3.24.7.txt
 
 // ---------------------------------------------------------------------------
@@ -987,23 +990,52 @@ static void pconv_process(PartitionedConvolver *c, const float *in, float *out) 
 }
 
 // ---------------------------------------------------------------------------
-// Real spherical harmonics (order 0-1, ACN ordering, full N3D normalisation).
+// Real spherical harmonics (orders 0–3, ACN ordering, full N3D normalisation).
 //
 // Coefficients match the Google spherical-harmonics library that Steam Audio
 // wraps in core/src/core/sh/spherical_harmonics.cc.  Google's convention is
 // +x forward, +y left, +z up — which is ALSO our audio convention (the same
 // one libmysofa uses), so no coordinate transform is needed here.  We feed
 // the SH basis directly with (x_audio, y_audio, z_audio).
+//
+// 16 ACN indices for order 3: i = l*(l+1) + m
+//   0:(0,0)=W   1:(1,-1)=Y   2:(1,0)=Z   3:(1,1)=X
+//   4:(2,-2)    5:(2,-1)     6:(2,0)     7:(2,1)     8:(2,2)
+//   9:(3,-3)   10:(3,-2)    11:(3,-1)   12:(3,0)    13:(3,1)   14:(3,2)   15:(3,3)
 // ---------------------------------------------------------------------------
 
-static void sh_eval_order1(float x_audio, float y_audio, float z_audio,
-                           float out_sh[AMBI_NUM_CH]) {
-    // Our audio frame matches Google-SH, so this is an identity pass-through.
-    // ACN ordering: [0]=Y_0^0, [1]=Y_1^-1 (y), [2]=Y_1^0 (z), [3]=Y_1^1 (x).
-    out_sh[0] = 0.282094791773878f;                     // 0.5 * sqrt(1/pi)
-    out_sh[1] = 0.488602511902920f * y_audio;           // sqrt(3/(4pi)) * y
-    out_sh[2] = 0.488602511902920f * z_audio;           // sqrt(3/(4pi)) * z
-    out_sh[3] = 0.488602511902920f * x_audio;           // sqrt(3/(4pi)) * x
+static void sh_eval(float x, float y, float z, float out_sh[AMBI_NUM_CH]) {
+    float xx = x * x, yy = y * y, zz = z * z;
+
+    // Order 0
+    out_sh[0]  = 0.282094791773878f;                       // 0.5 * sqrt(1/pi)
+
+    // Order 1
+    out_sh[1]  = 0.488602511902920f * y;                   // sqrt(3/(4pi))·y
+    out_sh[2]  = 0.488602511902920f * z;                   // sqrt(3/(4pi))·z
+    out_sh[3]  = 0.488602511902920f * x;                   // sqrt(3/(4pi))·x
+
+    // Order 2
+    out_sh[4]  = 1.092548430592079f * x * y;               // 0.5·sqrt(15/pi)·xy
+    out_sh[5]  = 1.092548430592079f * y * z;               // 0.5·sqrt(15/pi)·yz
+    out_sh[6]  = 0.315391565252520f * (-xx - yy + 2.0f * zz);
+                                                            // 0.25·sqrt(5/pi)·(-x²-y²+2z²)
+    out_sh[7]  = 1.092548430592079f * x * z;               // 0.5·sqrt(15/pi)·xz
+    out_sh[8]  = 0.546274215296040f * (xx - yy);           // 0.25·sqrt(15/pi)·(x²-y²)
+
+    // Order 3
+    out_sh[9]  = 0.590043589926644f * y * (3.0f * xx - yy);
+                                                            // 0.25·sqrt(35/(2pi))·y(3x²-y²)
+    out_sh[10] = 2.890611442640554f * x * y * z;           // 0.5·sqrt(105/pi)·xyz
+    out_sh[11] = 0.457045799464466f * y * (4.0f * zz - xx - yy);
+                                                            // 0.25·sqrt(21/(2pi))·y(4z²-x²-y²)
+    out_sh[12] = 0.373176332590115f * z * (2.0f * zz - 3.0f * xx - 3.0f * yy);
+                                                            // 0.25·sqrt(7/pi)·z(2z²-3x²-3y²)
+    out_sh[13] = 0.457045799464466f * x * (4.0f * zz - xx - yy);
+                                                            // 0.25·sqrt(21/(2pi))·x(4z²-x²-y²)
+    out_sh[14] = 1.445305721320277f * z * (xx - yy);       // 0.25·sqrt(105/pi)·z(x²-y²)
+    out_sh[15] = 0.590043589926644f * x * (xx - 3.0f * yy);
+                                                            // 0.25·sqrt(35/(2pi))·x(x²-3y²)
 }
 
 // 24-point spherical t-design (t=7), coordinates lifted verbatim from Steam
@@ -1058,7 +1090,7 @@ static void steam_speaker_to_audio_az_el(const float s[3],
 }
 
 // Same conversion, returning the audio-space unit vector so we can feed it to
-// sh_eval_order1 directly (in our frame = Google-SH frame).
+// sh_eval() directly (in our frame = Google-SH frame).
 static void steam_speaker_to_audio_xyz(const float s[3],
                                        float *xa, float *ya, float *za) {
     *xa = -s[2];
@@ -1206,7 +1238,7 @@ static void compute_ambi_decoder_hrirs(struct priv *p) {
         float xa, ya, za;
         steam_speaker_to_audio_xyz(sv, &xa, &ya, &za);
         float sh[AMBI_NUM_CH];
-        sh_eval_order1(xa, ya, za, sh);
+        sh_eval(xa, ya, za, sh);
 
         for (int i = 0; i < AMBI_NUM_CH; i++) {
             float weight = w * sh[i];
@@ -1284,7 +1316,7 @@ static void er_update(EarlyReflections *er, float width, float depth,
         er->tap_delays[i] = d;
         er->tap_gain[i] = (1.0f - absorption) / (1.0f + taps[i].extra);
 
-        sh_eval_order1(taps[i].x, taps[i].y, taps[i].z, er->tap_sh[i]);
+        sh_eval(taps[i].x, taps[i].y, taps[i].z, er->tap_sh[i]);
     }
 }
 
