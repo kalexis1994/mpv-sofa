@@ -119,6 +119,13 @@ typedef struct HrtfSharedState {
     HRTF_ATOMIC(int32_t)  ir_changed;
     HRTF_ATOMIC(float)    ir_wet;
 
+    // Near-field compensation: low-shelf boost on the proximal ear for
+    // sources within ~1.5 m.  Generic HRTFs are measured at 1.5–2 m and
+    // underestimate the LF coupling that very close sources produce; this
+    // restores the "intimate body" close-mic'd dialogue or hyper-close
+    // Atmos objects should have.  Default on.
+    HRTF_ATOMIC(int32_t)  near_field_comp;
+
     // Bauer crossfeed amount (0..0.5).  Mixes a delayed low-passed (~700 Hz)
     // copy of each channel into the opposite ear, simulating the natural
     // low-frequency diffraction around the head.  Unlike broadband crossfeed

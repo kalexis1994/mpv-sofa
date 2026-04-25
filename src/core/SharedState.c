@@ -47,6 +47,10 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     atomic_store(&s->ir_changed, 0);
     atomic_store(&s->ir_wet, 0.35f);
 
+    // Near-field compensation on by default — only active for sources
+    // within 1.5 m, so it has no effect on far-field cinema content.
+    atomic_store(&s->near_field_comp, 1);
+
     // Bauer crossfeed: gentle default, gives the contralateral ear body for
     // frontal sources without blurring lateralised side/rear sources.
     atomic_store(&s->bauer_crossfeed, 0.15f);

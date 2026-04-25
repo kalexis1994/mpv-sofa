@@ -657,6 +657,12 @@ void ControlPanel::render() {
         atomic_store(&m_state->front_pinna_boost, pinna ? 1 : 0);
     }
 
+    // Near-field compensation: LF shelf boost for sources <1.5m.
+    bool nfc = atomic_load(&m_state->near_field_comp) != 0;
+    if (ImGui::Checkbox("Near-field compensation (close-source body)", &nfc)) {
+        atomic_store(&m_state->near_field_comp, nfc ? 1 : 0);
+    }
+
     ImGui::Separator();
 
     // Master volume

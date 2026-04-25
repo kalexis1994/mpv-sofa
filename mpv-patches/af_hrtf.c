@@ -174,6 +174,8 @@ typedef struct {
     char             ir_file_path[512];   // path to convolution reverb IR (WAV)
     _Atomic int32_t  ir_changed;
     _Atomic float    ir_wet;              // 0..1
+
+    _Atomic int32_t  near_field_comp;     // 1 = LF shelf boost for sources <1.5m
 } HrtfSharedState;
 
 // ---------------------------------------------------------------------------
@@ -373,6 +375,10 @@ struct priv {
     // Distance attenuation / air absorption
     float air_abs_state[HRTF_MAX_CHANNELS];  // one-pole lowpass state
     float screen_baffle_state[3];             // screen-baffle LP state for FL/FR/FC
+    // Near-field compensation: per-ear, per-channel one-pole LP states for
+    // the low-shelf boost applied to sources within ~1.5 m.
+    float nf_lp_state_l[HRTF_MAX_CHANNELS];
+    float nf_lp_state_r[HRTF_MAX_CHANNELS];
     // Frontal pinna EQ: peak ~4 kHz, notch ~8 kHz (two cascaded biquads).
     // Per-channel x[n-1], x[n-2], y[n-1], y[n-2] state for each biquad.
     float pinna_peak_state[3][4];             // [ch][x1,x2,y1,y2]
@@ -3127,6 +3133,46 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
                     block_l[i] *= fade;
                     block_r[i] *= fade;
                     p->height_fade_remaining++;
+                }
+            }
+        }
+
+        // Near-field compensation.  For sources within ~1.5 m we apply a
+        // per-ear low-shelf boost on the post-HRTF channel signal.  The
+        // boost amount is weighted by azimuth so the proximal ear gets
+        // most of the lift (frontal sources get a smaller bilateral boost).
+        // Generic HRTFs measured at 1.5–2 m miss the LF coupling that
+        // very close sources produce; this brings it back so close objects
+        // feel "right at the head" instead of "moderately distant".
+        if (ch != 3 && p->shared &&
+            atomic_load_explicit(&p->shared->near_field_comp,
+                                  memory_order_relaxed)) {
+            const float ref_dist     = 1.5f;
+            const float max_boost_db = 4.0f;
+            const float fc           = 700.0f;
+            if (dist < ref_dist) {
+                float prox = (ref_dist - dist) / ref_dist;          // 0..1
+                if (prox > 1.0f) prox = 1.0f;
+                if (prox < 0.0f) prox = 0.0f;
+                float az_rad = p->speaker_pos[ch].azimuth *
+                               (float)(M_PI / 180.0);
+                float sa = sinf(az_rad);
+                float w_l = prox * 0.5f * (1.0f + sa);
+                float w_r = prox * 0.5f * (1.0f - sa);
+                float boost_lin = powf(10.0f, max_boost_db / 20.0f);
+                float gm1_l = (boost_lin - 1.0f) * w_l;
+                float gm1_r = (boost_lin - 1.0f) * w_r;
+                float coeff = 1.0f - expf(-2.0f * (float)M_PI * fc /
+                                           (float)p->sample_rate);
+                for (int i = 0; i < num_samples; i++) {
+                    p->nf_lp_state_l[ch] =
+                        (1.0f - coeff) * p->nf_lp_state_l[ch] +
+                        coeff * block_l[i];
+                    block_l[i] += gm1_l * p->nf_lp_state_l[ch];
+                    p->nf_lp_state_r[ch] =
+                        (1.0f - coeff) * p->nf_lp_state_r[ch] +
+                        coeff * block_r[i];
+                    block_r[i] += gm1_r * p->nf_lp_state_r[ch];
                 }
             }
         }
