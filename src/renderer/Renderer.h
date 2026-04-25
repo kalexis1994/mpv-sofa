@@ -31,11 +31,13 @@ private:
     float getSpatialObjectLevel(HrtfSharedState* state, int objectIndex, int numChannels);
     glm::vec4 getSpatialObjectColor(float level) const;
 
-    // Get color for speaker based on channel index
-    glm::vec4 getSpeakerColor(int channel);
+    // Get color for speaker based on channel index.  numChannels is passed
+    // so 6.1 (7-ch) renders SL/SR/BC at the right indices instead of the
+    // 7.1.4 mapping.
+    glm::vec4 getSpeakerColor(int channel, int numChannels);
 
-    // Speaker name for channel index
-    const char* getSpeakerName(int channel);
+    // Speaker name for channel index (layout-aware, see above).
+    const char* getSpeakerName(int channel, int numChannels);
 
     std::unique_ptr<Shader> m_solidShader;
     std::unique_ptr<Shader> m_gridShader;

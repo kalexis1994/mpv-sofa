@@ -111,6 +111,14 @@ typedef struct HrtfSharedState {
     // ambiguity that causes frontals to feel lateral or behind.  Default on.
     HRTF_ATOMIC(int32_t)  front_pinna_boost;
 
+    // Convolution reverb: stereo impulse response loaded from a WAV file at
+    // 48 kHz.  ir_file_path is the absolute/relative path; setting
+    // ir_changed=1 signals the audio filter to reload.  ir_wet scales the
+    // resulting wet signal before mixing into the binaural output.
+    char             ir_file_path[512];
+    HRTF_ATOMIC(int32_t)  ir_changed;
+    HRTF_ATOMIC(float)    ir_wet;
+
     // Bauer crossfeed amount (0..0.5).  Mixes a delayed low-passed (~700 Hz)
     // copy of each channel into the opposite ear, simulating the natural
     // low-frequency diffraction around the head.  Unlike broadband crossfeed

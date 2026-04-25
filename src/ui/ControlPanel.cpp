@@ -23,7 +23,14 @@ static const char* speakerNames[] = {
 };
 
 static const char* layoutNames[] = {
-    "7.1.4 Spatial", "7.1 Surround", "5.1 Surround", "Stereo"
+    "7.1.4 Spatial", "7.1 Surround", "6.1 Surround", "5.1 Surround", "Stereo"
+};
+
+// Per-channel label lookup.  7.1.4 uses the full speakerNames[] above; 6.1
+// has a different tail (BC / SL / SR at indices 4..6).
+static const char* speakerName61[] = {
+    "Front Left (FL)", "Front Right (FR)", "Front Center (FC)", "LFE",
+    "Back Center (BC)", "Side Left (SL)", "Side Right (SR)"
 };
 
 // Room/environment presets - positions for all 12 channels (7.1.4)
@@ -315,6 +322,26 @@ void ControlPanel::scanProfiles() {
     m_profilesScanned = true;
 }
 
+void ControlPanel::scanIrs() {
+    m_irFiles.clear();
+    m_selectedIr = 0;
+    const char* dir = "assets/ir";
+    try {
+        if (!fs::exists(dir)) { m_irScanned = true; return; }
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".wav") continue;
+            std::string p = entry.path().string();
+            std::replace(p.begin(), p.end(), '\\', '/');
+            m_irFiles.push_back(p);
+        }
+    } catch (...) {}
+    std::sort(m_irFiles.begin(), m_irFiles.end());
+    m_irScanned = true;
+}
+
 void ControlPanel::loadProfile(int index) {
     if (index < 0 || index >= (int)m_profiles.size())
         return;
@@ -392,20 +419,59 @@ void ControlPanel::render() {
 
     ImGui::Separator();
 
+    // Auto-sync the layout dropdown to whatever the audio filter is actually
+    // processing.  When mpv opens a track the filter writes num_channels to
+    // SharedState; we reflect that in the UI so the dropdown doesn't lie
+    // about the current layout.  Only updates when num_channels changes, so
+    // manual dropdown edits aren't clobbered every frame.
+    {
+        int streamCh = atomic_load(&m_state->num_channels);
+        if (streamCh != m_lastSeenNumChannels) {
+            m_lastSeenNumChannels = streamCh;
+            int autoLayout = -1;
+            switch (streamCh) {
+                case 2:  autoLayout = 4; break;  // Stereo
+                case 6:  autoLayout = 3; break;  // 5.1
+                case 7:  autoLayout = 2; break;  // 6.1
+                case 8:  autoLayout = 1; break;  // 7.1
+                case 12: autoLayout = 0; break;  // 7.1.4
+                // 10 (7.1.2), 16 (9.1.6), etc. — leave dropdown alone.
+            }
+            if (autoLayout >= 0)
+                m_selectedLayout = autoLayout;
+        }
+    }
+
     // Speaker layout (channel count)
     ImGui::Text("Speaker Layout:");
-    if (ImGui::Combo("##layout", &m_selectedLayout, layoutNames, 4)) {
+    if (ImGui::Combo("##layout", &m_selectedLayout, layoutNames,
+                      (int)(sizeof(layoutNames) / sizeof(layoutNames[0])))) {
         int numCh = 12;
         switch (m_selectedLayout) {
             case 0: numCh = 12; break; // 7.1.4
             case 1: numCh = 8;  break; // 7.1
-            case 2: numCh = 6;  break; // 5.1
-            case 3: numCh = 2;  break; // Stereo
+            case 2: numCh = 7;  break; // 6.1
+            case 3: numCh = 6;  break; // 5.1
+            case 4: numCh = 2;  break; // Stereo
         }
-        // Apply current room preset positions for the new channel count
         const RoomPreset& room = roomPresets[m_selectedRoom];
-        for (int i = 0; i < numCh && i < 12; i++)
-            m_state->speaker_pos[i] = room.positions[i];
+        if (numCh == 7) {
+            // 6.1 = FL FR FC LFE BC SL SR.  Derive BC from the preset's back
+            // wall geometry (reuse BL distance/elevation but force az=180°)
+            // so the back-centre speaker sits where the rear wall is.
+            m_state->speaker_pos[0] = room.positions[0];               // FL
+            m_state->speaker_pos[1] = room.positions[1];               // FR
+            m_state->speaker_pos[2] = room.positions[2];               // FC
+            m_state->speaker_pos[3] = room.positions[3];               // LFE
+            HrtfPosition bc = room.positions[4];                        // use BL as base
+            bc.azimuth = 180.0f;
+            m_state->speaker_pos[4] = bc;                               // BC
+            m_state->speaker_pos[5] = room.positions[6];               // SL
+            m_state->speaker_pos[6] = room.positions[7];               // SR
+        } else {
+            for (int i = 0; i < numCh && i < 12; i++)
+                m_state->speaker_pos[i] = room.positions[i];
+        }
         atomic_store(&m_state->num_channels, numCh);
         atomic_store(&m_state->num_bed_channels, numCh);
         atomic_store(&m_state->speaker_pos_changed, 1);
@@ -503,6 +569,40 @@ void ControlPanel::render() {
         atomic_store(&m_state->er_level, erLevel);
     }
 
+    // Convolution-reverb IR dropdown (scans assets/ir/*.wav).
+    // Users drop a stereo 48 kHz WAV IR into that folder and pick it here.
+    if (!m_irScanned) scanIrs();
+    {
+        std::vector<const char*> labels;
+        labels.push_back("None");
+        for (const auto& f : m_irFiles) {
+            // Show just the filename for brevity
+            size_t slash = f.find_last_of('/');
+            const char *name = (slash == std::string::npos)
+                                 ? f.c_str()
+                                 : f.c_str() + slash + 1;
+            labels.push_back(name);
+        }
+        int idx = m_selectedIr;
+        if (ImGui::Combo("Conv reverb IR", &idx,
+                          labels.data(), (int)labels.size())) {
+            m_selectedIr = idx;
+            if (idx == 0) {
+                m_state->ir_file_path[0] = '\0';
+            } else {
+                const std::string& p = m_irFiles[idx - 1];
+                strncpy(m_state->ir_file_path, p.c_str(),
+                        sizeof(m_state->ir_file_path) - 1);
+                m_state->ir_file_path[sizeof(m_state->ir_file_path) - 1] = '\0';
+            }
+            atomic_store(&m_state->ir_changed, 1);
+        }
+        float irWet = atomic_load(&m_state->ir_wet);
+        if (ImGui::SliderFloat("Conv reverb wet", &irWet, 0.0f, 1.0f, "%.2f")) {
+            atomic_store(&m_state->ir_wet, irWet);
+        }
+    }
+
     // Crossfeed (signed).  Positive = classical narrowing (dilutes HRTF cues,
     // pulls sides back).  Negative = stereo widener (amplifies ILD, pushes
     // sides outward).  Useful when a generic HRTF doesn't lateralise enough.
@@ -528,7 +628,15 @@ void ControlPanel::render() {
     if (ImGui::Checkbox("SMPTE channel order (Atmos / cinema)", &smpte)) {
         atomic_store(&m_state->channel_order_smpte, smpte ? 1 : 0);
         int numCh = atomic_load(&m_state->num_channels);
-        if (numCh >= 8) {
+        if (numCh == 7) {
+            // 6.1 rotation: ch4→ch5→ch6→ch4 (SL, SR, BC) so the three tail
+            // positions match where Dolby places the audio in SMPTE order.
+            HrtfPosition t = m_state->speaker_pos[4];
+            m_state->speaker_pos[4] = m_state->speaker_pos[5];
+            m_state->speaker_pos[5] = m_state->speaker_pos[6];
+            m_state->speaker_pos[6] = t;
+            atomic_store(&m_state->speaker_pos_changed, 1);
+        } else if (numCh >= 8) {
             HrtfPosition t;
             t = m_state->speaker_pos[4]; m_state->speaker_pos[4] = m_state->speaker_pos[6]; m_state->speaker_pos[6] = t;
             t = m_state->speaker_pos[5]; m_state->speaker_pos[5] = m_state->speaker_pos[7]; m_state->speaker_pos[7] = t;
@@ -588,8 +696,13 @@ void ControlPanel::render() {
             ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
         bool isObjectChannel = i >= bedCount;
-        const char* spkName = (i < 12 && !isObjectChannel) ? speakerNames[i]
-                                                            : (isObjectChannel ? "Object" : "Unknown");
+        // Pick name array based on active layout: 6.1 has a different tail.
+        bool is61 = (numCh == 7);
+        const char* spkName;
+        if (isObjectChannel)                       spkName = "Object";
+        else if (is61 && i < 7)                    spkName = speakerName61[i];
+        else if (i < 12)                           spkName = speakerNames[i];
+        else                                       spkName = "Unknown";
         char spkLabel[64];
         if (isObjectChannel)
             snprintf(spkLabel, sizeof(spkLabel), "Object %d (ch %d)", i - bedCount, i);
@@ -688,7 +801,12 @@ void ControlPanel::render() {
                 float rms = atomic_load(&m_state->channel_rms[i]);
                 float peak = atomic_load(&m_state->channel_peak[i]);
                 bool isObj = i >= bedCountNow;
-                const char* label = (i < 12 && !isObj) ? speakerNames[i] : "Object";
+                bool is61 = (numChNow == 7);
+                const char* label;
+                if (isObj)                 label = "Object";
+                else if (is61 && i < 7)    label = speakerName61[i];
+                else if (i < 12)           label = speakerNames[i];
+                else                       label = "Unknown";
                 char buf[64];
                 if (isObj)
                     snprintf(buf, sizeof(buf), "Obj %d", i - bedCountNow);

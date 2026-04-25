@@ -167,6 +167,10 @@ typedef struct {
     _Atomic int32_t  screen_baffling;     // 1 = HF shelf on FL/FR/FC (behind screen)
     _Atomic int32_t  front_pinna_boost;   // 1 = synthetic frontal pinna EQ on FL/FR/FC
     _Atomic float    bauer_crossfeed;     // 0..0.5 LF-only crossfeed for frontal grounding
+
+    char             ir_file_path[512];   // path to convolution reverb IR (WAV)
+    _Atomic int32_t  ir_changed;
+    _Atomic float    ir_wet;              // 0..1
 } HrtfSharedState;
 
 // ---------------------------------------------------------------------------
@@ -271,6 +275,24 @@ typedef struct {
     int initialized;
 } EarlyReflections;
 
+// Uniform-partitioned convolution engine for long IRs (reverb).
+// Implementation sits alongside the other DSP blocks further down; this
+// typedef is hoisted so struct priv can embed two instances by value.
+typedef struct {
+    PFFFT_Setup *fft;
+    int   block_size;        // P
+    int   fft_n;             // 2 * P
+    int   num_partitions;    // K
+    float *ir_fft;           // [K * fft_n] — IR partitions, z-domain
+    float *hist_fft;         // [K * fft_n] — circular input FFT history
+    int   head;              // next write slot in hist_fft (0..K-1)
+    float *work;             // PFFFT work area
+    float *acc_fd;           // [fft_n] accumulator (frequency domain)
+    float *tmp_td;           // [fft_n] time-domain scratch
+    float *overlap;          // [P] overlap-add tail from previous block
+    int   valid;
+} PartitionedConvolver;
+
 // ---------------------------------------------------------------------------
 // Filter options
 // ---------------------------------------------------------------------------
@@ -321,6 +343,11 @@ struct priv {
 
     // Reverb state
     ReverbState reverb;
+
+    // IR convolution reverb (stereo).  One PartitionedConvolver per ear.
+    PartitionedConvolver ir_l;
+    PartitionedConvolver ir_r;
+    char ir_loaded_path[512];  // path currently in the convolvers (empty if none)
 
     // Early reflections state
     EarlyReflections er;
@@ -693,6 +720,270 @@ static void reverb_destroy(ReverbState *r) {
     free(r->predelay_l);
     free(r->predelay_r);
     memset(r, 0, sizeof(*r));
+}
+
+// ---------------------------------------------------------------------------
+// Minimal WAV reader for loading impulse responses.
+// Supports PCM 16/24/32-bit and IEEE-754 float 32-bit, mono or stereo.
+// Returns 0 on success; the caller frees *out_l and *out_r.  Mono files are
+// duplicated onto both channels.  If target_sr > 0 and the file's sample rate
+// doesn't match, returns -2 (we don't resample; user should provide 48 kHz).
+// ---------------------------------------------------------------------------
+static uint32_t wav_rd_u32_le(const uint8_t *b) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+           ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+static uint16_t wav_rd_u16_le(const uint8_t *b) {
+    return (uint16_t)b[0] | ((uint16_t)b[1] << 8);
+}
+
+static int wav_load_stereo(const char *path, int target_sr,
+                           float **out_l, float **out_r, int *out_len) {
+    *out_l = NULL; *out_r = NULL; *out_len = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    uint8_t hdr[12];
+    if (fread(hdr, 1, 12, f) != 12 ||
+        memcmp(hdr, "RIFF", 4) != 0 ||
+        memcmp(hdr + 8, "WAVE", 4) != 0) {
+        fclose(f); return -1;
+    }
+
+    uint16_t format = 0, channels = 0, bits = 0;
+    uint32_t sr = 0;
+    uint32_t data_size = 0;
+    long data_offset = 0;
+
+    for (;;) {
+        uint8_t chunk[8];
+        if (fread(chunk, 1, 8, f) != 8) break;
+        uint32_t csize = wav_rd_u32_le(chunk + 4);
+        if (memcmp(chunk, "fmt ", 4) == 0) {
+            uint8_t fmt[40] = {0};
+            uint32_t r = csize > sizeof(fmt) ? sizeof(fmt) : csize;
+            if (fread(fmt, 1, r, f) != r) { fclose(f); return -1; }
+            format   = wav_rd_u16_le(fmt + 0);
+            channels = wav_rd_u16_le(fmt + 2);
+            sr       = wav_rd_u32_le(fmt + 4);
+            bits     = wav_rd_u16_le(fmt + 14);
+            // WAVE_FORMAT_EXTENSIBLE: the real format tag is in the GUID tail.
+            if (format == 0xFFFE && csize >= 40) {
+                format = wav_rd_u16_le(fmt + 24);
+            }
+            if (csize > r) fseek(f, csize - r, SEEK_CUR);
+        } else if (memcmp(chunk, "data", 4) == 0) {
+            data_size = csize;
+            data_offset = ftell(f);
+            break;
+        } else {
+            fseek(f, csize, SEEK_CUR);
+        }
+        if (csize & 1) fseek(f, 1, SEEK_CUR);  // pad byte
+    }
+
+    if (data_size == 0 || channels < 1 || channels > 16 ||
+        (format != 1 && format != 3) || bits == 0) {
+        fclose(f); return -1;
+    }
+    if (target_sr > 0 && (int)sr != target_sr) {
+        fclose(f); return -2;
+    }
+
+    int bps = bits / 8;
+    int frame = bps * channels;
+    int N = (int)(data_size / (uint32_t)frame);
+    float *L = (float *)malloc((size_t)N * sizeof(float));
+    float *R = (float *)malloc((size_t)N * sizeof(float));
+    if (!L || !R) { free(L); free(R); fclose(f); return -1; }
+
+    // Scratch buffer for one frame of per-channel floats; enables a simple
+    // downmix from arbitrary channel counts (mono, stereo, or 4-channel
+    // B-format ambisonic) to our stereo consumer.  For B-format we assume
+    // FuMa order (W, X, Y, Z) — the Theatre@41 dataset and most Soundfield
+    // ST450 captures follow this convention — and decode with a virtual
+    // stereo mic pair:
+    //     L = W + 0.5·Y
+    //     R = W − 0.5·Y
+    // This preserves the lateral imaging baked into the recording while
+    // keeping the omnidirectional energy that carries the reverb tail.
+    float ch_buf[16];
+
+    fseek(f, data_offset, SEEK_SET);
+    for (int i = 0; i < N; i++) {
+        uint8_t buf[64];
+        if (frame > (int)sizeof(buf)) { free(L); free(R); fclose(f); return -1; }
+        if (fread(buf, 1, frame, f) != (size_t)frame) { N = i; break; }
+        for (int c = 0; c < channels; c++) {
+            const uint8_t *p = buf + c * bps;
+            float v = 0.0f;
+            if (format == 1) {
+                if (bits == 16) {
+                    int16_t s = (int16_t)(p[0] | (p[1] << 8));
+                    v = (float)s / 32768.0f;
+                } else if (bits == 24) {
+                    int32_t s = (int32_t)((p[0] << 8) | (p[1] << 16) | (p[2] << 24));
+                    s >>= 8;
+                    v = (float)s / 8388608.0f;
+                } else if (bits == 32) {
+                    int32_t s = (int32_t)wav_rd_u32_le(p);
+                    v = (float)s / 2147483648.0f;
+                } else {
+                    free(L); free(R); fclose(f); return -1;
+                }
+            } else if (format == 3 && bits == 32) {
+                memcpy(&v, p, 4);
+            } else {
+                free(L); free(R); fclose(f); return -1;
+            }
+            ch_buf[c] = v;
+        }
+
+        float l = 0.0f, r = 0.0f;
+        if (channels == 1) {
+            l = r = ch_buf[0];
+        } else if (channels == 2) {
+            l = ch_buf[0]; r = ch_buf[1];
+        } else if (channels == 4) {
+            // FuMa B-format: W, X, Y, Z
+            float W = ch_buf[0];
+            float Y = ch_buf[2];
+            l = W + 0.5f * Y;
+            r = W - 0.5f * Y;
+        } else {
+            // Unknown multichannel — naive L/R downmix from first two only.
+            l = ch_buf[0]; r = ch_buf[1];
+        }
+        L[i] = l;
+        R[i] = r;
+    }
+    fclose(f);
+
+    // Normalise so the peak is ~0.9 — B-format decoding via virtual mic pair
+    // can leave headroom unused and wouldn't convolve to a useful level.
+    float peak = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float a = fabsf(L[i]); if (a > peak) peak = a;
+        float b = fabsf(R[i]); if (b > peak) peak = b;
+    }
+    if (peak > 1e-9f && peak < 0.9f) {
+        float g = 0.9f / peak;
+        for (int i = 0; i < N; i++) { L[i] *= g; R[i] *= g; }
+    }
+
+    *out_l = L; *out_r = R; *out_len = N;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Uniform-partitioned overlap-add convolution engine.
+//
+// IR is split into K partitions of block_size samples (zero-padded to fft_n
+// = 2*block_size and FFT'd once offline).  Per input block we FFT the new
+// input into a circular history of frequency-domain buffers, multiply-add
+// every history slot with its matching IR partition (in PFFFT z-domain to
+// get vectorised complex multiplication), IFFT the sum, then do standard
+// overlap-add: first half of IFFT is the output, second half carries over.
+//
+// Algorithmic latency: zero (one block of processing latency only).
+// CPU cost: K complex-muladd per block — trivial for IRs of a few seconds.
+// (The PartitionedConvolver struct is declared earlier, right after the
+// EarlyReflections typedef, so struct priv can embed two instances.)
+// ---------------------------------------------------------------------------
+
+static void pconv_init(PartitionedConvolver *c, int block_size) {
+    memset(c, 0, sizeof(*c));
+    c->block_size = block_size;
+    c->fft_n = 2 * block_size;
+    c->fft = pffft_new_setup(c->fft_n, PFFFT_REAL);
+    c->work    = pffft_aligned_malloc(c->fft_n * sizeof(float));
+    c->acc_fd  = pffft_aligned_malloc(c->fft_n * sizeof(float));
+    c->tmp_td  = pffft_aligned_malloc(c->fft_n * sizeof(float));
+    c->overlap = pffft_aligned_malloc(block_size * sizeof(float));
+    memset(c->overlap, 0, block_size * sizeof(float));
+}
+
+static void pconv_clear(PartitionedConvolver *c) {
+    if (!c->valid) return;
+    memset(c->hist_fft, 0,
+           (size_t)c->num_partitions * (size_t)c->fft_n * sizeof(float));
+    memset(c->overlap, 0, (size_t)c->block_size * sizeof(float));
+    c->head = 0;
+}
+
+static void pconv_destroy(PartitionedConvolver *c) {
+    if (c->fft) pffft_destroy_setup(c->fft);
+    pffft_aligned_free(c->work);
+    pffft_aligned_free(c->acc_fd);
+    pffft_aligned_free(c->tmp_td);
+    pffft_aligned_free(c->overlap);
+    pffft_aligned_free(c->ir_fft);
+    pffft_aligned_free(c->hist_fft);
+    memset(c, 0, sizeof(*c));
+}
+
+static void pconv_load(PartitionedConvolver *c, const float *ir, int ir_len) {
+    int P = c->block_size;
+    int N = c->fft_n;
+    int K = (ir_len + P - 1) / P;
+    if (K < 1) K = 1;
+
+    if (c->ir_fft)   pffft_aligned_free(c->ir_fft);
+    if (c->hist_fft) pffft_aligned_free(c->hist_fft);
+    c->num_partitions = K;
+    c->ir_fft   = pffft_aligned_malloc((size_t)K * (size_t)N * sizeof(float));
+    c->hist_fft = pffft_aligned_malloc((size_t)K * (size_t)N * sizeof(float));
+    memset(c->hist_fft, 0, (size_t)K * (size_t)N * sizeof(float));
+    memset(c->overlap, 0, (size_t)P * sizeof(float));
+    c->head = 0;
+
+    float *tmp = pffft_aligned_malloc(N * sizeof(float));
+    for (int k = 0; k < K; k++) {
+        memset(tmp, 0, N * sizeof(float));
+        int start = k * P;
+        int len = P;
+        if (start + len > ir_len) len = ir_len - start;
+        if (len > 0) memcpy(tmp, ir + start, (size_t)len * sizeof(float));
+        pffft_transform(c->fft, tmp, c->ir_fft + (size_t)k * N,
+                        c->work, PFFFT_FORWARD);
+    }
+    pffft_aligned_free(tmp);
+    c->valid = 1;
+}
+
+static void pconv_process(PartitionedConvolver *c, const float *in, float *out) {
+    if (!c->valid) {
+        memset(out, 0, (size_t)c->block_size * sizeof(float));
+        return;
+    }
+    int P = c->block_size;
+    int N = c->fft_n;
+    int K = c->num_partitions;
+
+    float *cur_fft = c->hist_fft + (size_t)c->head * N;
+    memset(c->tmp_td, 0, (size_t)N * sizeof(float));
+    memcpy(c->tmp_td, in, (size_t)P * sizeof(float));
+    pffft_transform(c->fft, c->tmp_td, cur_fft, c->work, PFFFT_FORWARD);
+
+    memset(c->acc_fd, 0, (size_t)N * sizeof(float));
+    for (int k = 0; k < K; k++) {
+        int hist_idx = c->head - k;
+        while (hist_idx < 0) hist_idx += K;
+        pffft_zconvolve_accumulate(c->fft,
+                                    c->hist_fft + (size_t)hist_idx * N,
+                                    c->ir_fft   + (size_t)k        * N,
+                                    c->acc_fd, 1.0f);
+    }
+
+    pffft_transform(c->fft, c->acc_fd, c->tmp_td, c->work, PFFFT_BACKWARD);
+
+    float inv_n = 1.0f / (float)N;
+    for (int i = 0; i < P; i++)
+        out[i] = c->tmp_td[i] * inv_n + c->overlap[i];
+    for (int i = 0; i < P; i++)
+        c->overlap[i] = c->tmp_td[P + i] * inv_n;
+
+    c->head = (c->head + 1) % K;
 }
 
 // ---------------------------------------------------------------------------
@@ -1601,6 +1892,22 @@ static void init_speaker_positions_from_chmap(struct priv *p,
 // channels 4↔6 and 5↔7 (and 10↔10 no-op for TBL/TSL, kept for symmetry)
 // puts the audio at the direction the content creator intended.
 static void apply_smpte_channel_order(struct priv *p) {
+    // 6.1 (7 channels): Dolby SMPTE order is FL FR FC LFE SL SR BC, but
+    // FFmpeg's AV_CH_LAYOUT_6POINT1 normalises to FL FR FC LFE BC SL SR
+    // (bit order 0,1,2,3,8,9,10).  If the audio payload is still in SMPTE
+    // order, ch4 carries SL, ch5 carries SR, ch6 carries BC.  Rotate the
+    // three tail positions one slot left so the channels land at the
+    // direction their audio was intended for:
+    //   speaker_pos[4] ← SL (90°)
+    //   speaker_pos[5] ← SR (−90°)
+    //   speaker_pos[6] ← BC (180°)
+    if (p->num_channels == 7) {
+        HrtfSpeakerPos t = p->speaker_pos[4];
+        p->speaker_pos[4] = p->speaker_pos[5];
+        p->speaker_pos[5] = p->speaker_pos[6];
+        p->speaker_pos[6] = t;
+        return;
+    }
     if (p->num_channels >= 8) {
         HrtfSpeakerPos t;
         t = p->speaker_pos[4]; p->speaker_pos[4] = p->speaker_pos[6]; p->speaker_pos[6] = t;
@@ -2206,6 +2513,9 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
             p->objcoding_obj_buf[i] = NULL;
         }
         reverb_destroy(&p->reverb);
+        pconv_destroy(&p->ir_l);
+        pconv_destroy(&p->ir_r);
+        p->ir_loaded_path[0] = '\0';
         er_destroy(&p->er);
     }
 
@@ -2367,6 +2677,9 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
 
     // Initialize reverb and sync initial params from shared state
     reverb_init(&p->reverb, sample_rate);
+    pconv_init(&p->ir_l, HRTF_BLOCK_SIZE);
+    pconv_init(&p->ir_r, HRTF_BLOCK_SIZE);
+    p->ir_loaded_path[0] = '\0';
     er_init(&p->er);
     // Precompute ambisonic-binaural decoder filters from current SOFA.
     // Steam Audio HRTFDatabase::precomputeAmbisonicsHRTFs() runs once per HRTF
@@ -2537,19 +2850,27 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         }
     }
 
-    // Mono room-send bus for the ambisonic early-reflections pipeline.
-    // Accumulated below (after dist attenuation + air absorption) from every
-    // non-LFE source we actually render.  Feeds er_process_ambi() once at the
-    // end of the block — Steam Audio-style separation of source energy from
-    // reflection spatialisation.
+    // Mono room-send bus for the wet processing stages (ambisonic ER + IR
+    // convolution reverb).  Accumulated below (after dist attenuation + air
+    // absorption) from every non-LFE source we actually render.  Contains
+    // ONLY the distance weighting — each consumer applies its own level
+    // (er_level / ir_wet) at its call site, so the bus can feed both paths.
     float mono_send[HRTF_BLOCK_SIZE];
     memset(mono_send, 0, sizeof(mono_send));
-    float er_send_level = 0.0f;
-    if (p->shared)
-        er_send_level = atomic_load_explicit(&p->shared->er_level,
-                                              memory_order_relaxed);
-    if (er_send_level < 0.0f) er_send_level = 0.0f;
-    if (er_send_level > 1.0f) er_send_level = 1.0f;
+    float er_level = 0.0f;
+    float ir_wet_level = 0.0f;
+    if (p->shared) {
+        er_level = atomic_load_explicit(&p->shared->er_level,
+                                         memory_order_relaxed);
+        ir_wet_level = atomic_load_explicit(&p->shared->ir_wet,
+                                             memory_order_relaxed);
+    }
+    if (er_level < 0.0f) er_level = 0.0f;
+    if (er_level > 1.0f) er_level = 1.0f;
+    if (ir_wet_level < 0.0f) ir_wet_level = 0.0f;
+    if (ir_wet_level > 1.0f) ir_wet_level = 1.0f;
+    int need_mono_send = (er_level > 0.0f) ||
+                         (ir_wet_level > 0.0f && p->ir_l.valid);
 
     for (int ch = 0; ch < num_ch && ch < HRTF_MAX_CHANNELS; ch++) {
         // Skip muted channel groups
@@ -2707,13 +3028,12 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
         // Combined with the direct path's own 1/dist attenuation, this is
         // the cue a listener uses to judge depth — a close whisper stays
         // dry and forward, a distant rumble washes out into the room.
-        if (ch != 3 && er_send_level > 0.0f) {
+        if (ch != 3 && need_mono_send) {
             const float tau = 3.0f;
             float dist_send = dist / (dist + tau);
-            float rs = er_send_level * dist_send;
-            if (rs > 0.0f) {
+            if (dist_send > 0.0f) {
                 for (int i = 0; i < num_samples; i++)
-                    mono_send[i] += channel_data[ch][i] * rs;
+                    mono_send[i] += channel_data[ch][i] * dist_send;
             }
         }
 
@@ -2791,9 +3111,30 @@ static void process_block(struct priv *p, float *channel_data[], int num_ch,
     // directly into out_l/out_r so the downstream crossfeed + limiter see
     // the combined direct+reflected signal — matching the way Steam Audio
     // sums AmbisonicsBinauralEffect into the binaural mix.
-    if (er_send_level > 0.0f && p->er.initialized && p->er.decoder_valid
+    if (er_level > 0.0f && p->er.initialized && p->er.decoder_valid
         && p->er.num_taps > 0) {
-        er_process_ambi(&p->er, mono_send, out_l, out_r, num_samples);
+        float er_in[HRTF_BLOCK_SIZE];
+        for (int i = 0; i < num_samples; i++)
+            er_in[i] = mono_send[i] * er_level;
+        er_process_ambi(&p->er, er_in, out_l, out_r, num_samples);
+    }
+
+    // IR convolution reverb (late tail from a real-room impulse response).
+    // Reuses the same distance-weighted mono send as the ER, scaled by
+    // ir_wet.  Stereo output (one convolver per ear) mixes directly into
+    // out_l/out_r.
+    if (ir_wet_level > 0.0f && p->ir_l.valid && p->ir_r.valid) {
+        float ir_in[HRTF_BLOCK_SIZE];
+        float ir_out_l[HRTF_BLOCK_SIZE];
+        float ir_out_r[HRTF_BLOCK_SIZE];
+        for (int i = 0; i < num_samples; i++)
+            ir_in[i] = mono_send[i] * ir_wet_level;
+        pconv_process(&p->ir_l, ir_in, ir_out_l);
+        pconv_process(&p->ir_r, ir_in, ir_out_r);
+        for (int i = 0; i < num_samples; i++) {
+            out_l[i] += ir_out_l[i];
+            out_r[i] += ir_out_r[i];
+        }
     }
 }
 
@@ -3191,6 +3532,45 @@ static void af_hrtf_process(struct mp_filter *f) {
                 compute_ambi_decoder_hrirs(p);
             }
             atomic_store_explicit(&p->shared->sofa_path_changed, 0,
+                                  memory_order_relaxed);
+        }
+
+        // Hot-reload convolution-reverb IR when the UI changes the path.
+        if (atomic_load_explicit(&p->shared->ir_changed,
+                                  memory_order_relaxed)) {
+            const char *newp = p->shared->ir_file_path;
+            if (newp[0] == '\0') {
+                // User cleared the selection — silence both convolvers.
+                p->ir_l.valid = 0;
+                p->ir_r.valid = 0;
+                p->ir_loaded_path[0] = '\0';
+            } else if (strncmp(newp, p->ir_loaded_path,
+                                sizeof(p->ir_loaded_path)) != 0) {
+                float *L = NULL, *R = NULL;
+                int len = 0;
+                int rc = wav_load_stereo(newp, p->sample_rate, &L, &R, &len);
+                if (rc == 0 && len > 0) {
+                    pconv_load(&p->ir_l, L, len);
+                    pconv_load(&p->ir_r, R, len);
+                    strncpy(p->ir_loaded_path, newp,
+                            sizeof(p->ir_loaded_path) - 1);
+                    p->ir_loaded_path[sizeof(p->ir_loaded_path) - 1] = '\0';
+                    fprintf(stderr,
+                            "[af_hrtf] IR loaded: '%s' (%d samples, %.2f s)\n",
+                            newp, len, (float)len / (float)p->sample_rate);
+                } else {
+                    fprintf(stderr,
+                            "[af_hrtf] IR load FAILED: '%s' rc=%d "
+                            "(need stereo/mono 16/24/32-bit PCM or float32 "
+                            "WAV at %d Hz)\n",
+                            newp, rc, p->sample_rate);
+                    p->ir_l.valid = 0;
+                    p->ir_r.valid = 0;
+                    p->ir_loaded_path[0] = '\0';
+                }
+                free(L); free(R);
+            }
+            atomic_store_explicit(&p->shared->ir_changed, 0,
                                   memory_order_relaxed);
         }
 
@@ -3784,6 +4164,8 @@ static void af_hrtf_destroy(struct mp_filter *f) {
         free(p->objcoding_obj_buf[i]);
 
     reverb_destroy(&p->reverb);
+    pconv_destroy(&p->ir_l);
+    pconv_destroy(&p->ir_r);
     er_destroy(&p->er);
 
     if (p->sofa)

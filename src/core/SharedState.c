@@ -42,6 +42,11 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     // front/back confusion with a non-individual HRTF.
     atomic_store(&s->front_pinna_boost, 1);
 
+    // IR reverb: no file loaded by default.  User picks one from the UI.
+    s->ir_file_path[0] = '\0';
+    atomic_store(&s->ir_changed, 0);
+    atomic_store(&s->ir_wet, 0.35f);
+
     // Bauer crossfeed: gentle default, gives the contralateral ear body for
     // frontal sources without blurring lateralised side/rear sources.
     atomic_store(&s->bauer_crossfeed, 0.15f);

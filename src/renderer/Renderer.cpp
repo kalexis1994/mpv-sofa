@@ -135,24 +135,48 @@ glm::vec3 Renderer::speakerToWorldPos(float azimuth, float elevation, float dist
     return glm::vec3(x, y, z);
 }
 
-glm::vec4 Renderer::getSpeakerColor(int channel) {
+glm::vec4 Renderer::getSpeakerColor(int channel, int numChannels) {
+    const glm::vec4 blue  (0.3f, 0.5f, 1.0f, 1.0f);
+    const glm::vec4 red   (1.0f, 0.2f, 0.2f, 1.0f);
+    const glm::vec4 orange(1.0f, 0.6f, 0.2f, 1.0f);
+    const glm::vec4 green (0.3f, 0.8f, 0.3f, 1.0f);
+    const glm::vec4 purple(0.7f, 0.3f, 0.9f, 1.0f);
+    const glm::vec4 gray  (0.7f, 0.7f, 0.7f, 1.0f);
+
+    // 6.1 Surround: FL FR FC LFE BC SL SR
+    if (numChannels == 7) {
+        switch (channel) {
+            case 0: case 1: case 2: return blue;   // FL/FR/FC
+            case 3:                  return red;    // LFE
+            case 4:                  return orange; // BC
+            case 5: case 6:         return green;  // SL/SR
+            default:                 return gray;
+        }
+    }
+
+    // Everything else — 7.1.4, 7.1, 5.1, stereo
     switch (channel) {
-        case 0: case 1: case 2:  return glm::vec4(0.3f, 0.5f, 1.0f, 1.0f); // Front: blue
-        case 3:                   return glm::vec4(1.0f, 0.2f, 0.2f, 1.0f); // LFE: red
-        case 4: case 5:          return glm::vec4(1.0f, 0.6f, 0.2f, 1.0f); // Back: orange
-        case 6: case 7:          return glm::vec4(0.3f, 0.8f, 0.3f, 1.0f); // Side: green
-        case 8: case 9: case 10: case 11:
-                                  return glm::vec4(0.7f, 0.3f, 0.9f, 1.0f); // Height: purple
-        default:                  return glm::vec4(0.7f, 0.7f, 0.7f, 1.0f); // Unknown: gray
+        case 0: case 1: case 2:  return blue;
+        case 3:                   return red;
+        case 4: case 5:          return orange;  // BL/BR
+        case 6: case 7:          return green;   // SL/SR
+        case 8: case 9: case 10: case 11: return purple;
+        default:                  return gray;
     }
 }
 
-const char* Renderer::getSpeakerName(int channel) {
-    static const char* names[] = {
+const char* Renderer::getSpeakerName(int channel, int numChannels) {
+    static const char* names714[] = {
         "FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR",
         "TFL", "TFR", "TBL", "TBR", "?", "?", "?", "?"
     };
-    if (channel >= 0 && channel < 16) return names[channel];
+    static const char* names61[] = {
+        "FL", "FR", "FC", "LFE", "BC", "SL", "SR"
+    };
+    if (numChannels == 7 && channel >= 0 && channel < 7)
+        return names61[channel];
+    if (channel >= 0 && channel < 16)
+        return names714[channel];
     return "?";
 }
 
@@ -289,7 +313,7 @@ void Renderer::renderSpeakers(const Camera& camera, HrtfSharedState* state, floa
     for (int ch = 0; ch < numCh && ch < HRTF_MAX_CHANNELS; ch++) {
         HrtfPosition pos = state->speaker_pos[ch];
         glm::vec3 worldPos = speakerToWorldPos(pos.azimuth, pos.elevation, pos.distance);
-        glm::vec4 color = getSpeakerColor(ch);
+        glm::vec4 color = getSpeakerColor(ch, numCh);
 
         // Highlight selected speaker
         if (ch == selectedSpeaker) {
