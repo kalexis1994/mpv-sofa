@@ -1666,18 +1666,20 @@ static void get_hrir_for_position(struct priv *p, float azimuth, float elevation
 }
 
 // Update convolvers for a given channel with new HRIR
-// crossfade=1: real-time update with crossfade + rate-limiting
-// crossfade=0: direct set on active slot (init/reload, no rate-limit)
+// crossfade=1: real-time update with adaptive equal-power crossfade
+// crossfade=0: direct set on active slot (init/reload, no crossfade)
+//
+// No rate-limit: the default crossfade is now one block (256 samples ≈ 5 ms)
+// so any new position arriving from OAMD/sidecar always lands inside the next
+// audio block, giving smooth motion for fast-moving Atmos objects.  When a
+// new update interrupts an in-flight crossfade we still swap convolver slots
+// — the previous in-flight target becomes the "from" side of the next
+// crossfade.  This produces a brief sample-level discontinuity at the swap
+// moment, but it scales with the HRIR delta between adjacent positions: tiny
+// for smooth motion (the dominant case), and masked by the audio change for
+// teleports.
 static void update_channel_hrir_ex(struct priv *p, int ch, int crossfade) {
     HrtfChannelPair *pair = &p->channels[ch];
-
-    if (crossfade) {
-        // Rate-limit: skip if a crossfade is already in progress.
-        // The position will be picked up on the next object metadata frame after
-        // the current crossfade finishes (within ~21ms at 48kHz).
-        if (pair->crossfade_remaining > 0)
-            return;
-    }
 
     float *hrir_l = calloc(p->hrir_length, sizeof(float));
     float *hrir_r = calloc(p->hrir_length, sizeof(float));
@@ -1706,12 +1708,13 @@ static void update_channel_hrir_ex(struct priv *p, int ch, int crossfade) {
         // fade.  The new convolver ramps in from silence — no discontinuity.
 
         /* Adaptive crossfade length from OAMD ramp_duration.
-         * Short ramp → short crossfade (responsive).
-         * Long/unknown ramp → full crossfade (safe). */
+         * Short ramp (Atmos with explicit metadata)  → matched short crossfade.
+         * Unknown ramp (non-Atmos / sidecar updates) → one block (smooth
+         * per-block updates on continuously-moving objects). */
         int xfade = p->oamd_ramp_duration;
-        if (xfade < 64)  xfade = 64;
+        if (xfade <= 0) xfade = HRTF_BLOCK_SIZE;
+        if (xfade < 64) xfade = 64;
         if (xfade > HRTF_CROSSFADE_LEN) xfade = HRTF_CROSSFADE_LEN;
-        if (p->oamd_ramp_duration <= 0) xfade = HRTF_CROSSFADE_LEN;
         pair->crossfade_total = xfade;
         pair->crossfade_remaining = xfade;
         pair->active_idx = next;
