@@ -885,6 +885,128 @@ static int wav_load_stereo(const char *path, int target_sr,
     return 0;
 }
 
+// Load any WAV into up to 4 separate channel buffers (FuMa order if 4ch).
+// Returns 0 on success.  Caller frees out[i] for each i in [0, *out_channels).
+// Used for 4-channel B-format IRs that we want to decode via SH-HRIR basis
+// instead of folding into stereo at load time.
+static int wav_load_n(const char *path, int target_sr,
+                      float *out[4], int *out_channels, int *out_len) {
+    for (int i = 0; i < 4; i++) out[i] = NULL;
+    *out_channels = 0; *out_len = 0;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    uint8_t hdr[12];
+    if (fread(hdr, 1, 12, f) != 12 ||
+        memcmp(hdr, "RIFF", 4) != 0 ||
+        memcmp(hdr + 8, "WAVE", 4) != 0) {
+        fclose(f); return -1;
+    }
+
+    uint16_t format = 0, channels = 0, bits = 0;
+    uint32_t sr = 0;
+    uint32_t data_size = 0;
+    long data_offset = 0;
+
+    for (;;) {
+        uint8_t chunk[8];
+        if (fread(chunk, 1, 8, f) != 8) break;
+        uint32_t csize = wav_rd_u32_le(chunk + 4);
+        if (memcmp(chunk, "fmt ", 4) == 0) {
+            uint8_t fmt[40] = {0};
+            uint32_t r = csize > sizeof(fmt) ? sizeof(fmt) : csize;
+            if (fread(fmt, 1, r, f) != r) { fclose(f); return -1; }
+            format   = wav_rd_u16_le(fmt + 0);
+            channels = wav_rd_u16_le(fmt + 2);
+            sr       = wav_rd_u32_le(fmt + 4);
+            bits     = wav_rd_u16_le(fmt + 14);
+            if (format == 0xFFFE && csize >= 40)
+                format = wav_rd_u16_le(fmt + 24);
+            if (csize > r) fseek(f, csize - r, SEEK_CUR);
+        } else if (memcmp(chunk, "data", 4) == 0) {
+            data_size = csize;
+            data_offset = ftell(f);
+            break;
+        } else {
+            fseek(f, csize, SEEK_CUR);
+        }
+        if (csize & 1) fseek(f, 1, SEEK_CUR);
+    }
+
+    if (data_size == 0 || channels < 1 || channels > 4 ||
+        (format != 1 && format != 3) || bits == 0) {
+        fclose(f); return -1;
+    }
+    if (target_sr > 0 && (int)sr != target_sr) {
+        fclose(f); return -2;
+    }
+
+    int bps = bits / 8;
+    int frame = bps * channels;
+    int N = (int)(data_size / (uint32_t)frame);
+    for (int c = 0; c < channels; c++)
+        out[c] = (float *)malloc((size_t)N * sizeof(float));
+
+    fseek(f, data_offset, SEEK_SET);
+    uint8_t buf[64];
+    for (int i = 0; i < N; i++) {
+        if (frame > (int)sizeof(buf)) {
+            for (int c = 0; c < channels; c++) { free(out[c]); out[c] = NULL; }
+            fclose(f); return -1;
+        }
+        if (fread(buf, 1, frame, f) != (size_t)frame) { N = i; break; }
+        for (int c = 0; c < channels; c++) {
+            const uint8_t *p = buf + c * bps;
+            float v = 0.0f;
+            if (format == 1) {
+                if (bits == 16) {
+                    int16_t s = (int16_t)(p[0] | (p[1] << 8));
+                    v = (float)s / 32768.0f;
+                } else if (bits == 24) {
+                    int32_t s = (int32_t)((p[0] << 8) | (p[1] << 16) | (p[2] << 24));
+                    s >>= 8;
+                    v = (float)s / 8388608.0f;
+                } else if (bits == 32) {
+                    int32_t s = (int32_t)wav_rd_u32_le(p);
+                    v = (float)s / 2147483648.0f;
+                } else {
+                    for (int cc = 0; cc < channels; cc++) { free(out[cc]); out[cc] = NULL; }
+                    fclose(f); return -1;
+                }
+            } else if (format == 3 && bits == 32) {
+                memcpy(&v, p, 4);
+            } else {
+                for (int cc = 0; cc < channels; cc++) { free(out[cc]); out[cc] = NULL; }
+                fclose(f); return -1;
+            }
+            out[c][i] = v;
+        }
+    }
+    fclose(f);
+
+    *out_channels = channels;
+    *out_len = N;
+    return 0;
+}
+
+// Direct (offline) time-domain convolution: out[n] = sum_k in[k] * kern[n-k].
+// out must be sized in_len + kern_len - 1.  Used at IR-load time to bake the
+// SH-HRIR decoder into a stereo binaural reverb IR; runtime cost is unchanged.
+static void offline_convolve(const float *in, int in_len,
+                             const float *kern, int kern_len,
+                             float scale, float *out_accum) {
+    if (scale == 0.0f) return;
+    for (int k = 0; k < in_len; k++) {
+        float v = in[k] * scale;
+        if (v == 0.0f) continue;
+        const float *ker = kern;
+        float *dst = out_accum + k;
+        for (int j = 0; j < kern_len; j++)
+            dst[j] += v * ker[j];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Uniform-partitioned overlap-add convolution engine.
 //
@@ -3643,29 +3765,87 @@ static void af_hrtf_process(struct mp_filter *f) {
                 p->ir_loaded_path[0] = '\0';
             } else if (strncmp(newp, p->ir_loaded_path,
                                 sizeof(p->ir_loaded_path)) != 0) {
-                float *L = NULL, *R = NULL;
-                int len = 0;
-                int rc = wav_load_stereo(newp, p->sample_rate, &L, &R, &len);
+                float *ch[4] = {NULL, NULL, NULL, NULL};
+                int n_ch = 0, len = 0;
+                int rc = wav_load_n(newp, p->sample_rate, ch, &n_ch, &len);
                 if (rc == 0 && len > 0) {
-                    pconv_load(&p->ir_l, L, len);
-                    pconv_load(&p->ir_r, R, len);
+                    int basis_len = p->hrir_length;
+                    int total_len = (n_ch == 4 && p->er.decoder_valid)
+                                      ? len + basis_len - 1
+                                      : len;
+
+                    float *bin_l = (float *)calloc((size_t)total_len, sizeof(float));
+                    float *bin_r = (float *)calloc((size_t)total_len, sizeof(float));
+
+                    if (n_ch == 4 && p->er.decoder_valid) {
+                        // Ambisonic decode via SH-HRIR basis.  IR is FuMa
+                        // (W, X, Y, Z); our basis is ACN (W, Y, Z, X) with
+                        // N3D normalisation.  FuMa→N3D scales: W*=sqrt(2),
+                        // X/Y/Z*=sqrt(3).
+                        const int  ir_to_basis[4] = { 0, 3, 1, 2 };
+                        const float scale[4] = {
+                            1.41421356f, 1.73205081f,
+                            1.73205081f, 1.73205081f
+                        };
+                        for (int i = 0; i < 4; i++) {
+                            int bi = ir_to_basis[i];
+                            offline_convolve(ch[i], len,
+                                              p->er.dec_l[bi].hrir_td, basis_len,
+                                              scale[i], bin_l);
+                            offline_convolve(ch[i], len,
+                                              p->er.dec_r[bi].hrir_td, basis_len,
+                                              scale[i], bin_r);
+                        }
+                        // Normalise post-decode peak to ~0.9 so the
+                        // convolution stage doesn't clip.
+                        float peak = 0.0f;
+                        for (int k = 0; k < total_len; k++) {
+                            float a = fabsf(bin_l[k]); if (a > peak) peak = a;
+                            float b = fabsf(bin_r[k]); if (b > peak) peak = b;
+                        }
+                        if (peak > 1e-9f) {
+                            float g = 0.9f / peak;
+                            for (int k = 0; k < total_len; k++) {
+                                bin_l[k] *= g; bin_r[k] *= g;
+                            }
+                        }
+                        fprintf(stderr,
+                                "[af_hrtf] IR loaded (B-format ambisonic decode): "
+                                "'%s' (%d samples → %d after SH-HRIR conv, %.2f s)\n",
+                                newp, len, total_len,
+                                (float)total_len / (float)p->sample_rate);
+                    } else {
+                        // Stereo / mono fall-back: ch[0] = L, ch[1] = R (or
+                        // mono into both).  Same behaviour as the previous
+                        // wav_load_stereo path.
+                        for (int k = 0; k < len; k++) {
+                            bin_l[k] = ch[0][k];
+                            bin_r[k] = (n_ch >= 2) ? ch[1][k] : ch[0][k];
+                        }
+                        fprintf(stderr,
+                                "[af_hrtf] IR loaded: '%s' (%d ch, %d samples, "
+                                "%.2f s)\n",
+                                newp, n_ch, len,
+                                (float)len / (float)p->sample_rate);
+                    }
+
+                    pconv_load(&p->ir_l, bin_l, total_len);
+                    pconv_load(&p->ir_r, bin_r, total_len);
                     strncpy(p->ir_loaded_path, newp,
                             sizeof(p->ir_loaded_path) - 1);
                     p->ir_loaded_path[sizeof(p->ir_loaded_path) - 1] = '\0';
-                    fprintf(stderr,
-                            "[af_hrtf] IR loaded: '%s' (%d samples, %.2f s)\n",
-                            newp, len, (float)len / (float)p->sample_rate);
+                    free(bin_l); free(bin_r);
                 } else {
                     fprintf(stderr,
                             "[af_hrtf] IR load FAILED: '%s' rc=%d "
-                            "(need stereo/mono 16/24/32-bit PCM or float32 "
-                            "WAV at %d Hz)\n",
+                            "(need 1/2/4-channel 16/24/32-bit PCM or "
+                            "float32 WAV at %d Hz)\n",
                             newp, rc, p->sample_rate);
                     p->ir_l.valid = 0;
                     p->ir_r.valid = 0;
                     p->ir_loaded_path[0] = '\0';
                 }
-                free(L); free(R);
+                for (int i = 0; i < 4; i++) free(ch[i]);
             }
             atomic_store_explicit(&p->shared->ir_changed, 0,
                                   memory_order_relaxed);

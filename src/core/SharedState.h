@@ -111,36 +111,24 @@ typedef struct HrtfSharedState {
     // ambiguity that causes frontals to feel lateral or behind.  Default on.
     HRTF_ATOMIC(int32_t)  front_pinna_boost;
 
-    // Convolution reverb: stereo impulse response loaded from a WAV file at
-    // 48 kHz.  ir_file_path is the absolute/relative path; setting
-    // ir_changed=1 signals the audio filter to reload.  ir_wet scales the
-    // resulting wet signal before mixing into the binaural output.
+    // Bauer crossfeed amount (0..0.5).  LF-only contralateral bleed that
+    // grounds frontal sources without blurring lateralised sides.
+    // (Order MUST match the mirror in mpv-patches/af_hrtf.c.)
+    HRTF_ATOMIC(float)    bauer_crossfeed;
+
+    // Convolution reverb: impulse response loaded from a WAV file at 48 kHz.
+    // ir_file_path is the absolute/relative path; setting ir_changed=1
+    // signals the audio filter to reload.  ir_wet scales the wet signal.
     char             ir_file_path[512];
     HRTF_ATOMIC(int32_t)  ir_changed;
     HRTF_ATOMIC(float)    ir_wet;
 
     // Near-field compensation: low-shelf boost on the proximal ear for
-    // sources within ~1.5 m.  Generic HRTFs are measured at 1.5–2 m and
-    // underestimate the LF coupling that very close sources produce; this
-    // restores the "intimate body" close-mic'd dialogue or hyper-close
-    // Atmos objects should have.  Default on.
+    // sources within ~1.5 m.  Default on.
     HRTF_ATOMIC(int32_t)  near_field_comp;
 
-    // Minimum-phase preprocessing of direct-path HRIRs.  Steam Audio uses
-    // this by default — the per-ear ITD is applied as a separate fractional
-    // shift (already in our pipeline), so removing the residual phase from
-    // the HRIR itself produces smoother spatial transitions when the source
-    // moves between SOFA grid points.  Default off (opt-in) so users can
-    // A/B against the natural-phase rendering.
+    // Minimum-phase preprocessing of direct-path HRIRs.  Default off.
     HRTF_ATOMIC(int32_t)  direct_min_phase;
-
-    // Bauer crossfeed amount (0..0.5).  Mixes a delayed low-passed (~700 Hz)
-    // copy of each channel into the opposite ear, simulating the natural
-    // low-frequency diffraction around the head.  Unlike broadband crossfeed
-    // this preserves HRTF localization cues at HF, only adding body to the
-    // contralateral ear — fixes "frontals collapse hard to the side" without
-    // blurring side/rear sources.  Default 0.15.
-    HRTF_ATOMIC(float)    bauer_crossfeed;
 
 } HrtfSharedState;
 
