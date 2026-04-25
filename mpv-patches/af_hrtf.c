@@ -1905,6 +1905,13 @@ static void speaker_id_to_position(int speaker_id, float *az, float *el) {
     case MP_SPEAKER_ID_TBR:  *az =-135.0f; *el =  45.0f; break;
     case MP_SPEAKER_ID_SDL:  *az =  90.0f; *el =  45.0f; break;
     case MP_SPEAKER_ID_SDR:  *az = -90.0f; *el =  45.0f; break;
+    case MP_SPEAKER_ID_NA:
+        // Silent / padding channel.  mpv uses this for unused slots in a
+        // chmap (e.g. Atmos streams that pad out to a fixed channel count).
+        // Park it out of the frontal stage; OAMD or objcoding metadata will
+        // override the position if the channel actually carries an object.
+        *az = 180.0f; *el = 60.0f;
+        break;
     default:
         // Unknown speaker ID — park it high up and behind (180°, 60°) so it
         // doesn't contaminate the FC/frontal stage where (0°, 0°) lives.
