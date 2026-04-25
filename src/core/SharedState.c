@@ -51,6 +51,9 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     // within 1.5 m, so it has no effect on far-field cinema content.
     atomic_store(&s->near_field_comp, 1);
 
+    // Min-phase preprocessing off by default — opt-in so users can compare.
+    atomic_store(&s->direct_min_phase, 0);
+
     // Bauer crossfeed: gentle default, gives the contralateral ear body for
     // frontal sources without blurring lateralised side/rear sources.
     atomic_store(&s->bauer_crossfeed, 0.15f);

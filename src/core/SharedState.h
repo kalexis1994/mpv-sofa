@@ -126,6 +126,14 @@ typedef struct HrtfSharedState {
     // Atmos objects should have.  Default on.
     HRTF_ATOMIC(int32_t)  near_field_comp;
 
+    // Minimum-phase preprocessing of direct-path HRIRs.  Steam Audio uses
+    // this by default — the per-ear ITD is applied as a separate fractional
+    // shift (already in our pipeline), so removing the residual phase from
+    // the HRIR itself produces smoother spatial transitions when the source
+    // moves between SOFA grid points.  Default off (opt-in) so users can
+    // A/B against the natural-phase rendering.
+    HRTF_ATOMIC(int32_t)  direct_min_phase;
+
     // Bauer crossfeed amount (0..0.5).  Mixes a delayed low-passed (~700 Hz)
     // copy of each channel into the opposite ear, simulating the natural
     // low-frequency diffraction around the head.  Unlike broadband crossfeed

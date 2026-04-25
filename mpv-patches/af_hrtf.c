@@ -176,6 +176,7 @@ typedef struct {
     _Atomic float    ir_wet;              // 0..1
 
     _Atomic int32_t  near_field_comp;     // 1 = LF shelf boost for sources <1.5m
+    _Atomic int32_t  direct_min_phase;    // 1 = min-phase preprocessing on direct HRIRs
 } HrtfSharedState;
 
 // ---------------------------------------------------------------------------
@@ -1647,6 +1648,21 @@ static void get_hrir_for_position(struct priv *p, float azimuth, float elevation
     if (dr < 0.0f) dr = 0.0f;
     if (dl > max_shift) dl = max_shift;
     if (dr > max_shift) dr = max_shift;
+
+    // Optional minimum-phase preprocessing.  With ITD already applied as a
+    // separate fractional shift (below), removing the residual phase from
+    // the HRIR concentrates its energy near t=0 and equalises the phase
+    // response across nearby SOFA directions — neighbouring HRIRs blend
+    // without comb-filter artefacts.  Steam Audio does this by default.
+    if (p->shared && atomic_load_explicit(&p->shared->direct_min_phase,
+                                           memory_order_relaxed)) {
+        float *mp = pffft_aligned_malloc(len * sizeof(float));
+        hrir_to_minimum_phase(ir_l, len, mp);
+        memcpy(ir_l, mp, len * sizeof(float));
+        hrir_to_minimum_phase(ir_r, len, mp);
+        memcpy(ir_r, mp, len * sizeof(float));
+        pffft_aligned_free(mp);
+    }
 
     // Taper only the very end of the HRIR tail. The previous 40% fade-out was
     // removing useful pinna/room cues and flattening the image.

@@ -663,6 +663,15 @@ void ControlPanel::render() {
         atomic_store(&m_state->near_field_comp, nfc ? 1 : 0);
     }
 
+    // Minimum-phase HRIRs: smoother spatial transitions at the cost of
+    // discarding the natural-phase response of the SOFA measurements.
+    bool mph = atomic_load(&m_state->direct_min_phase) != 0;
+    if (ImGui::Checkbox("Direct HRIRs minimum-phase", &mph)) {
+        atomic_store(&m_state->direct_min_phase, mph ? 1 : 0);
+        // Force HRIR reload on every channel so the change takes effect.
+        atomic_store(&m_state->speaker_pos_changed, 1);
+    }
+
     ImGui::Separator();
 
     // Master volume
