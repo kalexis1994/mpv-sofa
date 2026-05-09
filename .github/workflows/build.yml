@@ -143,8 +143,13 @@ jobs:
           git fetch --depth 1 https://github.com/mpv-player/mpv.git 9ccd8899ff28c4f6bdd113026d307af3d46133c5
           git checkout FETCH_HEAD
 
-          # Copy HRTF filter sources
+          # Copy HRTF filter sources — includes the af_hrtf_*.h module
+          # headers extracted by the af_hrtf.c refactor (HrtfConvolver,
+          # Reverb, PartitionedConvolver, HpEqProfile).  Without these
+          # the main filter TU fails with a missing-include fatal at
+          # the very first #include "af_hrtf_convolver.h".
           cp ../mpv-patches/af_hrtf.c        audio/filter/af_hrtf.c
+          cp ../mpv-patches/af_hrtf_*.h      audio/filter/
           cp ../mpv-patches/objcoding_qmf.c  audio/filter/objcoding_qmf.c
           cp ../mpv-patches/objcoding_qmf.h  audio/filter/objcoding_qmf.h
           cp ../mpv-patches/spatial_ext_coeff.h audio/filter/spatial_ext_coeff.h
