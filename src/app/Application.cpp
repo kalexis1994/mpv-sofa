@@ -1,5 +1,6 @@
 #include "Application.h"
 #include "core/SharedState.h"
+#include "core/Settings.h"
 #include "renderer/Picking.h"
 
 #include <glad/glad.h>
@@ -130,6 +131,10 @@ bool Application::init(int argc, char* argv[]) {
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
+
+    // Restore persisted settings (sliders, paths, panel visibility) before
+    // the first render so the UI reflects the user's last choices.
+    Settings::load(m_sharedState, &m_showControlPanel, &m_show3DViz);
 
     // Load file if specified
     if (!m_pendingFile.empty()) {
@@ -394,14 +399,46 @@ void Application::renderUI() {
 
     // --- Normal docked mode ---
 
-    // Top menu bar — exposes panels the user might want to toggle.
+    // Top menu bar — exposes panels and the persisted-config controls.
+    bool dirty = Settings::isDirty(m_sharedState,
+                                    m_showControlPanel, m_show3DViz);
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("View")) {
             ImGui::MenuItem("Controls",       "F3", &m_showControlPanel);
             ImGui::MenuItem("3D Visualizer",  "F2", &m_show3DViz);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Settings")) {
+            if (ImGui::MenuItem("Save Now", "Ctrl+S", false, dirty)) {
+                Settings::save(m_sharedState,
+                                m_showControlPanel, m_show3DViz);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reset to Defaults")) {
+                Settings::resetToDefaults(m_sharedState,
+                                           &m_showControlPanel, &m_show3DViz);
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled("File:");
+            ImGui::TextDisabled("%s", Settings::filePath());
+            ImGui::EndMenu();
+        }
+        // Right-aligned status: shown only while there are unsaved changes.
+        if (dirty) {
+            const char* tag = "[unsaved]";
+            float w = ImGui::CalcTextSize(tag).x + 16.0f;
+            ImGui::SameLine(ImGui::GetWindowWidth() - w);
+            ImGui::TextDisabled("%s", tag);
+        }
         ImGui::EndMainMenuBar();
+    }
+
+    // Ctrl+S: save now (only if dirty).
+    if (dirty) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+            Settings::save(m_sharedState, m_showControlPanel, m_show3DViz);
+        }
     }
 
     // Enable docking
@@ -622,6 +659,12 @@ void Application::renderUI() {
 }
 
 void Application::shutdown() {
+    // Persist settings on clean exit if the user has touched anything.
+    if (m_sharedState &&
+        Settings::isDirty(m_sharedState, m_showControlPanel, m_show3DViz)) {
+        Settings::save(m_sharedState, m_showControlPanel, m_show3DViz);
+    }
+
     if (m_videoFBO) glDeleteFramebuffers(1, &m_videoFBO);
     if (m_videoTexture) glDeleteTextures(1, &m_videoTexture);
     if (m_videoDepth) glDeleteRenderbuffers(1, &m_videoDepth);

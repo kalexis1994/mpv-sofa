@@ -94,6 +94,7 @@ set(APP_SOURCES
     src/ui/TransportBar.cpp
     src/audio/MpvPlayer.cpp
     src/core/SharedState.c
+    src/core/Settings.cpp
 )
 
 add_executable(mpv-sofa ${APP_SOURCES})

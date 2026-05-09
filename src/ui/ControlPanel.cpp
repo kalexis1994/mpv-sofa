@@ -309,12 +309,20 @@ void ControlPanel::scanProfiles() {
                   return a.name < b.name;
               });
 
-    // Find the currently active profile
-    std::string currentPath = m_sofaPath;
+    // Find the currently active profile.  m_state->sofa_path is the source
+    // of truth (Settings::load() restores the persisted path into it before
+    // the first render); the local m_sofaPath buffer is only used by the
+    // "Custom SOFA path" input and is mirrored from the matched profile.
+    std::string currentPath = (m_state && m_state->sofa_path[0] != '\0')
+                                 ? std::string(m_state->sofa_path)
+                                 : std::string(m_sofaPath);
     std::replace(currentPath.begin(), currentPath.end(), '\\', '/');
     for (int i = 0; i < (int)m_profiles.size(); i++) {
         if (m_profiles[i].path == currentPath) {
             m_selectedProfile = i;
+            strncpy(m_sofaPath, m_profiles[i].path.c_str(),
+                    sizeof(m_sofaPath) - 1);
+            m_sofaPath[sizeof(m_sofaPath) - 1] = '\0';
             break;
         }
     }
@@ -324,7 +332,7 @@ void ControlPanel::scanProfiles() {
 
 void ControlPanel::scanHpEqs() {
     m_hpEqFiles.clear();
-    m_selectedHpEq = 0;
+    m_selectedHpEq = 0;  // 0 = "None"
     const char* dir = "assets/headphone_eq";
     try {
         if (!fs::exists(dir)) { m_hpEqScanned = true; return; }
@@ -339,12 +347,24 @@ void ControlPanel::scanHpEqs() {
         }
     } catch (...) {}
     std::sort(m_hpEqFiles.begin(), m_hpEqFiles.end());
+    // Match the path the audio filter is currently using (restored from
+    // mpv-sofa.ini at startup) so the dropdown reflects reality.
+    if (m_state && m_state->hp_eq_path[0] != '\0') {
+        std::string current = m_state->hp_eq_path;
+        std::replace(current.begin(), current.end(), '\\', '/');
+        for (size_t i = 0; i < m_hpEqFiles.size(); i++) {
+            if (m_hpEqFiles[i] == current) {
+                m_selectedHpEq = (int)i + 1;  // +1 for "None" at index 0
+                break;
+            }
+        }
+    }
     m_hpEqScanned = true;
 }
 
 void ControlPanel::scanIrs() {
     m_irFiles.clear();
-    m_selectedIr = 0;
+    m_selectedIr = 0;  // 0 = "None"
     const char* dir = "assets/ir";
     try {
         if (!fs::exists(dir)) { m_irScanned = true; return; }
@@ -359,6 +379,17 @@ void ControlPanel::scanIrs() {
         }
     } catch (...) {}
     std::sort(m_irFiles.begin(), m_irFiles.end());
+    // Match the path restored from mpv-sofa.ini.
+    if (m_state && m_state->ir_file_path[0] != '\0') {
+        std::string current = m_state->ir_file_path;
+        std::replace(current.begin(), current.end(), '\\', '/');
+        for (size_t i = 0; i < m_irFiles.size(); i++) {
+            if (m_irFiles[i] == current) {
+                m_selectedIr = (int)i + 1;  // +1 for "None"
+                break;
+            }
+        }
+    }
     m_irScanned = true;
 }
 

@@ -98,10 +98,13 @@ foreach ($dll in $msys2Dlls) {
 # When the app is launched from dist/ it writes its working files (ImGui
 # layout cache, debug logs, the truehd loader log) right next to the
 # binaries.  Cleaning them at the end of every build keeps dist/ shippable.
+# `mpv-sofa.ini` (the persisted user settings) is preserved deliberately.
 Write-Host "`n=== Step 5: Purge runtime artefacts from dist/ ===" -ForegroundColor Cyan
 $strayPatterns = @("*.log", "*.txt", "*.ini", "*.wav")
+$keepFiles     = @("mpv-sofa.ini")
 foreach ($pat in $strayPatterns) {
     Get-ChildItem -Path $distDir -File -Filter $pat -ErrorAction SilentlyContinue |
+        Where-Object { $keepFiles -notcontains $_.Name } |
         ForEach-Object {
             Remove-Item $_.FullName -Force
             Write-Host "  removed $($_.Name)"
