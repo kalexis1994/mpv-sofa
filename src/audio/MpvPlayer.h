@@ -34,6 +34,11 @@ struct SubtitleTrack {
     bool selected;
 };
 
+struct Chapter {
+    double time;        // seconds
+    std::string title;  // empty if untitled
+};
+
 class MpvPlayer {
 public:
     MpvPlayer();
@@ -56,6 +61,29 @@ public:
     void resetSubDelay();
     void playTestTone(int channel);
 
+    // Volume & mute (mpv volume is 0-100, we clamp on the way in).
+    void   setVolume(double v);
+    double getVolume() const { return m_volume; }
+    void   setMute(bool m);
+    void   toggleMute() { setMute(!m_muted); }
+    bool   isMuted() const { return m_muted; }
+
+    // Playback speed (0.25 - 4.0 typical).
+    void   setSpeed(double s);
+    double getSpeed() const { return m_speed; }
+
+    // Chapter navigation.  m_chapters is refreshed on FILE_LOADED and on
+    // chapter-list property changes.
+    const std::vector<Chapter>& getChapters() const { return m_chapters; }
+    int  getCurrentChapterIndex() const;  // -1 if none
+    void seekToChapter(int idx);
+    void prevChapter();
+    void nextChapter();
+
+    // Frame step (only meaningful while paused).
+    void frameStep();
+    void frameStepBack();
+
     void update();
     void renderToFBO(unsigned int fbo, int width, int height);
     bool needsRender() const { return m_renderRequested; }
@@ -74,6 +102,7 @@ public:
 
 private:
     void refreshTrackList();
+    void refreshChapterList();
 
 #ifdef HAVE_MPV
     mpv_handle* m_mpv = nullptr;
@@ -97,4 +126,9 @@ private:
     bool m_testToneSilenceSource = false;
     bool m_verboseMpvLogs = false;
     std::string m_silencePath;
+
+    double m_volume = 100.0;
+    bool   m_muted  = false;
+    double m_speed  = 1.0;
+    std::vector<Chapter> m_chapters;
 };

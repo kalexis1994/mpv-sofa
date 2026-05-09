@@ -166,6 +166,10 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     mpv_observe_property(m_mpv, 0, "sub-visibility", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "sub-delay", MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "track-list/count", MPV_FORMAT_INT64);
+    mpv_observe_property(m_mpv, 0, "volume",           MPV_FORMAT_DOUBLE);
+    mpv_observe_property(m_mpv, 0, "mute",             MPV_FORMAT_FLAG);
+    mpv_observe_property(m_mpv, 0, "speed",            MPV_FORMAT_DOUBLE);
+    mpv_observe_property(m_mpv, 0, "chapter-list/count", MPV_FORMAT_INT64);
 
     // Generate silence WAV for test tone (af_hrtf needs audio frames to process)
     m_silencePath = "silence_testtone.wav";
@@ -445,6 +449,116 @@ void MpvPlayer::refreshTrackList() {
 #endif
 }
 
+void MpvPlayer::refreshChapterList() {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    m_chapters.clear();
+
+    mpv_node node;
+    if (mpv_get_property(m_mpv, "chapter-list", MPV_FORMAT_NODE, &node) < 0)
+        return;
+    if (node.format != MPV_FORMAT_NODE_ARRAY) {
+        mpv_free_node_contents(&node);
+        return;
+    }
+    for (int i = 0; i < node.u.list->num; i++) {
+        mpv_node& entry = node.u.list->values[i];
+        if (entry.format != MPV_FORMAT_NODE_MAP) continue;
+        Chapter ch{0.0, ""};
+        for (int j = 0; j < entry.u.list->num; j++) {
+            const char* key = entry.u.list->keys[j];
+            mpv_node& val   = entry.u.list->values[j];
+            if (strcmp(key, "time") == 0 && val.format == MPV_FORMAT_DOUBLE)
+                ch.time = val.u.double_;
+            else if (strcmp(key, "title") == 0 && val.format == MPV_FORMAT_STRING && val.u.string)
+                ch.title = val.u.string;
+        }
+        m_chapters.push_back(std::move(ch));
+    }
+    mpv_free_node_contents(&node);
+#endif
+}
+
+void MpvPlayer::setVolume(double v) {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    if (v < 0.0)   v = 0.0;
+    if (v > 100.0) v = 100.0;
+    mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &v);
+#endif
+}
+
+void MpvPlayer::setMute(bool m) {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    int flag = m ? 1 : 0;
+    mpv_set_property(m_mpv, "mute", MPV_FORMAT_FLAG, &flag);
+#endif
+}
+
+void MpvPlayer::setSpeed(double s) {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    if (s < 0.05) s = 0.05;
+    if (s > 8.0)  s = 8.0;
+    mpv_set_property(m_mpv, "speed", MPV_FORMAT_DOUBLE, &s);
+#endif
+}
+
+int MpvPlayer::getCurrentChapterIndex() const {
+    if (m_chapters.empty()) return -1;
+    int idx = -1;
+    for (size_t i = 0; i < m_chapters.size(); i++) {
+        if (m_chapters[i].time <= m_position + 1e-3)
+            idx = (int)i;
+        else
+            break;
+    }
+    return idx;
+}
+
+void MpvPlayer::seekToChapter(int idx) {
+    if (idx < 0 || idx >= (int)m_chapters.size()) return;
+    seek(m_chapters[idx].time);
+}
+
+void MpvPlayer::prevChapter() {
+    int cur = getCurrentChapterIndex();
+    // Mirror most players: within ~3 s of a chapter start, "prev" goes to
+    // the previous one; otherwise it snaps to the start of the current.
+    if (cur < 0) return;
+    if (m_position - m_chapters[cur].time > 3.0) {
+        seekToChapter(cur);
+    } else if (cur > 0) {
+        seekToChapter(cur - 1);
+    } else {
+        seek(0.0);
+    }
+}
+
+void MpvPlayer::nextChapter() {
+    int cur = getCurrentChapterIndex();
+    int next = (cur < 0) ? 0 : cur + 1;
+    if (next < (int)m_chapters.size())
+        seekToChapter(next);
+}
+
+void MpvPlayer::frameStep() {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    const char* cmd[] = {"frame-step", nullptr};
+    mpv_command_async(m_mpv, 0, cmd);
+#endif
+}
+
+void MpvPlayer::frameStepBack() {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    const char* cmd[] = {"frame-back-step", nullptr};
+    mpv_command_async(m_mpv, 0, cmd);
+#endif
+}
+
 void MpvPlayer::update() {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
@@ -491,11 +605,24 @@ void MpvPlayer::update() {
             else if (strcmp(prop->name, "track-list/count") == 0) {
                 refreshTrackList();
             }
+            else if (strcmp(prop->name, "volume") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
+                m_volume = *(double*)prop->data;
+            }
+            else if (strcmp(prop->name, "mute") == 0 && prop->format == MPV_FORMAT_FLAG) {
+                m_muted = *(int*)prop->data;
+            }
+            else if (strcmp(prop->name, "speed") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
+                m_speed = *(double*)prop->data;
+            }
+            else if (strcmp(prop->name, "chapter-list/count") == 0) {
+                refreshChapterList();
+            }
         }
         else if (event->event_id == MPV_EVENT_FILE_LOADED) {
             fprintf(stderr, "[MpvPlayer] FILE_LOADED event received\n");
             m_hasVideo = true;
             refreshTrackList();
+            refreshChapterList();
         }
         else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
             fprintf(stderr, "[MpvPlayer] PLAYBACK_RESTART event, hasVideo=%d\n", m_hasVideo);
