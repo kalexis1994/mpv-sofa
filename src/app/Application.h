@@ -88,6 +88,7 @@ private:
     bool m_fullscreenKeyHeld = false;
     float m_fullscreenCursorTimer = 0.0f;  // hide UI after inactivity
     float m_lastMouseX = 0.0f, m_lastMouseY = 0.0f;
+    bool  m_cursorHidden = false;          // current GLFW cursor state
 
     void toggleVideoFullscreen();
 

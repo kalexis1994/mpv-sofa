@@ -472,19 +472,43 @@ void Application::renderUI() {
     pollGamepadIntoImGui();
     m_imgui->beginFrame();
 
-    // Track mouse movement for auto-hiding transport in fullscreen
+    // Track mouse movement for auto-hiding transport in fullscreen.
+    // The threshold is intentionally large — sub-pixel jitter from the
+    // touchpad / touchscreen / accumulated rounding would otherwise reset
+    // the inactivity timer every frame and make the cursor pop back in
+    // immediately after being hidden.  We also only refresh the baseline
+    // (m_lastMouseX/Y) once the threshold is actually crossed, so a slow
+    // drift can never sneak above it through accumulation.
     ImVec2 mousePos = ImGui::GetMousePos();
     if (m_videoFullscreen) {
-        if (fabsf(mousePos.x - m_lastMouseX) > 1.0f ||
-            fabsf(mousePos.y - m_lastMouseY) > 1.0f) {
+        const float threshold = m_cursorHidden ? 8.0f : 2.0f;
+        const float dx = mousePos.x - m_lastMouseX;
+        const float dy = mousePos.y - m_lastMouseY;
+        if (fabsf(dx) > threshold || fabsf(dy) > threshold) {
             m_fullscreenCursorTimer = 3.0f;
+            m_lastMouseX = mousePos.x;
+            m_lastMouseY = mousePos.y;
         }
         float dt = ImGui::GetIO().DeltaTime;
         m_fullscreenCursorTimer -= dt;
         if (m_fullscreenCursorTimer < 0) m_fullscreenCursorTimer = 0;
+    } else {
+        m_lastMouseX = mousePos.x;
+        m_lastMouseY = mousePos.y;
     }
-    m_lastMouseX = mousePos.x;
-    m_lastMouseY = mousePos.y;
+
+    // Hide the OS cursor through ImGui rather than calling
+    // glfwSetInputMode directly: imgui_impl_glfw resets the GLFW cursor
+    // mode every frame from ImGui::GetMouseCursor(), so a direct call
+    // gets overwritten and the cursor pops back in.  Setting the ImGui
+    // cursor to None each frame the cursor should be hidden makes the
+    // backend issue the correct GLFW_CURSOR_HIDDEN call for us.
+    if (m_videoFullscreen && m_fullscreenCursorTimer <= 0.0f) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+        m_cursorHidden = true;
+    } else {
+        m_cursorHidden = false;
+    }
 
     // --- Video fullscreen mode ---
     if (m_videoFullscreen) {
