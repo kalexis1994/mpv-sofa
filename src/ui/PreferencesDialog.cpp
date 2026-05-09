@@ -302,6 +302,20 @@ void PreferencesDialog::render() {
             dirty = true;
 
         ImGui::Spacing();
+        ImGui::TextDisabled("Black-bar handling");
+        ImGui::Spacing();
+
+        ImGui::TextUnformatted("Letterbox crop");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##disp_panscan", &d.panscan, 0.0f, 1.0f,
+                                "%.2f  (0=preserve aspect, 1=fill screen)"))
+            dirty = true;
+        ImGui::TextDisabled(
+            "    On OLED the bars are perfectly off; raise this only if\n"
+            "    you want the image bigger at the cost of cropped edges.");
+
+        ImGui::Spacing();
         if (ImGui::Button("Reset to defaults##disp_reset")) {
             d = Settings::DisplayConfig{};
             dirty = true;
@@ -310,6 +324,39 @@ void PreferencesDialog::render() {
         if (dirty) {
             Settings::setDisplayConfig(d);
             Settings::applyDisplayConfigToPlayer(m_player);
+        }
+    }
+
+    if (ImGui::CollapsingHeader(ICON_LC_AUDIO_LINES "  Audio sync")) {
+        ImGui::TextWrapped(
+            "Global offset between audio and video.  Useful when listening "
+            "through a Bluetooth headset (audio arrives late) or with a "
+            "wired DAC + monitor combo where one path lags the other.");
+        ImGui::Spacing();
+
+        Settings::PlaybackConfig pc = Settings::playbackConfig();
+        bool dirty = false;
+        const float labelW = 170.0f;
+
+        ImGui::TextUnformatted("Audio delay");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##aud_delay", &pc.audioDelay,
+                                -2.0f, 2.0f, "%+.3f s"))
+            dirty = true;
+        ImGui::TextDisabled(
+            "    Negative = audio arrives earlier (compensates a slow video\n"
+            "    path); positive = audio arrives later (compensates BT lag).");
+
+        ImGui::Spacing();
+        if (ImGui::Button("Reset##aud_reset")) {
+            pc.audioDelay = 0.0f;
+            dirty = true;
+        }
+
+        if (dirty) {
+            Settings::setPlaybackConfig(pc);
+            Settings::applyPlaybackConfigToPlayer(m_player);
         }
     }
 

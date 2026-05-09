@@ -219,6 +219,9 @@ bool Application::init(int argc, char* argv[]) {
     // And for the HDR / display target pipeline.
     Settings::applyDisplayConfigToPlayer(m_player.get());
 
+    // Audio sync (BT lip-sync offset etc.).
+    Settings::applyPlaybackConfigToPlayer(m_player.get());
+
     // File-dialog typing.  Same accent colour for every entry so the only
     // visual differentiator between rows is the shape of the line-icon.
     {
@@ -380,6 +383,7 @@ void Application::toggleVideoFullscreen() {
         Settings::applySubtitleStyleToPlayer(m_player.get());
         Settings::applyCinemaGrainToPlayer (m_player.get());
         Settings::applyDisplayConfigToPlayer(m_player.get());
+        Settings::applyPlaybackConfigToPlayer(m_player.get());
     }
 }
 

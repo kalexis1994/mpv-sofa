@@ -43,6 +43,22 @@ struct DisplayConfig {
     float peakNits  = 1000.0f; // display peak luminance for HDR target
     int   toneAlg   = 0;       // 0=bt.2390 (default), 1=mobius, 2=hable, 3=reinhard, 4=clip
     int   gamutMode = 0;       // 0=auto, 1=perceptual, 2=relative, 3=saturation
+
+    // Black-bar / letterbox handling.  Maps directly onto mpv's
+    // `panscan` property: 0 = preserve aspect (black bars stay),
+    // 1 = fill screen (crop letterboxing, edges may be lost when the
+    // source aspect differs from the display).  On an OLED black bars
+    // are perfectly dark anyway, so this is purely a "do I want the
+    // image bigger?" knob.
+    float panscan = 0.0f;
+};
+
+// Playback / sync settings (audio offset for BT lip-sync etc.).
+// Sub-delay lives in the subtitle picker because it's typically per-
+// file metadata; audio-delay is set-once-per-headphone so it gets a
+// permanent home in Preferences instead.
+struct PlaybackConfig {
+    float audioDelay = 0.0f;   // seconds; negative = audio earlier
 };
 
 // Real-time 35mm release-print projection grain emulation, applied
@@ -108,10 +124,16 @@ void                 setSubtitleStyle(const SubtitleStyle& s);
 void                 applySubtitleStyleToPlayer(MpvPlayer* p);
 
 // Display / HDR pipeline.  Pushes target-prim, target-trc, target-peak,
-// tone-mapping and gamut-mapping-mode to mpv.  Persisted in [display].
+// tone-mapping, gamut-mapping-mode and panscan to mpv.  Persisted in
+// [display].
 const DisplayConfig& displayConfig();
 void                 setDisplayConfig(const DisplayConfig& c);
 void                 applyDisplayConfigToPlayer(MpvPlayer* p);
+
+// Playback sync (audio-delay).  Persisted in [playback].
+const PlaybackConfig& playbackConfig();
+void                  setPlaybackConfig(const PlaybackConfig& p);
+void                  applyPlaybackConfigToPlayer(MpvPlayer* p);
 
 // Real-time cinema grain.  Pushes glsl-shaders + glsl-shader-opts onto
 // the mpv pipeline.  Persisted in [cinema_grain].

@@ -80,6 +80,9 @@ struct Snapshot {
     // Display / HDR.
     Settings::DisplayConfig display;
 
+    // Playback (audio-delay).
+    Settings::PlaybackConfig playback;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -139,6 +142,8 @@ struct Snapshot {
         if (display.peakNits  != o.display.peakNits)  return false;
         if (display.toneAlg   != o.display.toneAlg)   return false;
         if (display.gamutMode != o.display.gamutMode) return false;
+        if (display.panscan   != o.display.panscan)   return false;
+        if (playback.audioDelay != o.playback.audioDelay) return false;
         return true;
     }
 };
@@ -151,9 +156,10 @@ std::string g_iniPath;
 std::string g_prefAudioLang;
 std::string g_prefSubLang;
 int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
-Settings::SubtitleStyle g_subStyle;
-Settings::CinemaGrain   g_grain;
-Settings::DisplayConfig g_display;
+Settings::SubtitleStyle  g_subStyle;
+Settings::CinemaGrain    g_grain;
+Settings::DisplayConfig  g_display;
+Settings::PlaybackConfig g_playback;
 
 // Format an RGBA float[4] as the colour string mpv expects.  Note the
 // historical mpv convention is "#AARRGGBB" with alpha *first* — passing
@@ -237,6 +243,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.sub_style       = g_subStyle;
     snap.grain           = g_grain;
     snap.display         = g_display;
+    snap.playback        = g_playback;
     return snap;
 }
 
@@ -421,6 +428,11 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             g_display.peakNits  = getF(kv, "peak_nits",  g_display.peakNits);
             g_display.toneAlg   = getI(kv, "tone_alg",   g_display.toneAlg);
             g_display.gamutMode = getI(kv, "gamut_mode", g_display.gamutMode);
+            g_display.panscan   = getF(kv, "panscan",    g_display.panscan);
+        }
+        if (auto it = ini.find("playback"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_playback.audioDelay = getF(kv, "audio_delay", g_playback.audioDelay);
         }
         if (auto it = ini.find("cinema_grain"); it != ini.end()) {
             const KV& kv = it->second;
@@ -549,6 +561,11 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "peak_nits=%g\n",  g_display.peakNits);
     fprintf(f, "tone_alg=%d\n",   g_display.toneAlg);
     fprintf(f, "gamut_mode=%d\n", g_display.gamutMode);
+    fprintf(f, "panscan=%g\n",    g_display.panscan);
+    fprintf(f, "\n");
+
+    fprintf(f, "[playback]\n");
+    fprintf(f, "audio_delay=%g\n", g_playback.audioDelay);
     fprintf(f, "\n");
 
     fprintf(f, "[cinema_grain]\n");
@@ -630,6 +647,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_subStyle = SubtitleStyle{};
     g_grain    = CinemaGrain{};
     g_display  = DisplayConfig{};
+    g_playback = PlaybackConfig{};
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
@@ -681,6 +699,17 @@ void Settings::applyDisplayConfigToPlayer(MpvPlayer* p) {
     } else {
         p->setStringProperty("target-peak", "auto");
     }
+
+    // Black-bar / letterbox handling.
+    p->setDoubleProperty("panscan", d.panscan);
+}
+
+const Settings::PlaybackConfig& Settings::playbackConfig() { return g_playback; }
+void Settings::setPlaybackConfig(const PlaybackConfig& c)  { g_playback = c; }
+
+void Settings::applyPlaybackConfigToPlayer(MpvPlayer* p) {
+    if (!p) return;
+    p->setDoubleProperty("audio-delay", g_playback.audioDelay);
 }
 
 void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {
