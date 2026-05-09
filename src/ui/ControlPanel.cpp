@@ -740,102 +740,6 @@ void ControlPanel::render(bool* p_open) {
 
     ImGui::Separator();
 
-    // Speaker list with editable positions
-    ImGui::Text("Speakers:");
-    int numCh = atomic_load(&m_state->num_channels);
-    int bedCount = atomic_load(&m_state->num_bed_channels);
-    if (bedCount < 0 || bedCount > numCh)
-        bedCount = (numCh > 8) ? 8 : numCh;
-
-    for (int i = 0; i < numCh && i < HRTF_MAX_CHANNELS; i++) {
-        ImGui::PushID(i);
-
-        // Color indicator
-        ImVec4 color;
-        switch (i) {
-            case 0: case 1: case 2: color = ImVec4(0.3f, 0.5f, 1.0f, 1.0f); break;
-            case 3:                  color = ImVec4(1.0f, 0.2f, 0.2f, 1.0f); break;
-            case 4: case 5:         color = ImVec4(1.0f, 0.6f, 0.2f, 1.0f); break;
-            case 6: case 7:         color = ImVec4(0.3f, 0.8f, 0.3f, 1.0f); break;
-            default:                 color = ImVec4(0.7f, 0.3f, 0.9f, 1.0f); break;
-        }
-        bool isSelected = m_selectedSpeaker && (*m_selectedSpeaker == i);
-
-        ImGui::ColorButton("##color", color, ImGuiColorEditFlags_NoTooltip, ImVec2(12, 12));
-        ImGui::SameLine();
-
-        // Auto-open selected speaker's tree node
-        if (isSelected)
-            ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-
-        bool isObjectChannel = i >= bedCount;
-        // Pick name array based on active layout: 6.1 has a different tail.
-        bool is61 = (numCh == 7);
-        const char* spkName;
-        if (isObjectChannel)                       spkName = "Object";
-        else if (is61 && i < 7)                    spkName = speakerName61[i];
-        else if (i < 12)                           spkName = speakerNames[i];
-        else                                       spkName = "Unknown";
-        char spkLabel[64];
-        if (isObjectChannel)
-            snprintf(spkLabel, sizeof(spkLabel), "Object %d (ch %d)", i - bedCount, i);
-        else
-            snprintf(spkLabel, sizeof(spkLabel), "%s", spkName);
-        if (ImGui::TreeNode(spkLabel)) {
-            // Click the header to select this speaker
-            if (m_selectedSpeaker && ImGui::IsItemClicked())
-                *m_selectedSpeaker = i;
-            bool changed = false;
-
-            float az = m_state->speaker_pos[i].azimuth;
-            float el = m_state->speaker_pos[i].elevation;
-            float dist = m_state->speaker_pos[i].distance;
-
-            changed |= ImGui::SliderFloat("Azimuth", &az, -180.0f, 180.0f, "%.1f deg");
-            changed |= ImGui::SliderFloat("Elevation", &el, -90.0f, 90.0f, "%.1f deg");
-            changed |= ImGui::SliderFloat("Distance", &dist, 0.5f, 15.0f, "%.2f m");
-
-            if (changed) {
-                m_state->speaker_pos[i].azimuth = az;
-                m_state->speaker_pos[i].elevation = el;
-                m_state->speaker_pos[i].distance = dist;
-                atomic_store(&m_state->speaker_pos_changed, 1);
-            }
-
-            // Show RMS level + Test button on same line
-            {
-                float rms = atomic_load(&m_state->channel_rms[i]);
-                float buttonW = 0;
-                if (m_player) {
-                    buttonW = ImGui::CalcTextSize("Playing...").x +
-                              ImGui::GetStyle().FramePadding.x * 2 +
-                              ImGui::GetStyle().ItemSpacing.x;
-                }
-                float barW = ImGui::GetContentRegionAvail().x - buttonW;
-                ImGui::ProgressBar(rms, ImVec2(barW, 0), "");
-
-                if (m_player) {
-                    ImGui::SameLine();
-                    bool toneActive = atomic_load(&m_state->test_tone_active) != 0 &&
-                                      atomic_load(&m_state->test_tone_channel) == i;
-                    if (toneActive) {
-                        ImGui::TextDisabled("Playing...");
-                    } else {
-                        if (ImGui::SmallButton("Test")) {
-                            m_player->playTestTone(i);
-                        }
-                    }
-                }
-            }
-
-            ImGui::TreePop();
-        }
-
-        ImGui::PopID();
-    }
-
-    ImGui::Separator();
-
     // --- Debug section ---
     if (ImGui::CollapsingHeader("Debug")) {
         int numChNow = atomic_load(&m_state->num_channels);
@@ -920,7 +824,7 @@ void ControlPanel::render(bool* p_open) {
     ImGui::Text("Status: %s", active ? "Processing" : "Idle");
     if (active) {
         ImGui::Text("Sample Rate: %d Hz", sr);
-        ImGui::Text("Channels: %d", numCh);
+        ImGui::Text("Channels: %d", atomic_load(&m_state->num_channels));
     }
 
     // Spatial object status (sidecar or real-time ObjMeta from decoder)
@@ -1043,4 +947,102 @@ void ControlPanel::updateObjectPositions() {
         atomic_store(&m_state->object_gain[i], 0.0f);
     }
     atomic_store(&m_state->objects_changed, 1);
+}
+
+void ControlPanel::renderSpeakerList() {
+    if (!m_state) return;
+
+    int numCh = atomic_load(&m_state->num_channels);
+    int bedCount = atomic_load(&m_state->num_bed_channels);
+    if (bedCount < 0 || bedCount > numCh)
+        bedCount = (numCh > 8) ? 8 : numCh;
+
+    if (numCh <= 0) {
+        ImGui::TextDisabled("No audio loaded.");
+        return;
+    }
+
+    for (int i = 0; i < numCh && i < HRTF_MAX_CHANNELS; i++) {
+        ImGui::PushID(i);
+
+        // Color indicator (matches the 3D visualizer's speaker colours).
+        ImVec4 color;
+        switch (i) {
+            case 0: case 1: case 2: color = ImVec4(0.3f, 0.5f, 1.0f, 1.0f); break;
+            case 3:                  color = ImVec4(1.0f, 0.2f, 0.2f, 1.0f); break;
+            case 4: case 5:         color = ImVec4(1.0f, 0.6f, 0.2f, 1.0f); break;
+            case 6: case 7:         color = ImVec4(0.3f, 0.8f, 0.3f, 1.0f); break;
+            default:                 color = ImVec4(0.7f, 0.3f, 0.9f, 1.0f); break;
+        }
+        bool isSelected = m_selectedSpeaker && (*m_selectedSpeaker == i);
+
+        ImGui::ColorButton("##color", color, ImGuiColorEditFlags_NoTooltip,
+                            ImVec2(12, 12));
+        ImGui::SameLine();
+
+        if (isSelected)
+            ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+
+        bool isObjectChannel = i >= bedCount;
+        bool is61 = (numCh == 7);
+        const char* spkName;
+        if (isObjectChannel)                       spkName = "Object";
+        else if (is61 && i < 7)                    spkName = speakerName61[i];
+        else if (i < 12)                           spkName = speakerNames[i];
+        else                                       spkName = "Unknown";
+        char spkLabel[64];
+        if (isObjectChannel)
+            snprintf(spkLabel, sizeof(spkLabel), "Object %d (ch %d)",
+                     i - bedCount, i);
+        else
+            snprintf(spkLabel, sizeof(spkLabel), "%s", spkName);
+
+        if (ImGui::TreeNode(spkLabel)) {
+            if (m_selectedSpeaker && ImGui::IsItemClicked())
+                *m_selectedSpeaker = i;
+
+            bool changed = false;
+            float az   = m_state->speaker_pos[i].azimuth;
+            float el   = m_state->speaker_pos[i].elevation;
+            float dist = m_state->speaker_pos[i].distance;
+
+            changed |= ImGui::SliderFloat("Azimuth",   &az,   -180.0f, 180.0f, "%.1f deg");
+            changed |= ImGui::SliderFloat("Elevation", &el,    -90.0f,  90.0f, "%.1f deg");
+            changed |= ImGui::SliderFloat("Distance",  &dist,    0.5f,  15.0f, "%.2f m");
+
+            if (changed) {
+                m_state->speaker_pos[i].azimuth   = az;
+                m_state->speaker_pos[i].elevation = el;
+                m_state->speaker_pos[i].distance  = dist;
+                atomic_store(&m_state->speaker_pos_changed, 1);
+            }
+
+            // RMS level meter + per-channel Test button.
+            float rms = atomic_load(&m_state->channel_rms[i]);
+            float buttonW = 0;
+            if (m_player) {
+                buttonW = ImGui::CalcTextSize("Playing...").x +
+                          ImGui::GetStyle().FramePadding.x * 2 +
+                          ImGui::GetStyle().ItemSpacing.x;
+            }
+            float barW = ImGui::GetContentRegionAvail().x - buttonW;
+            ImGui::ProgressBar(rms, ImVec2(barW, 0), "");
+
+            if (m_player) {
+                ImGui::SameLine();
+                bool toneActive =
+                    atomic_load(&m_state->test_tone_active) != 0 &&
+                    atomic_load(&m_state->test_tone_channel) == i;
+                if (toneActive) {
+                    ImGui::TextDisabled("Playing...");
+                } else if (ImGui::SmallButton("Test")) {
+                    m_player->playTestTone(i);
+                }
+            }
+
+            ImGui::TreePop();
+        }
+
+        ImGui::PopID();
+    }
 }

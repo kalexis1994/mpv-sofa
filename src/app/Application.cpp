@@ -12,7 +12,67 @@
 #include <cstdio>
 #include <csignal>
 #include <cstdlib>
+#include <cmath>
 #include <algorithm>
+
+namespace {
+
+// Forward GLFW gamepad state into ImGui every frame so the focus
+// navigation (D-pad / A / B / shoulders / sticks) works on the same
+// widgets the mouse already drives.  Phase 1 of the TV-mode rollout —
+// the existing dockable layout becomes navigable from a gamepad without
+// any new screens or layouts.
+void pollGamepadIntoImGui() {
+    if (!glfwJoystickPresent(GLFW_JOYSTICK_1) ||
+        !glfwJoystickIsGamepad(GLFW_JOYSTICK_1))
+        return;
+    GLFWgamepadstate gp;
+    if (!glfwGetGamepadState(GLFW_JOYSTICK_1, &gp))
+        return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    auto btn = [&](int g, ImGuiKey k) {
+        io.AddKeyEvent(k, gp.buttons[g] == GLFW_PRESS);
+    };
+    btn(GLFW_GAMEPAD_BUTTON_A,             ImGuiKey_GamepadFaceDown);  // confirm
+    btn(GLFW_GAMEPAD_BUTTON_B,             ImGuiKey_GamepadFaceRight); // cancel
+    btn(GLFW_GAMEPAD_BUTTON_X,             ImGuiKey_GamepadFaceLeft);
+    btn(GLFW_GAMEPAD_BUTTON_Y,             ImGuiKey_GamepadFaceUp);
+    btn(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER,   ImGuiKey_GamepadL1);
+    btn(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER,  ImGuiKey_GamepadR1);
+    btn(GLFW_GAMEPAD_BUTTON_BACK,          ImGuiKey_GamepadBack);
+    btn(GLFW_GAMEPAD_BUTTON_START,         ImGuiKey_GamepadStart);
+    btn(GLFW_GAMEPAD_BUTTON_DPAD_UP,       ImGuiKey_GamepadDpadUp);
+    btn(GLFW_GAMEPAD_BUTTON_DPAD_DOWN,     ImGuiKey_GamepadDpadDown);
+    btn(GLFW_GAMEPAD_BUTTON_DPAD_LEFT,     ImGuiKey_GamepadDpadLeft);
+    btn(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT,    ImGuiKey_GamepadDpadRight);
+
+    // Sticks come in [-1, 1].  We split each axis into two virtual keys
+    // (left+right or up+down) with a small dead-zone so the focus only
+    // moves when the user actually intends it to.
+    auto axisPair = [&](float v, ImGuiKey neg, ImGuiKey pos, float dz = 0.20f) {
+        const float a = std::fabs(v);
+        io.AddKeyAnalogEvent(neg, v < -dz, v < -dz ? a : 0.0f);
+        io.AddKeyAnalogEvent(pos, v >  dz, v >  dz ? a : 0.0f);
+    };
+    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X],
+             ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight);
+    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y],
+             ImGuiKey_GamepadLStickUp,   ImGuiKey_GamepadLStickDown);
+    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X],
+             ImGuiKey_GamepadRStickLeft, ImGuiKey_GamepadRStickRight);
+    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y],
+             ImGuiKey_GamepadRStickUp,   ImGuiKey_GamepadRStickDown);
+
+    // Triggers: GLFW reports them as -1..1, with -1 being "released".
+    // Normalise to 0..1 and treat past 0.5 as a press for digital use.
+    const float lt = (gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER ] + 1.0f) * 0.5f;
+    const float rt = (gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] + 1.0f) * 0.5f;
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadL2, lt > 0.5f, lt);
+    io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, rt > 0.5f, rt);
+}
+
+} // anonymous namespace
 
 static bool isSubtitleFile(const std::string& path) {
     std::string ext;
@@ -409,6 +469,7 @@ void Application::render() {
 }
 
 void Application::renderUI() {
+    pollGamepadIntoImGui();
     m_imgui->beginFrame();
 
     // Track mouse movement for auto-hiding transport in fullscreen
@@ -709,6 +770,23 @@ void Application::renderUI() {
     // expands to fill the right side of the dockspace.
     if (m_show3DViz) {
     ImGui::Begin("HRTF Visualizer", &m_show3DViz);
+
+    // Split the viz panel: 3D image on the left, speaker list sidebar on
+    // the right.  The per-speaker controls (colours, position sliders,
+    // RMS bars, Test buttons) only really make sense alongside the 3D
+    // view, so they live here instead of in the Control Panel.
+    ImVec2 totalAvail = ImGui::GetContentRegionAvail();
+    const float minSidebar = 240.0f;
+    const float maxSidebar = 320.0f;
+    float sidebarW = totalAvail.x * 0.30f;
+    if (sidebarW < minSidebar) sidebarW = minSidebar;
+    if (sidebarW > maxSidebar) sidebarW = maxSidebar;
+    if (sidebarW > totalAvail.x * 0.5f) sidebarW = totalAvail.x * 0.5f;
+    float vizW = totalAvail.x - sidebarW - ImGui::GetStyle().ItemSpacing.x;
+    if (vizW < 1.0f) vizW = 1.0f;
+
+    ImGui::BeginChild("##viz_image", ImVec2(vizW, 0), false,
+                      ImGuiWindowFlags_NoScrollbar);
     ImVec2 vizSize = ImGui::GetContentRegionAvail();
     if (vizSize.x > 0 && vizSize.y > 0) {
         int newW = (int)vizSize.x;
@@ -822,6 +900,14 @@ void Application::renderUI() {
             }
         }
     }
+    ImGui::EndChild();   // ##viz_image
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("##viz_speakers", ImVec2(sidebarW, 0), true);
+    if (m_controlPanel) m_controlPanel->renderSpeakerList();
+    ImGui::EndChild();
+
     ImGui::End();
     } // if (m_show3DViz)
 

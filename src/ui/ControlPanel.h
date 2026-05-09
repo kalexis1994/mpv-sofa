@@ -31,6 +31,12 @@ public:
     // panel.
     void render(bool* p_open = nullptr);
 
+    // Speaker list with colour indicators, position sliders, RMS bars and
+    // Test buttons.  Owns the same state as render() — it's kept as a
+    // separate entry so the 3D Visualizer panel can host it as a sidebar
+    // (positions only really make sense alongside the 3D view).
+    void renderSpeakerList();
+
     // Call each frame to sync sidecar object positions with current PTS
     void updateObjectPositions();
 
