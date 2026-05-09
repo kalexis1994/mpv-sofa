@@ -55,6 +55,27 @@ target_include_directories(imgui PUBLIC
 )
 target_link_libraries(imgui PUBLIC glfw)
 
+# ImGuiFileDialog (in-app file browser, Blender/Godot-style)
+set(IFD_DIR ${CMAKE_SOURCE_DIR}/external/ImGuiFileDialog)
+add_library(imguifiledialog STATIC
+    ${IFD_DIR}/ImGuiFileDialog.cpp
+)
+target_include_directories(imguifiledialog PUBLIC
+    ${IFD_DIR}
+    ${IFD_DIR}/dirent
+)
+target_link_libraries(imguifiledialog PUBLIC imgui)
+# Enable the Places sidebar (drives + bookmarks).  USE_PLACES_DEVICES makes
+# the dialog auto-populate "Devices" with every mounted volume on Windows
+# (C:, D:, F:, …); USE_PLACES_BOOKMARKS adds a user-editable group.  PUBLIC
+# so callers see the same compile-time view of the API.
+target_compile_definitions(imguifiledialog PUBLIC
+    USE_PLACES_FEATURE
+    USE_PLACES_BOOKMARKS
+    USE_PLACES_DEVICES
+    PLACES_PANE_DEFAULT_SHOWN=true
+)
+
 # libmpv (must be installed on the system or provide path)
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
@@ -101,6 +122,7 @@ add_executable(mpv-sofa ${APP_SOURCES})
 
 target_include_directories(mpv-sofa PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/external/IconFontCppHeaders
 )
 
 target_link_libraries(mpv-sofa PRIVATE
@@ -108,6 +130,7 @@ target_link_libraries(mpv-sofa PRIVATE
     glad
     glm::glm
     imgui
+    imguifiledialog
 )
 
 if(MPV_FOUND)

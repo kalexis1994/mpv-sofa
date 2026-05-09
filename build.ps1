@@ -12,6 +12,35 @@ $appBuildDir = "$hrtfRoot\build"
 $distDir     = "$hrtfRoot\dist"
 $msys2Bash   = "C:\msys64\usr\bin\bash.exe"
 
+# ---- Step 0: Apply local patches to vendored submodules ----
+# We carry small modifications to ImGuiFileDialog (e.g. single-click to
+# activate places in the sidebar) outside of its repo so the submodule
+# stays clean.  --reverse --check tells us if the patch is already on top
+# of the working tree, in which case we skip re-applying it.
+$ifdPatch = "$hrtfRoot\external\ImGuiFileDialog.patch"
+$ifdRepo  = "$hrtfRoot\external\ImGuiFileDialog"
+if ((Test-Path $ifdPatch) -and (Test-Path $ifdRepo)) {
+    Write-Host "=== Step 0: Apply ImGuiFileDialog patches ===" -ForegroundColor Cyan
+    # git apply emits to stderr on the check path even when behaviour is
+    # expected, and ErrorActionPreference="Stop" would treat it as fatal.
+    # Save/restore the preference around the git calls.
+    $savedEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & git -C $ifdRepo apply --reverse --check $ifdPatch *> $null
+    $reverseOk = ($LASTEXITCODE -eq 0)
+    if ($reverseOk) {
+        Write-Host "  patch already applied"
+    } else {
+        & git -C $ifdRepo apply $ifdPatch *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  applied $($ifdPatch | Split-Path -Leaf)"
+        } else {
+            Write-Host "  WARN: patch failed; submodule may be out of sync" -ForegroundColor Yellow
+        }
+    }
+    $ErrorActionPreference = $savedEAP
+}
+
 # ---- Step 1: Copy af_hrtf.c + module headers to mpv source ----
 Write-Host "=== Step 1: Copy af_hrtf sources ===" -ForegroundColor Cyan
 Copy-Item "$patchDir\af_hrtf.c" "$filterDir\af_hrtf.c" -Force

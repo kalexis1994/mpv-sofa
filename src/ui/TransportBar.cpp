@@ -1,6 +1,7 @@
 #include "TransportBar.h"
 #include "audio/MpvPlayer.h"
 #include <imgui.h>
+#include <IconsLucide.h>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -47,27 +48,31 @@ void TransportBar::renderContent() {
     float buttonWidth = 40.0f;
     float spacing = 4.0f;
 
-    // Seek backward
-    if (ImGui::Button("<<", ImVec2(buttonWidth, 0))) {
+    // Seek backward (-10 s)
+    if (ImGui::Button(ICON_LC_REWIND, ImVec2(buttonWidth, 0))) {
         m_player->seekRelative(-10.0);
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back 10 s");
     ImGui::SameLine(0, spacing);
 
-    // Play/Pause
-    const char* playLabel = m_player->isPaused() ? " > " : " || ";
+    // Play / Pause
+    const char* playLabel = m_player->isPaused() ? ICON_LC_PLAY : ICON_LC_PAUSE;
     if (ImGui::Button(playLabel, ImVec2(buttonWidth, 0))) {
         m_player->togglePause();
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(m_player->isPaused() ? "Play (Space)" : "Pause (Space)");
     ImGui::SameLine(0, spacing);
 
-    // Seek forward
-    if (ImGui::Button(">>", ImVec2(buttonWidth, 0))) {
+    // Seek forward (+10 s)
+    if (ImGui::Button(ICON_LC_FAST_FORWARD, ImVec2(buttonWidth, 0))) {
         m_player->seekRelative(10.0);
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward 10 s");
     ImGui::SameLine(0, spacing);
 
     // Fullscreen toggle
-    const char* fsLabel = m_isFullscreen ? "[x]" : "[ ]";
+    const char* fsLabel = m_isFullscreen ? ICON_LC_MINIMIZE : ICON_LC_MAXIMIZE;
     if (ImGui::Button(fsLabel, ImVec2(buttonWidth, 0))) {
         if (m_fullscreenCb) m_fullscreenCb();
     }
@@ -75,9 +80,8 @@ void TransportBar::renderContent() {
         ImGui::SetTooltip(m_isFullscreen ? "Exit Fullscreen (F11/Esc)" : "Fullscreen (F11)");
     ImGui::SameLine(0, spacing);
 
-    // Controls drawer toggle (gear).  ImGui's default font has no glyph
-    // for U+2699, so we use ASCII "Cfg" as a portable label.
-    if (ImGui::Button("Cfg", ImVec2(buttonWidth, 0))) {
+    // Controls drawer toggle (gear icon)
+    if (ImGui::Button(ICON_LC_SLIDERS, ImVec2(buttonWidth, 0))) {
         if (m_controlsCb) m_controlsCb();
     }
     if (ImGui::IsItemHovered())

@@ -7,8 +7,11 @@
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <ImGuiFileDialog.h>
+#include <IconsLucide.h>
 #include <cstdio>
 #include <csignal>
+#include <cstdlib>
 #include <algorithm>
 
 static bool isSubtitleFile(const std::string& path) {
@@ -135,6 +138,46 @@ bool Application::init(int argc, char* argv[]) {
     // Restore persisted settings (sliders, paths, panel visibility) before
     // the first render so the UI reflects the user's last choices.
     Settings::load(m_sharedState, &m_showControlPanel, &m_show3DViz);
+
+    // File-dialog typing.  Same accent colour for every entry so the only
+    // visual differentiator between rows is the shape of the line-icon.
+    {
+        const ImVec4 sand(0.824f, 0.757f, 0.714f, 1.0f);   // #D2C1B6
+        const ImVec4 dim (0.824f, 0.757f, 0.714f, 0.78f);
+        auto* d = ImGuiFileDialog::Instance();
+
+        // Pre-populate the left-hand "Bookmarks" group with common user
+        // folders.  The "Devices" group is filled automatically by the
+        // library with every mounted volume (C:, D:, F:, ...).
+        if (auto* bm = d->GetPlacesGroupPtr("Bookmarks")) {
+            const char* userProfile = std::getenv("USERPROFILE");
+            if (userProfile && *userProfile) {
+                std::string home = userProfile;
+                bm->AddPlace("Home",      home,                 false);
+                bm->AddPlace("Desktop",   home + "\\Desktop",   false);
+                bm->AddPlace("Videos",    home + "\\Videos",    false);
+                bm->AddPlace("Music",     home + "\\Music",     false);
+                bm->AddPlace("Downloads", home + "\\Downloads", false);
+            }
+        }
+
+        d->SetFileStyle(IGFD_FileStyleByTypeDir,  "", sand, ICON_LC_FOLDER);
+        d->SetFileStyle(IGFD_FileStyleByTypeLink, "", dim,  ICON_LC_FOLDER);
+        // Video
+        for (auto* ext : {".mkv", ".mp4", ".avi", ".webm", ".mov",
+                           ".m4v", ".ts",  ".m2ts", ".thd"})
+            d->SetFileStyle(IGFD_FileStyleByExtention, ext, dim, ICON_LC_FILM);
+        // Audio
+        for (auto* ext : {".flac", ".wav", ".mp3", ".opus",
+                           ".ogg",  ".aac", ".ac3"})
+            d->SetFileStyle(IGFD_FileStyleByExtention, ext, dim, ICON_LC_MUSIC);
+        // Subtitles
+        for (auto* ext : {".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx"})
+            d->SetFileStyle(IGFD_FileStyleByExtention, ext, dim, ICON_LC_CAPTIONS);
+        // SOFA / EQ profiles
+        d->SetFileStyle(IGFD_FileStyleByExtention, ".sofa", dim, ICON_LC_AUDIO_LINES);
+        d->SetFileStyle(IGFD_FileStyleByExtention, ".txt",  dim, ICON_LC_FILE_TEXT);
+    }
 
     // Load file if specified
     if (!m_pendingFile.empty()) {
@@ -403,18 +446,52 @@ void Application::renderUI() {
     bool dirty = Settings::isDirty(m_sharedState,
                                     m_showControlPanel, m_show3DViz);
     if (ImGui::BeginMainMenuBar()) {
-        if (ImGui::BeginMenu("View")) {
-            ImGui::MenuItem("Controls",       "F3", &m_showControlPanel);
-            ImGui::MenuItem("3D Visualizer",  "F2", &m_show3DViz);
+        if (ImGui::BeginMenu(ICON_LC_FILE "  File")) {
+            if (ImGui::MenuItem(ICON_LC_FOLDER_OPEN "  Open...", "Ctrl+O")) {
+                IGFD::FileDialogConfig cfg;
+                cfg.path = ".";
+                cfg.flags = ImGuiFileDialogFlags_Modal;
+                ImGuiFileDialog::Instance()->OpenDialog(
+                    "open_media",
+                    "Open media file",
+                    "Video/Audio{.mkv,.mp4,.avi,.webm,.mov,.m4v,"
+                                ".ts,.m2ts,.flac,.wav,.mp3,.opus,.ogg,.aac,.ac3,.thd},"
+                    "All files{.*}",
+                    cfg);
+            }
+            if (ImGui::MenuItem(ICON_LC_CAPTIONS "  Load Subtitle...",
+                                 nullptr, false,
+                                 m_player && m_player->hasVideo())) {
+                IGFD::FileDialogConfig cfg;
+                cfg.path = ".";
+                cfg.flags = ImGuiFileDialogFlags_Modal;
+                ImGuiFileDialog::Instance()->OpenDialog(
+                    "open_subtitle",
+                    "Load subtitle",
+                    "Subtitles{.srt,.ass,.ssa,.sub,.vtt,.idx},All files{.*}",
+                    cfg);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(ICON_LC_DOOR_OPEN "  Exit", "Alt+F4")) {
+                m_running = false;
+            }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Settings")) {
-            if (ImGui::MenuItem("Save Now", "Ctrl+S", false, dirty)) {
+        if (ImGui::BeginMenu(ICON_LC_EYE "  View")) {
+            ImGui::MenuItem(ICON_LC_SLIDERS  "  Controls",      "F3",
+                             &m_showControlPanel);
+            ImGui::MenuItem(ICON_LC_FILM     "  3D Visualizer", "F2",
+                             &m_show3DViz);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(ICON_LC_SETTINGS "  Settings")) {
+            if (ImGui::MenuItem(ICON_LC_SAVE "  Save Now",
+                                 "Ctrl+S", false, dirty)) {
                 Settings::save(m_sharedState,
                                 m_showControlPanel, m_show3DViz);
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Reset to Defaults")) {
+            if (ImGui::MenuItem(ICON_LC_ROTATE_CCW "  Reset to Defaults")) {
                 Settings::resetToDefaults(m_sharedState,
                                            &m_showControlPanel, &m_show3DViz);
             }
@@ -434,11 +511,44 @@ void Application::renderUI() {
     }
 
     // Ctrl+S: save now (only if dirty).
-    if (dirty) {
+    {
         ImGuiIO& io = ImGui::GetIO();
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+        if (dirty && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
             Settings::save(m_sharedState, m_showControlPanel, m_show3DViz);
         }
+        // Ctrl+O: open file dialog (mirrors File > Open).
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) {
+            IGFD::FileDialogConfig cfg;
+            cfg.path = ".";
+            cfg.flags = ImGuiFileDialogFlags_Modal;
+            ImGuiFileDialog::Instance()->OpenDialog(
+                "open_media",
+                "Open media file",
+                "Video/Audio{.mkv,.mp4,.avi,.webm,.mov,.m4v,"
+                            ".ts,.m2ts,.flac,.wav,.mp3,.opus,.ogg,.aac,.ac3,.thd},"
+                "All files{.*}",
+                cfg);
+        }
+    }
+
+    // Render and dispatch the file dialogs.  Sized so they're roomy enough
+    // to navigate but not full-screen.
+    ImVec2 vpSize = ImGui::GetMainViewport()->Size;
+    ImVec2 dlgMin(640, 420);
+    ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
+    if (ImGuiFileDialog::Instance()->Display("open_media", 0, dlgMin, dlgMax)) {
+        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            m_pendingFile = path;
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+    if (ImGuiFileDialog::Instance()->Display("open_subtitle", 0, dlgMin, dlgMax)) {
+        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            m_player->loadSubtitleFile(path);
+        }
+        ImGuiFileDialog::Instance()->Close();
     }
 
     // Enable docking

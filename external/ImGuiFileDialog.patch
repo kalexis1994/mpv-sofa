@@ -1,0 +1,28 @@
+diff --git a/ImGuiFileDialog.cpp b/ImGuiFileDialog.cpp
+index 6cfa67e..bd985f7 100644
+--- a/ImGuiFileDialog.cpp
++++ b/ImGuiFileDialog.cpp
+@@ -3267,14 +3267,15 @@ bool IGFD::PlacesFeature::m_DrawPlacesPane(FileDialogInternal& vFileDialogIntern
+                                     ImGui::PopStyleColor();
+                                     ImGui::SameLine();
+                                 }
+-                                if (ImGui::Selectable(place_name.c_str(), current_path == place.path || group_ptr->selectedPlaceForEdition == i, ImGuiSelectableFlags_AllowDoubleClick)) {  // select if path is current
+-                                    if (ImGui::IsMouseDoubleClicked(0)) {
+-                                        group_ptr->selectedPlaceForEdition = -1;  // stop edition
+-                                        // apply path
+-                                        vFileDialogInternal.fileManager.SetCurrentPath(place.path);
+-                                        vFileDialogInternal.fileManager.OpenCurrentPath(vFileDialogInternal);
+-                                        res = true;
+-                                    }
++                                // mpv-sofa patch: single-click to navigate
++                                // (upstream uses double-click).
++                                if (ImGui::Selectable(place_name.c_str(),
++                                        current_path == place.path
++                                        || group_ptr->selectedPlaceForEdition == i)) {
++                                    group_ptr->selectedPlaceForEdition = -1;
++                                    vFileDialogInternal.fileManager.SetCurrentPath(place.path);
++                                    vFileDialogInternal.fileManager.OpenCurrentPath(vFileDialogInternal);
++                                    res = true;
+                                 }
+                                 ImGui::PopID();
+                                 if (ImGui::IsItemHovered()) {
