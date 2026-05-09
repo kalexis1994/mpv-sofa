@@ -75,6 +75,11 @@ spatial_*
 *.thd
 *.pdf
 *.zip
+*.wav
+
+# Python caches
+__pycache__/
+*.pyc
 
 # Scratch scripts
 compile_test*.ps1
