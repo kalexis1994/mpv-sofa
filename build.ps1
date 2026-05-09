@@ -94,5 +94,19 @@ foreach ($dll in $msys2Dlls) {
 
 # (Assets are copied by the POST_BUILD step in CMakeLists.txt.)
 
+# ---- Step 5: Purge runtime artefacts that mpv-sofa drops into dist/ ----
+# When the app is launched from dist/ it writes its working files (ImGui
+# layout cache, debug logs, the truehd loader log) right next to the
+# binaries.  Cleaning them at the end of every build keeps dist/ shippable.
+Write-Host "`n=== Step 5: Purge runtime artefacts from dist/ ===" -ForegroundColor Cyan
+$strayPatterns = @("*.log", "*.txt", "*.ini", "*.wav")
+foreach ($pat in $strayPatterns) {
+    Get-ChildItem -Path $distDir -File -Filter $pat -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Remove-Item $_.FullName -Force
+            Write-Host "  removed $($_.Name)"
+        }
+}
+
 Write-Host "`n=== Done ===" -ForegroundColor Green
 Write-Host "Run:  $distDir\mpv-sofa.exe" -ForegroundColor Green
