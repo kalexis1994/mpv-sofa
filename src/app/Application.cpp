@@ -459,6 +459,49 @@ void Application::update(float dt) {
     if (m_controlPanel)
         m_controlPanel->updateObjectPositions();
 
+    // Transport-bar auto-hide.  Reset the idle timer on any user input
+    // — mouse motion, mouse click, keyboard or gamepad button.  When
+    // the timer crosses kTransportHideDelay we flip m_transportVisible
+    // and the dock layout rebuilds in renderUI to give the freed
+    // height back to the video.  ImGui's queue-driven input means we
+    // can read this state cheaply: io.MouseDelta gives us frame-level
+    // motion, IsKeyDown over the named-key range covers everything
+    // the keyboard / gamepad can produce.  The playback overlay menu
+    // counts as "interacting" so the bar stays hidden while the menu
+    // is up — pop the menu and the timer starts ticking again.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        bool activity = false;
+        if (std::fabs(io.MouseDelta.x) > 1.0f ||
+            std::fabs(io.MouseDelta.y) > 1.0f) {
+            activity = true;
+        }
+        if (!activity) {
+            for (int b = 0; b < 5; b++) {
+                if (ImGui::IsMouseDown(b)) { activity = true; break; }
+            }
+        }
+        if (!activity) {
+            for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; k++) {
+                if (ImGui::IsKeyDown((ImGuiKey)k)) { activity = true; break; }
+            }
+        }
+
+        if (activity || m_playbackMenuOpen) {
+            m_transportIdleTimer = 0.0f;
+        } else {
+            m_transportIdleTimer += dt;
+        }
+
+        const bool wantVisible = (m_transportIdleTimer < kTransportHideDelay) &&
+                                  !m_playbackMenuOpen;
+        if (wantVisible != m_transportVisible) {
+            m_transportVisible = wantVisible;
+            // The renderUI layout-rebuild guard keys off this flag so
+            // it picks up the swap on its next frame.
+        }
+    }
+
     // Open the audio-track picker the first frame after a fresh load.
     // mpv has been kept paused so we can take our time before the first
     // audible frame.
@@ -544,7 +587,19 @@ void Application::renderUI() {
     // gets overwritten and the cursor pops back in.  Setting the ImGui
     // cursor to None each frame the cursor should be hidden makes the
     // backend issue the correct GLFW_CURSOR_HIDDEN call for us.
-    if (m_videoFullscreen && m_fullscreenCursorTimer <= 0.0f) {
+    //
+    // Two paths fold into the same hide:
+    //   - F11 cinema mode: hidden once m_fullscreenCursorTimer expires.
+    //   - Docked playback: hidden when the transport bar auto-hid AND
+    //     the playback overlay isn't up (during the overlay menu the
+    //     user explicitly needs the cursor to operate it).
+    const bool hasMediaForCursor = m_player && m_player->hasVideo();
+    const bool hideCursor =
+        m_videoFullscreen
+            ? (m_fullscreenCursorTimer <= 0.0f)
+            : (hasMediaForCursor && !m_transportVisible &&
+                                    !m_playbackMenuOpen);
+    if (hideCursor) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_None);
         m_cursorHidden = true;
     } else {
@@ -794,12 +849,17 @@ void Application::renderUI() {
     ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
     // Rebuild the dock layout whenever the 3D Visualizer's visibility
-    // toggles.  The right column hosts only the 3D Viz now (the legacy
-    // Control Panel moved into Preferences), so the video occupies the
-    // full dock space whenever the viz is hidden.
-    static bool layoutBuilt = false;
-    static bool prevShowViz = false;
-    if (!layoutBuilt || prevShowViz != m_show3DViz) {
+    // *or* the transport's visibility flips.  The transport-bar
+    // auto-hide drops the bottom dock node and the video reclaims the
+    // freed vertical space; without rebuilding here the empty
+    // transport node would just sit there as a 150 px gap below the
+    // video.
+    static bool layoutBuilt    = false;
+    static bool prevShowViz    = false;
+    static bool prevTransport  = true;
+    if (!layoutBuilt ||
+        prevShowViz   != m_show3DViz ||
+        prevTransport != m_transportVisible) {
 
         ImGui::DockBuilderRemoveNode(dockspace_id);
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
@@ -812,35 +872,73 @@ void Application::renderUI() {
                                          0.75f, &leftCol, &rightCol);
         }
 
-        // Left: video on top, transport docked below.  The transport
-        // hosts three rows of content (header, full-width timeline,
-        // controls), so a fixed pixel height converted to a ratio is
-        // more honest than a flat ratio — at 8% on a 900 px viewport
-        // it overflowed and forced the whole panel into a scrollbar.
-        const float transportPx = 150.0f;
-        const float dockPx      = ImGui::GetMainViewport()->Size.y -
-                                   ImGui::GetFrameHeight();
-        float transportRatio = transportPx / dockPx;
-        if (transportRatio < 0.08f) transportRatio = 0.08f;
-        if (transportRatio > 0.45f) transportRatio = 0.45f;
+        ImGuiID videoSlot = 0;
+        ImGuiID transportSlot = 0;
+        if (m_transportVisible) {
+            // Left column: video on top, transport docked below.  The
+            // transport hosts three rows of content (header,
+            // full-width timeline, controls), so a fixed pixel height
+            // converted to a ratio is more honest than a flat ratio.
+            const float transportPx = 150.0f;
+            const float dockPx      = ImGui::GetMainViewport()->Size.y -
+                                       ImGui::GetFrameHeight();
+            float transportRatio = transportPx / dockPx;
+            if (transportRatio < 0.08f) transportRatio = 0.08f;
+            if (transportRatio > 0.45f) transportRatio = 0.45f;
 
-        ImGuiID videoNode, transportNode;
-        ImGui::DockBuilderSplitNode(leftCol, ImGuiDir_Down,
-                                     transportRatio,
-                                     &transportNode, &videoNode);
-        ImGui::DockBuilderDockWindow("Video",     videoNode);
-        ImGui::DockBuilderDockWindow("Transport", transportNode);
+            ImGui::DockBuilderSplitNode(leftCol, ImGuiDir_Down,
+                                         transportRatio,
+                                         &transportSlot, &videoSlot);
+            ImGui::DockBuilderDockWindow("Video",     videoSlot);
+            ImGui::DockBuilderDockWindow("Transport", transportSlot);
+        } else {
+            // Auto-hide path: only the video panel is docked, taking
+            // the whole left column.  The Transport window simply
+            // isn't rendered this frame (see below).
+            videoSlot = leftCol;
+            ImGui::DockBuilderDockWindow("Video", videoSlot);
+        }
 
         if (m_show3DViz)
             ImGui::DockBuilderDockWindow("HRTF Visualizer", rightCol);
 
+        // Strip the per-window tab bar from the video / transport
+        // nodes so a single docked window reads as a frame, not a
+        // tabbed panel.  Otherwise the dock paints a "Video" tab
+        // header above the image even though there's only ever one
+        // window in that node — visible chrome the user doesn't need.
+        if (videoSlot) {
+            if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(videoSlot))
+                n->LocalFlags |= ImGuiDockNodeFlags_NoTabBar |
+                                 ImGuiDockNodeFlags_NoWindowMenuButton |
+                                 ImGuiDockNodeFlags_NoCloseButton;
+        }
+        if (transportSlot) {
+            if (ImGuiDockNode* n = ImGui::DockBuilderGetNode(transportSlot))
+                n->LocalFlags |= ImGuiDockNodeFlags_NoTabBar |
+                                 ImGuiDockNodeFlags_NoWindowMenuButton |
+                                 ImGuiDockNodeFlags_NoCloseButton;
+        }
+
         ImGui::DockBuilderFinish(dockspace_id);
-        layoutBuilt = true;
-        prevShowViz = m_show3DViz;
+        layoutBuilt   = true;
+        prevShowViz   = m_show3DViz;
+        prevTransport = m_transportVisible;
     }
 
-    // Video panel
-    ImGui::Begin("Video");
+    // Video panel — no chrome, edge-to-edge.  The dock node already
+    // strips the tab bar; we strip the title bar / scrollbar / border
+    // and zero out the window padding so the ImGui::Image below sits
+    // pixel-flush against the panel rect.  Without this you'd see a
+    // "Video" titlebar plus a few pixels of inset framing around the
+    // frame, even when the transport is hidden.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("Video", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar(2);
     ImVec2 videoSize = ImGui::GetContentRegionAvail();
 
     if (videoSize.x > 0 && videoSize.y > 0) {
@@ -1018,8 +1116,12 @@ void Application::renderUI() {
     // EQ tabs.  The ControlPanel object is still alive because it owns
     // the SOFA / IR / EQ scanning + spatial-sidecar loading code.)
 
-    // Transport bar
-    m_transportBar->render();
+    // Transport bar — auto-hidden after kTransportHideDelay seconds of
+    // user idleness, restored on any input.  Skipping the render
+    // (combined with the dock rebuild above) is what gives the freed
+    // height back to the video.
+    if (m_transportVisible)
+        m_transportBar->render();
 
     // In-playback overlay menu — paint above the dock so it dims the
     // (paused) video naturally.  Track picker / Preferences /

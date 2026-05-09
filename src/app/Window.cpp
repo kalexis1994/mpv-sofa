@@ -51,6 +51,17 @@ bool Window::init(const std::string& title, int width, int height, WindowMode mo
     }
     glfwShowWindow(m_window);
 
+    // Force the new window to take keyboard / mouse focus.  Under the
+    // Windows GUI subsystem (no console parent) the OS sometimes
+    // shows the window without giving it the foreground focus, so the
+    // first user click would land "outside" any control and the OS
+    // would just snap focus on click — the visible flicker the user
+    // saw on the first interaction.  Explicit focus + RequestAttention
+    // covers both immediate-after-launch and the case where the
+    // launcher (Steam, shortcut, ...) has already grabbed focus.
+    glfwFocusWindow(m_window);
+    glfwRequestWindowAttention(m_window);
+
     return true;
 }
 

@@ -145,6 +145,16 @@ private:
 
     void toggleVideoFullscreen();
 
+    // Auto-hide transport bar during docked playback.  Same idea as
+    // the fullscreen cursor timer but applied to the bottom dock node:
+    // after kTransportHideDelay seconds without input, the transport
+    // window is dropped from the layout and the video reclaims its
+    // height so the user sees the frame uninterrupted.  Any mouse
+    // motion / key / gamepad input resets the timer.
+    static constexpr float kTransportHideDelay = 3.0f;
+    float m_transportIdleTimer = 0.0f;
+    bool  m_transportVisible   = true;
+
     // File to open (from command line or drag-drop)
     std::string m_pendingFile;
 };
