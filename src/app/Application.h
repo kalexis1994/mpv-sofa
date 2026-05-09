@@ -72,6 +72,13 @@ private:
     bool m_f2KeyHeld = false;
     void toggle3DViz() { m_show3DViz = !m_show3DViz; }
 
+    // Control panel — hidden by default; toggled via View menu, F3, or the
+    // gear button on the transport bar.  Without it, the app reads as a
+    // straightforward video player.
+    bool m_showControlPanel = false;
+    bool m_f3KeyHeld = false;
+    void toggleControlPanel() { m_showControlPanel = !m_showControlPanel; }
+
     // Video fullscreen mode
     bool m_videoFullscreen = false;
     bool m_fullscreenKeyHeld = false;

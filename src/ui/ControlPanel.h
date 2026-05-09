@@ -26,7 +26,10 @@ class ControlPanel {
 public:
     ControlPanel(HrtfSharedState* state, int* selectedSpeaker = nullptr,
                  MpvPlayer* player = nullptr);
-    void render();
+    // p_open: optional bool* so the window's close (X) button writes back to
+    // the caller's "is panel visible?" flag.  Pass nullptr for an always-open
+    // panel.
+    void render(bool* p_open = nullptr);
 
     // Call each frame to sync sidecar object positions with current PTS
     void updateObjectPositions();

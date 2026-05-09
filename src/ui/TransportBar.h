@@ -14,9 +14,13 @@ public:
     void setFullscreenCallback(FullscreenCallback cb) { m_fullscreenCb = cb; }
     void setFullscreenState(bool fs) { m_isFullscreen = fs; }
 
+    using ControlsCallback = std::function<void()>;
+    void setControlsCallback(ControlsCallback cb) { m_controlsCb = cb; }
+
 private:
     MpvPlayer* m_player;
     FullscreenCallback m_fullscreenCb;
+    ControlsCallback m_controlsCb;
     bool m_isFullscreen = false;
 
     void formatTime(double seconds, char* buf, int bufSize);

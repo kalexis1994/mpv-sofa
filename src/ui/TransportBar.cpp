@@ -73,6 +73,15 @@ void TransportBar::renderContent() {
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(m_isFullscreen ? "Exit Fullscreen (F11/Esc)" : "Fullscreen (F11)");
+    ImGui::SameLine(0, spacing);
+
+    // Controls drawer toggle (gear).  ImGui's default font has no glyph
+    // for U+2699, so we use ASCII "Cfg" as a portable label.
+    if (ImGui::Button("Cfg", ImVec2(buttonWidth, 0))) {
+        if (m_controlsCb) m_controlsCb();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Toggle Controls drawer (F3)");
 
     // Time display
     ImGui::SameLine(0, 20.0f);

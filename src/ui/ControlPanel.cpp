@@ -375,8 +375,8 @@ void ControlPanel::loadProfile(int index) {
     atomic_store(&m_state->sofa_path_changed, 1);
 }
 
-void ControlPanel::render() {
-    ImGui::Begin("Control Panel");
+void ControlPanel::render(bool* p_open) {
+    ImGui::Begin("Control Panel", p_open);
 
     // Scan profiles on first render
     if (!m_profilesScanned)
