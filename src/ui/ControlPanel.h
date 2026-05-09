@@ -62,6 +62,12 @@ private:
     bool m_irScanned = false;
     void scanIrs();
 
+    // Headphone EQ profiles
+    std::vector<std::string> m_hpEqFiles; // relative paths under assets/headphone_eq/
+    int m_selectedHpEq = 0;               // 0 = "None"
+    bool m_hpEqScanned = false;
+    void scanHpEqs();
+
     // Spatial object sidecar
     std::vector<AobjFrame> m_sidecarFrames;
     bool m_sidecarLoaded = false;

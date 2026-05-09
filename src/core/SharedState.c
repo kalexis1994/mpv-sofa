@@ -54,6 +54,11 @@ HrtfSharedState* hrtf_shared_state_create(void) {
     // Min-phase preprocessing off by default — opt-in so users can compare.
     atomic_store(&s->direct_min_phase, 0);
 
+    // Headphone EQ off by default — user picks a profile from the UI.
+    s->hp_eq_path[0] = '\0';
+    atomic_store(&s->hp_eq_changed, 0);
+    atomic_store(&s->hp_eq_enabled, 1);
+
     // Bauer crossfeed: gentle default, gives the contralateral ear body for
     // frontal sources without blurring lateralised side/rear sources.
     atomic_store(&s->bauer_crossfeed, 0.15f);

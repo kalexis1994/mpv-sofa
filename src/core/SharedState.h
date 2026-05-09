@@ -130,6 +130,14 @@ typedef struct HrtfSharedState {
     // Minimum-phase preprocessing of direct-path HRIRs.  Default off.
     HRTF_ATOMIC(int32_t)  direct_min_phase;
 
+    // Headphone EQ correction.  AutoEQ-style parametric biquad cascade
+    // applied to the final stereo output to neutralise the headphone's
+    // own frequency colouration so the HRTF reaches the ear with the
+    // intended balance.  Path is to a ParametricEq.txt file.
+    char             hp_eq_path[512];
+    HRTF_ATOMIC(int32_t)  hp_eq_changed;
+    HRTF_ATOMIC(int32_t)  hp_eq_enabled;
+
 } HrtfSharedState;
 
 // Global shared state instance (allocated by host app, passed to mpv via option)

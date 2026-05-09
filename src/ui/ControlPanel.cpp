@@ -322,6 +322,26 @@ void ControlPanel::scanProfiles() {
     m_profilesScanned = true;
 }
 
+void ControlPanel::scanHpEqs() {
+    m_hpEqFiles.clear();
+    m_selectedHpEq = 0;
+    const char* dir = "assets/headphone_eq";
+    try {
+        if (!fs::exists(dir)) { m_hpEqScanned = true; return; }
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext != ".txt") continue;
+            std::string p = entry.path().string();
+            std::replace(p.begin(), p.end(), '\\', '/');
+            m_hpEqFiles.push_back(p);
+        }
+    } catch (...) {}
+    std::sort(m_hpEqFiles.begin(), m_hpEqFiles.end());
+    m_hpEqScanned = true;
+}
+
 void ControlPanel::scanIrs() {
     m_irFiles.clear();
     m_selectedIr = 0;
@@ -600,6 +620,40 @@ void ControlPanel::render() {
         float irWet = atomic_load(&m_state->ir_wet);
         if (ImGui::SliderFloat("Conv reverb wet", &irWet, 0.0f, 1.0f, "%.2f")) {
             atomic_store(&m_state->ir_wet, irWet);
+        }
+    }
+
+    // Headphone EQ — neutralises the headphone's own coloration so the
+    // HRTF reaches the ear with the intended response.  Drop AutoEQ
+    // ParametricEq.txt files into assets/headphone_eq/ to populate.
+    if (!m_hpEqScanned) scanHpEqs();
+    {
+        std::vector<const char*> labels;
+        labels.push_back("None");
+        for (const auto& f : m_hpEqFiles) {
+            size_t slash = f.find_last_of('/');
+            const char *name = (slash == std::string::npos)
+                                 ? f.c_str()
+                                 : f.c_str() + slash + 1;
+            labels.push_back(name);
+        }
+        int idx = m_selectedHpEq;
+        if (ImGui::Combo("Headphone EQ", &idx,
+                          labels.data(), (int)labels.size())) {
+            m_selectedHpEq = idx;
+            if (idx == 0) {
+                m_state->hp_eq_path[0] = '\0';
+            } else {
+                const std::string& p = m_hpEqFiles[idx - 1];
+                strncpy(m_state->hp_eq_path, p.c_str(),
+                        sizeof(m_state->hp_eq_path) - 1);
+                m_state->hp_eq_path[sizeof(m_state->hp_eq_path) - 1] = '\0';
+            }
+            atomic_store(&m_state->hp_eq_changed, 1);
+        }
+        bool hp_on = atomic_load(&m_state->hp_eq_enabled) != 0;
+        if (ImGui::Checkbox("Headphone EQ enabled", &hp_on)) {
+            atomic_store(&m_state->hp_eq_enabled, hp_on ? 1 : 0);
         }
     }
 
