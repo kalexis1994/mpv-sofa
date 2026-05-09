@@ -8,11 +8,6 @@
 #include <vector>
 #include <cmath>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <commdlg.h>
-#endif
-
 TransportBar::TransportBar(MpvPlayer* player) : m_player(player) {}
 
 void TransportBar::formatTime(double seconds, char* buf, int bufSize) {
@@ -282,88 +277,19 @@ void TransportBar::renderContent() {
     }
     ImGui::SameLine(0, spacing * 2);
 
-    // Audio track popup
-    if (ImGui::Button(ICON_LC_LANGUAGES "##audiopop", ImVec2(btnW, 0)))
-        ImGui::OpenPopup("##audiopopup");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Audio tracks");
-    if (ImGui::BeginPopup("##audiopopup")) {
-        const auto& tracks = m_player->getAudioTracks();
-        if (tracks.empty()) {
-            ImGui::TextDisabled("No audio tracks");
-        } else {
-            int currentId = m_player->getCurrentAudioTrackId();
-            for (const auto& t : tracks) {
-                char label[256];
-                snprintf(label, sizeof(label), "#%d %s%s%s%s%dch %dHz",
-                         t.id,
-                         t.title.empty() ? "" : t.title.c_str(),
-                         t.title.empty() ? "" : "  ",
-                         t.lang.empty()  ? "" : (std::string("[") + t.lang + "]  ").c_str(),
-                         t.codec.empty() ? "" : (t.codec + "  ").c_str(),
-                         t.channels, t.samplerate);
-                bool sel = (t.id == currentId);
-                if (ImGui::Selectable(label, sel))
-                    m_player->setAudioTrack(t.id);
-            }
-        }
-        ImGui::EndPopup();
+    // Audio track button — opens the full track picker modal.
+    if (ImGui::Button(ICON_LC_LANGUAGES "##audiopop", ImVec2(btnW, 0))) {
+        if (m_audioPickerCb) m_audioPickerCb();
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Audio tracks");
     ImGui::SameLine(0, spacing);
 
-    // Subtitle popup
-    if (ImGui::Button(ICON_LC_CAPTIONS "##subpop", ImVec2(btnW, 0)))
-        ImGui::OpenPopup("##subpopup");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtitles");
-    if (ImGui::BeginPopup("##subpopup")) {
-        const auto& subs = m_player->getSubtitleTracks();
-        bool subVis = m_player->areSubtitlesVisible();
-        if (ImGui::Checkbox("Visible", &subVis))
-            m_player->toggleSubtitles();
-
-        ImGui::Separator();
-
-        int currentSubId = m_player->getCurrentSubtitleTrackId();
-        if (ImGui::Selectable("Off", currentSubId == 0))
-            m_player->setSubtitleTrack(0);
-        for (const auto& s : subs) {
-            char label[256];
-            snprintf(label, sizeof(label), "#%d %s%s%s%s",
-                     s.id,
-                     s.title.empty() ? "" : s.title.c_str(),
-                     s.title.empty() ? "" : "  ",
-                     s.lang.empty()  ? "" : (std::string("[") + s.lang + "]  ").c_str(),
-                     s.codec.c_str());
-            bool sel = (s.id == currentSubId);
-            if (ImGui::Selectable(label, sel))
-                m_player->setSubtitleTrack(s.id);
-        }
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Sync");
-        float delay = (float)m_player->getSubDelay();
-        ImGui::SetNextItemWidth(160.0f);
-        if (ImGui::SliderFloat("##subdelay", &delay, -10.0f, 10.0f, "%+.2f s"))
-            m_player->adjustSubDelay(delay - (float)m_player->getSubDelay());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Reset")) m_player->resetSubDelay();
-
-        if (ImGui::Button(ICON_LC_FILE_PLUS "  Load file...")) {
-#ifdef _WIN32
-            char filePath[MAX_PATH] = {0};
-            OPENFILENAMEA ofn = {0};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.lpstrFilter = "Subtitle Files\0*.srt;*.ass;*.ssa;*.sub;*.vtt\0All Files\0*.*\0";
-            ofn.lpstrFile = filePath;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            ofn.lpstrTitle = "Load Subtitle File";
-            if (GetOpenFileNameA(&ofn)) {
-                m_player->loadSubtitleFile(filePath);
-            }
-#endif
-        }
-        ImGui::EndPopup();
+    // Subtitle button — opens the subtitle picker modal (also exposes
+    // visibility, sync delay and external-file load).
+    if (ImGui::Button(ICON_LC_CAPTIONS "##subpop", ImVec2(btnW, 0))) {
+        if (m_subPickerCb) m_subPickerCb();
     }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtitles");
 
     // Right-aligned: fullscreen + controls drawer
     {

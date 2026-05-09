@@ -9,6 +9,12 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
+#endif
 
 namespace {
 
@@ -47,6 +53,26 @@ std::string layoutLabel(const AudioTrack& t) {
             return b;
         }
     }
+}
+
+// Pretty codec for subtitle streams.
+std::string subCodecLabel(const SubtitleTrack& s) {
+    static const std::unordered_map<std::string, std::string> map = {
+        {"subrip",                "SubRip"},
+        {"ass",                   "Advanced SubStation"},
+        {"ssa",                   "SubStation Alpha"},
+        {"webvtt",                "WebVTT"},
+        {"hdmv_pgs_subtitle",     "PGS (Blu-ray)"},
+        {"dvd_subtitle",          "VobSub (DVD)"},
+        {"dvb_subtitle",          "DVB"},
+        {"mov_text",              "Mov Text"},
+    };
+    std::string lc = s.codec;
+    std::transform(lc.begin(), lc.end(), lc.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    auto it = map.find(lc);
+    if (it != map.end()) return it->second;
+    return s.codec.empty() ? std::string("Subtitle") : s.codec;
 }
 
 // Pretty codec.  mpv reports lowercase identifiers like "truehd",
@@ -266,11 +292,148 @@ bool drawCard(const AudioTrack& t, float w, float h) {
     return clicked;
 }
 
+// Card for a subtitle track.  Same chrome as the audio card so the modal
+// reads the same in either mode, just with subtitle-relevant info on it.
+bool drawSubCard(const SubtitleTrack& t, float w, float h) {
+    ImGui::PushID(0x10000 | t.id);  // separate ID-space from audio cards
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    ImGui::InvisibleButton("##subcard", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool clicked = ImGui::IsItemActivated();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 bg      = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
+                                                     : ImGuiCol_FrameBg);
+    const ImU32 border  = ImGui::GetColorU32(hovered ? ImGuiCol_Text
+                                                     : ImGuiCol_Border);
+    const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImU32 colDim  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const ImVec2 pmax(origin.x + w, origin.y + h);
+
+    dl->AddRectFilled(origin, pmax, bg, 6.0f);
+    dl->AddRect(origin, pmax, border, 6.0f, 0, hovered ? 1.5f : 1.0f);
+
+    dl->PushClipRect(ImVec2(origin.x + 4, origin.y + 4),
+                     ImVec2(pmax.x - 4, pmax.y - 4), true);
+
+    const float lh   = ImGui::GetTextLineHeight();
+    const float padX = 14.0f;
+    const float padY = 12.0f;
+    float       yc   = origin.y + padY;
+
+    const std::string codec = subCodecLabel(t);
+    dl->AddText(ImVec2(origin.x + padX, yc), colText, codec.c_str());
+    yc += lh + 6.0f;
+
+    if (!t.title.empty()) {
+        std::string title = t.title;
+        const size_t maxLen = 36;
+        if (title.size() > maxLen)
+            title = title.substr(0, maxLen - 1) + "\xe2\x80\xa6";
+        dl->AddText(ImVec2(origin.x + padX, yc), colDim, title.c_str());
+        yc += lh + 8.0f;
+    } else {
+        yc += 2.0f;
+    }
+
+    const ImU32 sand = IM_COL32(210, 193, 182, 255);
+    const ImU32 deep = IM_COL32( 27,  60,  83, 255);
+    const TagStyle tagLang    = { IM_COL32(150, 110,  90, 255), sand, 0 };
+    const TagStyle tagDefault = { IM_COL32(210, 178,  95, 255), deep, 0 };
+    const TagStyle tagForced  = { IM_COL32(180,  90,  80, 255), sand, 0 };
+
+    struct TagEntry { std::string text; const TagStyle* style; };
+    std::vector<TagEntry> tags;
+    {
+        std::string lang = langLabel(t.lang);
+        if (!lang.empty()) {
+            char b[64]; snprintf(b, sizeof(b), ICON_LC_LANGUAGES "  %s",
+                                  lang.c_str());
+            tags.push_back({b, &tagLang});
+        }
+    }
+    if (t.isDefault) tags.push_back({ICON_LC_STAR "  Default", &tagDefault});
+    if (t.isForced)  tags.push_back({"Forced",                  &tagForced});
+
+    const float gapX = 6.0f, gapY = 6.0f;
+    const float tagH = lh + 6.0f;
+    const float maxX = origin.x + w - padX;
+    float       cx   = origin.x + padX;
+    for (const auto& tag : tags) {
+        const ImVec2 ts = ImGui::CalcTextSize(tag.text.c_str());
+        const float tw  = ts.x + 16.0f;
+        if (cx + tw > maxX) { cx = origin.x + padX; yc += tagH + gapY; }
+        if (yc + tagH > origin.y + h - padY) break;
+        drawTag(dl, ImVec2(cx, yc), tag.text.c_str(), *tag.style);
+        cx += tw + gapX;
+    }
+
+    dl->PopClipRect();
+    ImGui::PopID();
+    return clicked;
+}
+
+// Card representing "subtitles off" — visually identical chrome but with
+// a single muted line so it sits naturally as the first option in the
+// subtitle grid.
+bool drawSubOffCard(float w, float h, bool selected) {
+    ImGui::PushID("##suboff");
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##suboffbtn", ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool clicked = ImGui::IsItemActivated();
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 bg      = ImGui::GetColorU32(selected ? ImGuiCol_HeaderActive
+                                          : (hovered  ? ImGuiCol_FrameBgHovered
+                                                      : ImGuiCol_FrameBg));
+    const ImU32 border  = ImGui::GetColorU32(hovered || selected
+                                              ? ImGuiCol_Text
+                                              : ImGuiCol_Border);
+    const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImU32 colDim  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const ImVec2 pmax(origin.x + w, origin.y + h);
+
+    dl->AddRectFilled(origin, pmax, bg, 6.0f);
+    dl->AddRect(origin, pmax, border, 6.0f, 0, hovered ? 1.5f : 1.0f);
+
+    const float padX = 14.0f, padY = 12.0f;
+    const float lh   = ImGui::GetTextLineHeight();
+    dl->AddText(ImVec2(origin.x + padX, origin.y + padY),
+                colText, ICON_LC_X "  Off");
+    dl->AddText(ImVec2(origin.x + padX, origin.y + padY + lh + 6.0f),
+                colDim, "No subtitles displayed");
+
+    ImGui::PopID();
+    return clicked;
+}
+
 } // anonymous namespace
 
 TrackPicker::TrackPicker(MpvPlayer* player) : m_player(player) {}
 
-void TrackPicker::open() { m_requestOpen = true; }
+void TrackPicker::open(Mode mode, bool isAutoLoad) {
+    m_mode        = mode;
+    m_isAutoLoad  = isAutoLoad;
+    m_requestOpen = true;
+}
+
+namespace {
+
+// Layout helper: compute card width using the same responsive
+// "repeat(auto-fit, minmax(minW, 1fr))" pattern in both modes.
+struct GridDims { int cols; float cardW; };
+GridDims computeGrid(float availW, float spacingX,
+                      float minCardW, float maxCardW) {
+    int cols = std::max(1,
+        (int)((availW + spacingX) / (minCardW + spacingX)));
+    float cardW = (availW - spacingX * (cols - 1)) / (float)cols;
+    if (cardW > maxCardW) cardW = maxCardW;
+    return {cols, cardW};
+}
+
+} // anonymous namespace
 
 void TrackPicker::render() {
     if (!m_player) return;
@@ -282,7 +445,6 @@ void TrackPicker::render() {
     }
     if (!m_isOpen) return;
 
-    // Sized as a comfortable but not full-screen modal.
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImVec2 size(std::min(1200.0f, vp->Size.x * 0.9f),
                  std::min(680.0f,  vp->Size.y * 0.85f));
@@ -292,66 +454,58 @@ void TrackPicker::render() {
     ImGui::SetNextWindowSize(size, ImGuiCond_Always);
 
     bool open = true;
-    if (ImGui::BeginPopupModal("##track_picker", &open,
-                                ImGuiWindowFlags_NoTitleBar |
-                                ImGuiWindowFlags_NoResize   |
-                                ImGuiWindowFlags_NoMove     |
-                                ImGuiWindowFlags_NoScrollbar)) {
-        // Header
-        ImGui::Text(ICON_LC_AUDIO_LINES "  Select audio track");
-        std::string fname = m_player->getFilename();
-        if (!fname.empty()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("·  %s", fname.c_str());
-        }
-        ImGui::Separator();
+    if (!ImGui::BeginPopupModal("##track_picker", &open,
+                                 ImGuiWindowFlags_NoTitleBar |
+                                 ImGuiWindowFlags_NoResize   |
+                                 ImGuiWindowFlags_NoMove     |
+                                 ImGuiWindowFlags_NoScrollbar)) {
+        if (!open) m_isOpen = false;
+        return;
+    }
 
+    // Header
+    const char* title = (m_mode == Mode::Subtitle)
+                          ? ICON_LC_CAPTIONS "  Select subtitle"
+                          : ICON_LC_AUDIO_LINES "  Select audio track";
+    ImGui::Text("%s", title);
+    std::string fname = m_player->getFilename();
+    if (!fname.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("\xc2\xb7  %s", fname.c_str());
+    }
+    ImGui::Separator();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+
+    if (m_mode == Mode::Audio) {
         const auto& tracks = m_player->getAudioTracks();
         if (tracks.empty()) {
             ImGui::Spacing();
             ImGui::TextDisabled("No audio tracks in this file.");
         } else {
-            ImGuiStyle& style = ImGui::GetStyle();
-
-            // Reserve space for the footer so the grid scrolls if needed.
-            // Footer layout: Separator (≈ ItemSpacing.y * 2 + 1) followed
-            // by a Text/Button row sharing one frame height.  Reserving
-            // only a single frame height (the original mistake) left the
-            // modal a few pixels short and gave it its own scrollbar.
             const float footerH = ImGui::GetFrameHeightWithSpacing() +
                                    style.ItemSpacing.y * 2.0f + 4.0f;
-            // Drop the child window's own padding so the responsive math
-            // gets every pixel of horizontal real estate the modal offers.
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             ImGui::BeginChild("##cards", ImVec2(0, -footerH), false);
             ImGui::PopStyleVar();
 
-            // Responsive grid à la CSS `repeat(auto-fit, minmax(minW, 1fr))`:
-            // pick as many columns as fit at minCardW, then stretch each
-            // card so the row fills the available width — no awkward gap
-            // on the right that begs the eye for "one more card".
-            const float minCardW = 240.0f;
-            const float maxCardW = 340.0f;
-            const float cardH    = 170.0f;
-            const float spacingX = style.ItemSpacing.x;
-            const float availW   = ImGui::GetContentRegionAvail().x;
-            int cols = std::max(1,
-                (int)((availW + spacingX) / (minCardW + spacingX)));
-            float cardW = (availW - spacingX * (cols - 1)) / (float)cols;
-            if (cardW > maxCardW) cardW = maxCardW;
+            const float cardH = 170.0f;
+            const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
+                                        style.ItemSpacing.x, 240.0f, 340.0f);
 
             int picked = -1;
             for (size_t i = 0; i < tracks.size(); i++) {
-                if ((int)(i % cols) != 0)
-                    ImGui::SameLine();
-                if (drawCard(tracks[i], cardW, cardH))
+                if ((int)(i % g.cols) != 0) ImGui::SameLine();
+                if (drawCard(tracks[i], g.cardW, cardH))
                     picked = (int)i;
             }
             ImGui::EndChild();
 
             ImGui::Separator();
-            ImGui::TextDisabled("Click a track to start playback.");
-            float btnW = 100.0f;
+            ImGui::TextDisabled(m_isAutoLoad
+                ? "Click a track to start playback."
+                : "Click a track to switch.");
+            const float btnW = 100.0f;
             ImGui::SameLine(ImGui::GetContentRegionAvail().x +
                              ImGui::GetCursorPosX() - btnW);
             if (ImGui::Button("Cancel", ImVec2(btnW, 0))) {
@@ -361,14 +515,98 @@ void TrackPicker::render() {
 
             if (picked >= 0 && picked < (int)tracks.size()) {
                 m_player->setAudioTrack(tracks[picked].id);
-                m_player->play();
+                if (m_isAutoLoad) m_player->play();
                 ImGui::CloseCurrentPopup();
                 m_isOpen = false;
             }
         }
+    } else {
+        // Subtitle mode.
+        const auto& subs = m_player->getSubtitleTracks();
+        const int currentSubId = m_player->getCurrentSubtitleTrackId();
 
-        ImGui::EndPopup();
-    } else if (!open) {
-        m_isOpen = false;
+        // Footer here is two rows: a strip with visibility / delay /
+        // load-file controls, separator, then the Text + Cancel button.
+        const float strip1H = ImGui::GetFrameHeightWithSpacing();
+        const float strip2H = ImGui::GetFrameHeightWithSpacing();
+        const float footerH = strip1H + strip2H +
+                               style.ItemSpacing.y * 4.0f + 4.0f;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::BeginChild("##subcards", ImVec2(0, -footerH), false);
+        ImGui::PopStyleVar();
+
+        const float cardH = 130.0f;     // shorter — sub cards carry less
+        const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
+                                    style.ItemSpacing.x, 220.0f, 320.0f);
+
+        int picked = -2;   // -2 = no pick, -1 = "Off", >=0 = sub index
+        // "Off" card always first.
+        if (drawSubOffCard(g.cardW, cardH, currentSubId == 0))
+            picked = -1;
+        for (size_t i = 0; i < subs.size(); i++) {
+            int idx = (int)(i + 1);            // +1 because Off is at 0
+            if ((idx % g.cols) != 0) ImGui::SameLine();
+            if (drawSubCard(subs[i], g.cardW, cardH))
+                picked = (int)i;
+        }
+        ImGui::EndChild();
+
+        // Footer strip 1: visibility toggle + delay slider + reset
+        bool subVis = m_player->areSubtitlesVisible();
+        if (ImGui::Checkbox("Visible", &subVis))
+            m_player->toggleSubtitles();
+        ImGui::SameLine(0, style.ItemSpacing.x * 2);
+
+        ImGui::TextDisabled("Sync");
+        ImGui::SameLine();
+        float delay = (float)m_player->getSubDelay();
+        ImGui::SetNextItemWidth(220.0f);
+        if (ImGui::SliderFloat("##subdelay", &delay, -10.0f, 10.0f, "%+.2f s"))
+            m_player->adjustSubDelay(delay - (float)m_player->getSubDelay());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset"))
+            m_player->resetSubDelay();
+        ImGui::SameLine(0, style.ItemSpacing.x * 2);
+
+        if (ImGui::Button(ICON_LC_FILE_PLUS "  Load file...")) {
+#ifdef _WIN32
+            char filePath[MAX_PATH] = {0};
+            OPENFILENAMEA ofn = {0};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.lpstrFilter = "Subtitle Files\0*.srt;*.ass;*.ssa;*.sub;*.vtt\0All Files\0*.*\0";
+            ofn.lpstrFile = filePath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+            ofn.lpstrTitle = "Load Subtitle File";
+            if (GetOpenFileNameA(&ofn))
+                m_player->loadSubtitleFile(filePath);
+#endif
+        }
+
+        ImGui::Separator();
+
+        ImGui::TextDisabled("Click a card to switch the active subtitle.");
+        const float btnW = 100.0f;
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x +
+                         ImGui::GetCursorPosX() - btnW);
+        if (ImGui::Button("Close", ImVec2(btnW, 0))) {
+            ImGui::CloseCurrentPopup();
+            m_isOpen = false;
+        }
+
+        // Apply selection.
+        if (picked == -1) {
+            m_player->setSubtitleTrack(0);
+            ImGui::CloseCurrentPopup();
+            m_isOpen = false;
+        } else if (picked >= 0 && picked < (int)subs.size()) {
+            m_player->setSubtitleTrack(subs[picked].id);
+            ImGui::CloseCurrentPopup();
+            m_isOpen = false;
+        }
     }
+
+    ImGui::EndPopup();
+    if (!open) m_isOpen = false;
 }

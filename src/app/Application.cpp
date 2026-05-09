@@ -133,6 +133,12 @@ bool Application::init(int argc, char* argv[]) {
     m_transportBar->setControlsCallback([this]() { toggleControlPanel(); });
 
     m_trackPicker = std::make_unique<TrackPicker>(m_player.get());
+    m_transportBar->setAudioPickerCallback([this]() {
+        m_trackPicker->open(TrackPicker::Mode::Audio,    /*isAutoLoad=*/false);
+    });
+    m_transportBar->setSubPickerCallback([this]() {
+        m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
+    });
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
@@ -357,7 +363,7 @@ void Application::update(float dt) {
     if (m_player && m_trackPicker &&
         m_player->consumeFreshFileLoaded() &&
         !m_player->getAudioTracks().empty()) {
-        m_trackPicker->open();
+        m_trackPicker->open(TrackPicker::Mode::Audio, /*isAutoLoad=*/true);
     }
 }
 
