@@ -239,13 +239,15 @@ jobs:
 
           mkdir -p package
 
-          # Main executables
-          cp build/bin/mpv-sofa.exe package/
+          # CMake stages mpv-sofa.exe + assets directly into dist/ via
+          # CMAKE_RUNTIME_OUTPUT_DIRECTORY, so the binary doesn't live
+          # under build/bin/.
+          cp dist/mpv-sofa.exe package/
           cp mpv-src/build/libmpv-2.dll package/
 
           # Copy assets (shaders etc., but not large SOFA files)
-          if [ -d build/bin/assets ]; then
-            cp -r build/bin/assets package/
+          if [ -d dist/assets ]; then
+            cp -r dist/assets package/
           fi
 
           # Also copy custom FFmpeg DLLs
