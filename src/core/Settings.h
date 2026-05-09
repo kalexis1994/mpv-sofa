@@ -44,4 +44,11 @@ void setPreferredSubLang(std::string lang);
 // aliases ("eng" ↔ "en", "spa" ↔ "es", "fre"/"fra" ↔ "fr", …).
 bool langMatches(const std::string& trackLang, const std::string& prefLang);
 
+// Last room preset chosen from the Control Panel.  Persisted only as
+// a UI hint — the actual room geometry / reverb values are saved as
+// individual fields and may have drifted from the named preset if the
+// user customised them.
+int  roomPreset();
+void setRoomPreset(int idx);
+
 } // namespace Settings

@@ -1,5 +1,6 @@
 #include "ControlPanel.h"
 #include "core/SharedState.h"
+#include "core/Settings.h"
 #include "audio/MpvPlayer.h"
 #include <imgui.h>
 #include <cstring>
@@ -20,10 +21,6 @@ static const char* speakerNames[] = {
     "Back Left (BL)", "Back Right (BR)", "Side Left (SL)", "Side Right (SR)",
     "Top Front Left (TFL)", "Top Front Right (TFR)",
     "Top Back Left (TBL)", "Top Back Right (TBR)"
-};
-
-static const char* layoutNames[] = {
-    "7.1.4 Spatial", "7.1 Surround", "6.1 Surround", "5.1 Surround", "Stereo"
 };
 
 // Per-channel label lookup.  7.1.4 uses the full speakerNames[] above; 6.1
@@ -470,65 +467,40 @@ void ControlPanel::render(bool* p_open) {
 
     ImGui::Separator();
 
-    // Auto-sync the layout dropdown to whatever the audio filter is actually
-    // processing.  When mpv opens a track the filter writes num_channels to
-    // SharedState; we reflect that in the UI so the dropdown doesn't lie
-    // about the current layout.  Only updates when num_channels changes, so
-    // manual dropdown edits aren't clobbered every frame.
+    // Speaker layout — read-only display of what the audio filter is
+    // actually processing.  The track determines the channel count, not
+    // the user; offering an override here would just silently drop the
+    // surplus channels (and lose surround / height content) since the
+    // filter has no real downmix path of its own.  Use the Room Preset
+    // below to reposition speakers in space.
     {
         int streamCh = atomic_load(&m_state->num_channels);
-        if (streamCh != m_lastSeenNumChannels) {
-            m_lastSeenNumChannels = streamCh;
-            int autoLayout = -1;
-            switch (streamCh) {
-                case 2:  autoLayout = 4; break;  // Stereo
-                case 6:  autoLayout = 3; break;  // 5.1
-                case 7:  autoLayout = 2; break;  // 6.1
-                case 8:  autoLayout = 1; break;  // 7.1
-                case 12: autoLayout = 0; break;  // 7.1.4
-                // 10 (7.1.2), 16 (9.1.6), etc. — leave dropdown alone.
-            }
-            if (autoLayout >= 0)
-                m_selectedLayout = autoLayout;
+        const char* name = "—";
+        switch (streamCh) {
+            case 1:  name = "Mono";   break;
+            case 2:  name = "Stereo"; break;
+            case 3:  name = "2.1";    break;
+            case 6:  name = "5.1";    break;
+            case 7:  name = "6.1";    break;
+            case 8:  name = "7.1";    break;
+            case 10: name = "7.1.2";  break;
+            case 12: name = "7.1.4";  break;
+            case 14: name = "7.1.6";  break;
+            case 16: name = "9.1.6";  break;
+            default: break;
         }
+        ImGui::Text("Speaker Layout:");
+        ImGui::SameLine();
+        if (streamCh > 0)
+            ImGui::TextDisabled("%s  \xc2\xb7  %d ch", name, streamCh);
+        else
+            ImGui::TextDisabled("(no audio loaded)");
     }
 
-    // Speaker layout (channel count)
-    ImGui::Text("Speaker Layout:");
-    if (ImGui::Combo("##layout", &m_selectedLayout, layoutNames,
-                      (int)(sizeof(layoutNames) / sizeof(layoutNames[0])))) {
-        int numCh = 12;
-        switch (m_selectedLayout) {
-            case 0: numCh = 12; break; // 7.1.4
-            case 1: numCh = 8;  break; // 7.1
-            case 2: numCh = 7;  break; // 6.1
-            case 3: numCh = 6;  break; // 5.1
-            case 4: numCh = 2;  break; // Stereo
-        }
-        const RoomPreset& room = roomPresets[m_selectedRoom];
-        if (numCh == 7) {
-            // 6.1 = FL FR FC LFE BC SL SR.  Derive BC from the preset's back
-            // wall geometry (reuse BL distance/elevation but force az=180°)
-            // so the back-centre speaker sits where the rear wall is.
-            m_state->speaker_pos[0] = room.positions[0];               // FL
-            m_state->speaker_pos[1] = room.positions[1];               // FR
-            m_state->speaker_pos[2] = room.positions[2];               // FC
-            m_state->speaker_pos[3] = room.positions[3];               // LFE
-            HrtfPosition bc = room.positions[4];                        // use BL as base
-            bc.azimuth = 180.0f;
-            m_state->speaker_pos[4] = bc;                               // BC
-            m_state->speaker_pos[5] = room.positions[6];               // SL
-            m_state->speaker_pos[6] = room.positions[7];               // SR
-        } else {
-            for (int i = 0; i < numCh && i < 12; i++)
-                m_state->speaker_pos[i] = room.positions[i];
-        }
-        atomic_store(&m_state->num_channels, numCh);
-        atomic_store(&m_state->num_bed_channels, numCh);
-        atomic_store(&m_state->speaker_pos_changed, 1);
-    }
-
-    // Room/environment preset
+    // Room/environment preset.  Settings is the source of truth for the
+    // index so it round-trips through mpv-sofa.ini; the geometry / reverb
+    // values themselves are persisted as their own atomic fields.
+    int roomIdx = Settings::roomPreset();
     ImGui::Text("Room Preset:");
     auto roomGetter = [](void* data, int idx, const char** out) -> bool {
         (void)data;
@@ -536,8 +508,9 @@ void ControlPanel::render(bool* p_open) {
         *out = roomPresets[idx].name;
         return true;
     };
-    if (ImGui::Combo("##room", &m_selectedRoom, roomGetter, nullptr, numRoomPresets)) {
-        const RoomPreset& room = roomPresets[m_selectedRoom];
+    if (ImGui::Combo("##room", &roomIdx, roomGetter, nullptr, numRoomPresets)) {
+        Settings::setRoomPreset(roomIdx);
+        const RoomPreset& room = roomPresets[roomIdx];
         int numCh = atomic_load(&m_state->num_channels);
         for (int i = 0; i < numCh && i < 12; i++)
             m_state->speaker_pos[i] = room.positions[i];
@@ -565,10 +538,10 @@ void ControlPanel::render(bool* p_open) {
         // Large Format=3, Giant Screen=4).  Perforated projection screens
         // add the subtle HF rolloff that cues "speakers behind a screen".
         atomic_store(&m_state->screen_baffling,
-                     (m_selectedRoom >= 2 && m_selectedRoom <= 4) ? 1 : 0);
+                     (roomIdx >= 2 && roomIdx <= 4) ? 1 : 0);
     }
-    if (m_selectedRoom >= 0 && m_selectedRoom < numRoomPresets) {
-        const auto& room = roomPresets[m_selectedRoom];
+    if (roomIdx >= 0 && roomIdx < numRoomPresets) {
+        const auto& room = roomPresets[roomIdx];
         ImGui::TextDisabled("%s", room.description);
         // Compute and show RT60 from Sabine equation
         float volume = room.width * room.depth * room.height;
@@ -920,14 +893,14 @@ void ControlPanel::render(bool* p_open) {
 
     ImGui::Separator();
 
-    // Reset button
+    // Reset button — restores Home Theater positions but does NOT touch
+    // num_channels (the loaded track owns that).
     if (ImGui::Button("Reset to Default")) {
-        m_selectedLayout = 0;
-        m_selectedRoom = 1; // Home Theater
-        const RoomPreset& room = roomPresets[m_selectedRoom];
-        atomic_store(&m_state->num_channels, 12);
-        atomic_store(&m_state->num_bed_channels, 12);
-        for (int i = 0; i < 12; i++)
+        Settings::setRoomPreset(1); // Home Theater
+        const RoomPreset& room = roomPresets[1];
+        int numCh = atomic_load(&m_state->num_channels);
+        if (numCh <= 0 || numCh > 12) numCh = 12;
+        for (int i = 0; i < numCh; i++)
             m_state->speaker_pos[i] = room.positions[i];
         atomic_store(&m_state->speaker_pos_changed, 1);
 

@@ -67,6 +67,9 @@ struct Snapshot {
     std::string pref_audio_lang;
     std::string pref_sub_lang;
 
+    // Last room preset chosen (UI hint only).
+    int room_preset = 1;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -102,6 +105,7 @@ struct Snapshot {
         }
         if (pref_audio_lang != o.pref_audio_lang) return false;
         if (pref_sub_lang   != o.pref_sub_lang)   return false;
+        if (room_preset     != o.room_preset)     return false;
         return true;
     }
 };
@@ -113,6 +117,7 @@ std::string g_iniPath;
 // without dragging the full snapshot around.
 std::string g_prefAudioLang;
 std::string g_prefSubLang;
+int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
 
 Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     Snapshot snap;
@@ -157,6 +162,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
 
     snap.pref_audio_lang = g_prefAudioLang;
     snap.pref_sub_lang   = g_prefSubLang;
+    snap.room_preset     = g_roomPreset;
     return snap;
 }
 
@@ -317,6 +323,7 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             atomic_store(&state->room_height,     getF(kv, "height",     atomic_load(&state->room_height)));
             atomic_store(&state->room_absorption, getF(kv, "absorption", atomic_load(&state->room_absorption)));
             atomic_store(&state->room_changed, 1);
+            g_roomPreset = getI(kv, "preset", g_roomPreset);
         }
         if (auto it = ini.find("spatial"); it != ini.end()) {
             const KV& kv = it->second;
@@ -398,6 +405,7 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "\n");
 
     fprintf(f, "[room]\n");
+    fprintf(f, "preset=%d\n",     g_roomPreset);
     fprintf(f, "width=%g\n",      atomic_load(&state->room_width));
     fprintf(f, "depth=%g\n",      atomic_load(&state->room_depth));
     fprintf(f, "height=%g\n",     atomic_load(&state->room_height));
@@ -484,12 +492,16 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
 
     g_prefAudioLang.clear();
     g_prefSubLang.clear();
+    g_roomPreset = 1;
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
 const std::string& Settings::preferredSubLang()   { return g_prefSubLang;   }
 void Settings::setPreferredAudioLang(std::string lang) { g_prefAudioLang = std::move(lang); }
 void Settings::setPreferredSubLang  (std::string lang) { g_prefSubLang   = std::move(lang); }
+
+int  Settings::roomPreset()             { return g_roomPreset; }
+void Settings::setRoomPreset(int idx)   { g_roomPreset = idx;  }
 
 bool Settings::langMatches(const std::string& trackLang,
                             const std::string& prefLang) {

@@ -47,12 +47,6 @@ private:
     int* m_selectedSpeaker = nullptr;
     MpvPlayer* m_player = nullptr;
     char m_sofaPath[512] = {};
-    int m_selectedLayout = 0;  // 0=7.1.4, 1=7.1, 2=6.1, 3=5.1, 4=stereo
-    int m_selectedRoom = 1;    // 0=studio, 1=home, 2=cinema, 3=concert
-
-    // Auto-sync the layout dropdown whenever the audio filter reports a
-    // different channel count (e.g. when a new file/track is opened).
-    int m_lastSeenNumChannels = -1;
 
     // HRTF ear profiles
     std::vector<HrtfProfile> m_profiles;
