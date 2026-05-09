@@ -67,6 +67,11 @@ private:
     int m_selectedSpeaker = -1;  // -1 = none
     bool m_draggingSpeaker = false;
 
+    // 3D visualizer panel — hidden by default, toggled via View menu or F2.
+    bool m_show3DViz = false;
+    bool m_f2KeyHeld = false;
+    void toggle3DViz() { m_show3DViz = !m_show3DViz; }
+
     // Video fullscreen mode
     bool m_videoFullscreen = false;
     bool m_fullscreenKeyHeld = false;

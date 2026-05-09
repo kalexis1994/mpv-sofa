@@ -268,6 +268,16 @@ void Application::processInput() {
     if (m_videoFullscreen && glfwGetKey(handle, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
         toggleVideoFullscreen();
     }
+
+    // F2: toggle 3D visualizer panel
+    if (glfwGetKey(handle, GLFW_KEY_F2) == GLFW_PRESS) {
+        if (!m_f2KeyHeld) {
+            toggle3DViz();
+            m_f2KeyHeld = true;
+        }
+    } else {
+        m_f2KeyHeld = false;
+    }
 }
 
 void Application::update(float dt) {
@@ -284,7 +294,11 @@ void Application::update(float dt) {
 void Application::render() {
     // Video is rendered in renderUI() after FBO resize to avoid content erasure
 
-    // Render 3D visualizer to FBO
+    // Render 3D visualizer to FBO only when its panel is visible — saves a
+    // pass over every speaker/object every frame when the user has it hidden.
+    if (!m_show3DViz)
+        return;
+
     glBindFramebuffer(GL_FRAMEBUFFER, m_vizFBO);
     glViewport(0, 0, m_vizWidth, m_vizHeight);
     glClearColor(0.12f, 0.12f, 0.15f, 1.0f);
@@ -369,6 +383,15 @@ void Application::renderUI() {
 
     // --- Normal docked mode ---
 
+    // Top menu bar — exposes panels the user might want to toggle.
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("View")) {
+            ImGui::MenuItem("3D Visualizer", "F2", &m_show3DViz);
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
     // Enable docking
     ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
@@ -430,8 +453,11 @@ void Application::renderUI() {
     }
     ImGui::End();
 
-    // 3D Visualizer panel
-    ImGui::Begin("HRTF Visualizer");
+    // 3D Visualizer panel — opt-in via View menu / F2.  When hidden we skip
+    // the whole Begin/End so ImGui collapses the slot and the control panel
+    // expands to fill the right side of the dockspace.
+    if (m_show3DViz) {
+    ImGui::Begin("HRTF Visualizer", &m_show3DViz);
     ImVec2 vizSize = ImGui::GetContentRegionAvail();
     if (vizSize.x > 0 && vizSize.y > 0) {
         int newW = (int)vizSize.x;
@@ -546,6 +572,7 @@ void Application::renderUI() {
         }
     }
     ImGui::End();
+    } // if (m_show3DViz)
 
     // Control panel
     m_controlPanel->render();
