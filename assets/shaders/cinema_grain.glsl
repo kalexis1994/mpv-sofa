@@ -68,6 +68,27 @@ vec3 perPixelNoise(vec2 p, float seed) {
     ) - 0.5;
 }
 
+// 5×5 isotropic Gaussian-blurred noise at a given spacing.  Sums of
+// independent uniform samples become Gaussian-distributed by the
+// Central Limit Theorem, so the output already approximates the
+// silver-halide statistics Newson/Galerne derive without paying for a
+// per-pixel Box-Muller transform.  Kernel spacing scales with `r` so a
+// larger value reads as coarser grain without ever introducing a grid.
+vec3 gaussianBlurNoise(vec2 px, float seed, float r) {
+    vec3 acc = vec3(0.0);
+    float wSum = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            float d2 = float(dx * dx + dy * dy);
+            float w  = exp(-d2 * 0.5);          // unit sigma in cells
+            vec2  offset = vec2(float(dx), float(dy)) * r;
+            acc  += perPixelNoise(px + offset, seed) * w;
+            wSum += w;
+        }
+    }
+    return acc / wSum;
+}
+
 vec4 hook() {
     vec4 col = HOOKED_texOff(0);
 
@@ -77,23 +98,18 @@ vec4 hook() {
     // frames land far apart in seed space (no visible "boil" pattern).
     float seed = mod(float(frame) * 7177.0 + 13.0, 9973.0);
 
-    // 3×3 Gaussian blur over per-pixel noise.  Kernel spacing scales
-    // with GRAIN_SIZE so larger grain reads as coarser without changing
-    // the underlying noise distribution.  Output is isotropic — no grid,
-    // no preferred direction.
-    float r = max(GRAIN_SIZE, 0.5);
-    vec3 acc = vec3(0.0);
-    float wSum = 0.0;
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            float d2 = float(dx * dx + dy * dy);
-            float w  = exp(-d2 * 0.5);            // sigma = 1 cell
-            vec2  offset = vec2(float(dx), float(dy)) * r;
-            acc  += perPixelNoise(px + offset, seed) * w;
-            wSum += w;
-        }
-    }
-    vec3 n = acc / wSum;
+    // Two-octave FBM: a dominant coarse layer plus a finer second
+    // octave at half scale and lower amplitude.  Real silver-halide
+    // grain has structure at multiple spatial frequencies; blending two
+    // independent Gaussian-blurred noise layers gives the output a
+    // richer texture than a single octave can.  Both layers share the
+    // same isotropic per-pixel noise base so neither introduces
+    // directional bias.
+    float r0 = max(GRAIN_SIZE, 0.5);
+    float r1 = r0 * 0.5;
+    vec3 n0 = gaussianBlurNoise(px, seed,         r0);
+    vec3 n1 = gaussianBlurNoise(px, seed + 137.0, r1);
+    vec3 n  = n0 * 0.7 + n1 * 0.3;
 
     // Per-channel decorrelation: chroma=0 collapses to a single luminance
     // pattern, chroma=1 keeps R/G/B fully independent.
