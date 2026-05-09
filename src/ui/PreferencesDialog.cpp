@@ -1,4 +1,5 @@
 #include "PreferencesDialog.h"
+#include "ControlPanel.h"
 #include "core/Settings.h"
 #include "audio/MpvPlayer.h"
 
@@ -56,7 +57,9 @@ bool langGetter(void* /*data*/, int idx, const char** out) {
 
 } // anonymous namespace
 
-PreferencesDialog::PreferencesDialog(MpvPlayer* player) : m_player(player) {}
+PreferencesDialog::PreferencesDialog(MpvPlayer* player,
+                                     ControlPanel* controlPanel)
+    : m_player(player), m_controlPanel(controlPanel) {}
 
 void PreferencesDialog::open() {
     m_audioIdx     = findLangIndex(Settings::preferredAudioLang());
@@ -71,15 +74,6 @@ void PreferencesDialog::render() {
         m_requestOpen = false;
     }
     if (!m_isOpen) return;
-
-    // Esc / gamepad B closes the page (matches the rest of the app's
-    // back-out gesture).  Done before Begin() so an Escape that lands
-    // on this frame closes immediately rather than waiting a frame.
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
-        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
-        m_isOpen = false;
-        return;
-    }
 
     // Shoulder buttons cycle tabs — LB previous, RB next, wrapping at
     // the ends so a TV-mode user never lands at a dead stop.  Re-arming
@@ -109,6 +103,40 @@ void PreferencesDialog::render() {
                  ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
 
+    // Three-level back navigation:
+    //   popup open  → B closes the popup (handled by ImGui in NewFrame)
+    //   focus body  → B bounces focus up to the active pill
+    //   focus pill  → B closes the page
+    //
+    // We can't use ImGui::Shortcut() here: with the body child using
+    // NavFlattened, the route doesn't fire when focus sits on a body
+    // widget.  Raw IsKeyPressed() works, but we have to be careful not
+    // to consume the same press twice — ImGui's own NavUpdateCancelRequest
+    // closes any open popup *during NewFrame*, before this code runs,
+    // so by the time we check OpenPopupStack the popup is already gone
+    // but the press edge is still readable.  Tracking the previous
+    // frame's popup count lets us detect that case and stay out of
+    // ImGui's way.
+    {
+        ImGuiContext* g = ImGui::GetCurrentContext();
+        const int  curPopupCount = g ? g->OpenPopupStack.Size : 0;
+        const bool popupJustClosed = curPopupCount < m_lastPopupCount;
+        const bool popupOpen       = curPopupCount > 0;
+        m_lastPopupCount = curPopupCount;
+
+        const bool cancelEdge =
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
+
+        if (cancelEdge && !popupOpen && !popupJustClosed) {
+            if (m_focusOnPill) {
+                m_isOpen = false;
+            } else {
+                m_freshlyShown = true;  // bounce up to the active pill
+            }
+        }
+    }
+
     renderHeader();
     ImGui::Spacing();
     renderTabs();
@@ -124,6 +152,8 @@ void PreferencesDialog::render() {
         case TAB_LANGUAGES:  renderLanguages();   break;
         case TAB_SUBTITLES:  renderSubtitles();   break;
         case TAB_DISPLAY:    renderDisplay();     break;
+        case TAB_SPATIAL:    renderSpatial();     break;
+        case TAB_EQ:         renderEq();          break;
         case TAB_AUDIO_SYNC: renderAudioSync();   break;
         case TAB_GRAIN:      renderCinemaGrain(); break;
         default: break;
@@ -165,6 +195,8 @@ void PreferencesDialog::renderTabs() {
         { ICON_LC_LANGUAGES,   "Languages"     },
         { ICON_LC_CAPTIONS,    "Subtitles"     },
         { ICON_LC_EYE,         "Display & HDR" },
+        { ICON_LC_EAR,         "Spatial"       },
+        { ICON_LC_HEADPHONES,  "Headphone EQ"  },
         { ICON_LC_AUDIO_LINES, "Audio sync"    },
         { ICON_LC_FILM,        "Cinema grain"  },
     };
@@ -187,6 +219,10 @@ void PreferencesDialog::renderTabs() {
     const float startX = ImGui::GetCursorPosX() +
                           std::max(0.0f, (avail - totalW) * 0.5f);
     ImGui::SetCursorPosX(startX);
+
+    // Reset before the loop so any pill that takes focus this frame
+    // can flip it back on.
+    m_focusOnPill = false;
 
     for (int i = 0; i < TAB_COUNT; i++) {
         const bool active = (m_currentTab == i);
@@ -224,6 +260,7 @@ bool PreferencesDialog::tabPill(const char* icon, const char* label, bool active
     const bool focused = ImGui::IsItemFocused();
     const bool pressed = ImGui::IsItemActivated();
     const bool emph    = hovered || focused;
+    if (focused) m_focusOnPill = true;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 pmax(origin.x + size.x, origin.y + size.y);
@@ -610,4 +647,20 @@ void PreferencesDialog::renderCinemaGrain() {
         Settings::setCinemaGrain(g);
         Settings::applyCinemaGrainToPlayer(m_player);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  Spatial / EQ — bodies live on ControlPanel so the same widgets can
+//  also be hosted from the 3D Visualizer panel without duplicating the
+//  state-binding logic for every atomic field on HrtfSharedState.
+// ──────────────────────────────────────────────────────────────────
+
+void PreferencesDialog::renderSpatial() {
+    if (m_controlPanel) m_controlPanel->renderSpatialContent();
+    else                ImGui::TextDisabled("(spatial controls unavailable)");
+}
+
+void PreferencesDialog::renderEq() {
+    if (m_controlPanel) m_controlPanel->renderEqContent();
+    else                ImGui::TextDisabled("(EQ controls unavailable)");
 }

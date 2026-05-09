@@ -403,23 +403,24 @@ void ControlPanel::loadProfile(int index) {
     atomic_store(&m_state->sofa_path_changed, 1);
 }
 
-void ControlPanel::render(bool* p_open) {
-    ImGui::Begin("Control Panel", p_open);
-
+void ControlPanel::renderSpatialContent() {
     // Scan profiles on first render
     if (!m_profilesScanned)
         scanProfiles();
 
-    // HRTF enable toggle
+    // HRTF master toggle + master volume share the top "essentials" row
+    // — the things you reach for most often live above any header.
     bool enabled = atomic_load(&m_state->hrtf_enabled) != 0;
     if (ImGui::Checkbox("HRTF Enabled", &enabled)) {
         atomic_store(&m_state->hrtf_enabled, enabled ? 1 : 0);
     }
+    {
+        float vol = atomic_load(&m_state->master_volume);
+        if (ImGui::SliderFloat("Master Volume", &vol, 0.0f, 1.5f, "%.2f"))
+            atomic_store(&m_state->master_volume, vol);
+    }
 
-    ImGui::Separator();
-
-    // --- HRTF Ear Profile selector ---
-    ImGui::Text("Ear Profile (HRTF):");
+    ImGui::SeparatorText("HRTF profile");
 
     if (m_profiles.empty()) {
         ImGui::TextDisabled("No .sofa files found in assets/hrtf/");
@@ -465,7 +466,7 @@ void ControlPanel::render(bool* p_open) {
         ImGui::TreePop();
     }
 
-    ImGui::Separator();
+    ImGui::SeparatorText("Speaker layout");
 
     // Speaker layout — read-only display of what the audio filter is
     // actually processing.  The track determines the channel count, not
@@ -489,13 +490,15 @@ void ControlPanel::render(bool* p_open) {
             case 16: name = "9.1.6";  break;
             default: break;
         }
-        ImGui::Text("Speaker Layout:");
+        ImGui::Text("Layout:");
         ImGui::SameLine();
         if (streamCh > 0)
             ImGui::TextDisabled("%s  \xc2\xb7  %d ch", name, streamCh);
         else
             ImGui::TextDisabled("(no audio loaded)");
     }
+
+    ImGui::SeparatorText("Room");
 
     // Room/environment preset.  Settings is the source of truth for the
     // index so it round-trips through mpv-sofa.ini; the geometry / reverb
@@ -553,10 +556,8 @@ void ControlPanel::render(bool* p_open) {
         ImGui::TextDisabled("Vol: %.0fm3  RT60: %.2fs", volume, rt60);
     }
 
-    ImGui::Separator();
+    ImGui::SeparatorText("Reverb");
 
-    // Room reverb controls
-    ImGui::Text("Room Reverb:");
     bool reverbOn = atomic_load(&m_state->reverb_enabled) != 0;
     if (ImGui::Checkbox("Reverb Enabled", &reverbOn)) {
         atomic_store(&m_state->reverb_enabled, reverbOn ? 1 : 0);
@@ -627,118 +628,58 @@ void ControlPanel::render(bool* p_open) {
         }
     }
 
-    // Headphone EQ — neutralises the headphone's own coloration so the
-    // HRTF reaches the ear with the intended response.  Drop AutoEQ
-    // ParametricEq.txt files into assets/headphone_eq/ to populate.
-    if (!m_hpEqScanned) scanHpEqs();
-    {
-        std::vector<const char*> labels;
-        labels.push_back("None");
-        for (const auto& f : m_hpEqFiles) {
-            size_t slash = f.find_last_of('/');
-            const char *name = (slash == std::string::npos)
-                                 ? f.c_str()
-                                 : f.c_str() + slash + 1;
-            labels.push_back(name);
-        }
-        int idx = m_selectedHpEq;
-        if (ImGui::Combo("Headphone EQ", &idx,
-                          labels.data(), (int)labels.size())) {
-            m_selectedHpEq = idx;
-            if (idx == 0) {
-                m_state->hp_eq_path[0] = '\0';
-            } else {
-                const std::string& p = m_hpEqFiles[idx - 1];
-                strncpy(m_state->hp_eq_path, p.c_str(),
-                        sizeof(m_state->hp_eq_path) - 1);
-                m_state->hp_eq_path[sizeof(m_state->hp_eq_path) - 1] = '\0';
+    ImGui::Spacing();
+
+    // Advanced HRTF / channel-order toggles — collapsed by default
+    // because most users won't ever touch them, but they live alongside
+    // the rest of the spatial pipeline so a power user doesn't have to
+    // hunt for them.  Headphone EQ + crossfeed are intentionally NOT
+    // here: they're post-processing on the binaural mix and have moved
+    // to the dedicated EQ tab.
+    if (ImGui::CollapsingHeader("Advanced")) {
+        // Channel order: SMPTE (Atmos / DCI / cinema) vs WAVE (raw 7.1 files).
+        // FFmpeg exposes Dolby content in WAVE order but the audio payload is
+        // still in SMPTE order — the SL/BL and SR/BR pairs end up at the wrong
+        // angle unless we swap them.  Toggling this swaps speaker positions 4↔6
+        // and 5↔7 in the shared state and signals the filter to reload HRIRs.
+        bool smpte = atomic_load(&m_state->channel_order_smpte) != 0;
+        if (ImGui::Checkbox("SMPTE channel order (Atmos / cinema)", &smpte)) {
+            atomic_store(&m_state->channel_order_smpte, smpte ? 1 : 0);
+            int numCh = atomic_load(&m_state->num_channels);
+            if (numCh == 7) {
+                HrtfPosition t = m_state->speaker_pos[4];
+                m_state->speaker_pos[4] = m_state->speaker_pos[5];
+                m_state->speaker_pos[5] = m_state->speaker_pos[6];
+                m_state->speaker_pos[6] = t;
+                atomic_store(&m_state->speaker_pos_changed, 1);
+            } else if (numCh >= 8) {
+                HrtfPosition t;
+                t = m_state->speaker_pos[4]; m_state->speaker_pos[4] = m_state->speaker_pos[6]; m_state->speaker_pos[6] = t;
+                t = m_state->speaker_pos[5]; m_state->speaker_pos[5] = m_state->speaker_pos[7]; m_state->speaker_pos[7] = t;
+                atomic_store(&m_state->speaker_pos_changed, 1);
             }
-            atomic_store(&m_state->hp_eq_changed, 1);
         }
-        bool hp_on = atomic_load(&m_state->hp_eq_enabled) != 0;
-        if (ImGui::Checkbox("Headphone EQ enabled", &hp_on)) {
-            atomic_store(&m_state->hp_eq_enabled, hp_on ? 1 : 0);
-        }
-    }
 
-    // Crossfeed (signed).  Positive = classical narrowing (dilutes HRTF cues,
-    // pulls sides back).  Negative = stereo widener (amplifies ILD, pushes
-    // sides outward).  Useful when a generic HRTF doesn't lateralise enough.
-    float xfeed = atomic_load(&m_state->crossfeed);
-    if (ImGui::SliderFloat("Crossfeed (broadband)", &xfeed, -0.3f, 0.3f, "%.2f")) {
-        atomic_store(&m_state->crossfeed, xfeed);
-    }
+        bool baffle = atomic_load(&m_state->screen_baffling) != 0;
+        if (ImGui::Checkbox("Screen baffling (cinema HF rolloff on FL/FR/FC)", &baffle))
+            atomic_store(&m_state->screen_baffling, baffle ? 1 : 0);
 
-    // Bauer crossfeed: LF-only contralateral bleed.  Fixes "frontals feel
-    // collapsed to one side" without blurring side/rear sources — the HF
-    // localisation cues stay intact.
-    float bauer = atomic_load(&m_state->bauer_crossfeed);
-    if (ImGui::SliderFloat("Bauer crossfeed (LF only)", &bauer, 0.0f, 0.5f, "%.2f")) {
-        atomic_store(&m_state->bauer_crossfeed, bauer);
-    }
+        bool pinna = atomic_load(&m_state->front_pinna_boost) != 0;
+        if (ImGui::Checkbox("Frontal pinna boost (anti front-back confusion)", &pinna))
+            atomic_store(&m_state->front_pinna_boost, pinna ? 1 : 0);
 
-    // Channel order: SMPTE (Atmos / DCI / cinema) vs WAVE (raw 7.1 files).
-    // FFmpeg exposes Dolby content in WAVE order but the audio payload is
-    // still in SMPTE order — the SL/BL and SR/BR pairs end up at the wrong
-    // angle unless we swap them.  Toggling this swaps speaker positions 4↔6
-    // and 5↔7 in the shared state and signals the filter to reload HRIRs.
-    bool smpte = atomic_load(&m_state->channel_order_smpte) != 0;
-    if (ImGui::Checkbox("SMPTE channel order (Atmos / cinema)", &smpte)) {
-        atomic_store(&m_state->channel_order_smpte, smpte ? 1 : 0);
-        int numCh = atomic_load(&m_state->num_channels);
-        if (numCh == 7) {
-            // 6.1 rotation: ch4→ch5→ch6→ch4 (SL, SR, BC) so the three tail
-            // positions match where Dolby places the audio in SMPTE order.
-            HrtfPosition t = m_state->speaker_pos[4];
-            m_state->speaker_pos[4] = m_state->speaker_pos[5];
-            m_state->speaker_pos[5] = m_state->speaker_pos[6];
-            m_state->speaker_pos[6] = t;
-            atomic_store(&m_state->speaker_pos_changed, 1);
-        } else if (numCh >= 8) {
-            HrtfPosition t;
-            t = m_state->speaker_pos[4]; m_state->speaker_pos[4] = m_state->speaker_pos[6]; m_state->speaker_pos[6] = t;
-            t = m_state->speaker_pos[5]; m_state->speaker_pos[5] = m_state->speaker_pos[7]; m_state->speaker_pos[7] = t;
+        bool nfc = atomic_load(&m_state->near_field_comp) != 0;
+        if (ImGui::Checkbox("Near-field compensation (close-source body)", &nfc))
+            atomic_store(&m_state->near_field_comp, nfc ? 1 : 0);
+
+        bool mph = atomic_load(&m_state->direct_min_phase) != 0;
+        if (ImGui::Checkbox("Direct HRIRs minimum-phase", &mph)) {
+            atomic_store(&m_state->direct_min_phase, mph ? 1 : 0);
             atomic_store(&m_state->speaker_pos_changed, 1);
         }
     }
 
-    // Screen baffling — simulate perforated cinema screen on FL/FR/FC.
-    bool baffle = atomic_load(&m_state->screen_baffling) != 0;
-    if (ImGui::Checkbox("Screen baffling (cinema HF rolloff on FL/FR/FC)", &baffle)) {
-        atomic_store(&m_state->screen_baffling, baffle ? 1 : 0);
-    }
-
-    // Frontal pinna boost — fights HRTF front/back confusion by injecting
-    // the characteristic pinna resonance of a frontal source.
-    bool pinna = atomic_load(&m_state->front_pinna_boost) != 0;
-    if (ImGui::Checkbox("Frontal pinna boost (anti front-back confusion)", &pinna)) {
-        atomic_store(&m_state->front_pinna_boost, pinna ? 1 : 0);
-    }
-
-    // Near-field compensation: LF shelf boost for sources <1.5m.
-    bool nfc = atomic_load(&m_state->near_field_comp) != 0;
-    if (ImGui::Checkbox("Near-field compensation (close-source body)", &nfc)) {
-        atomic_store(&m_state->near_field_comp, nfc ? 1 : 0);
-    }
-
-    // Minimum-phase HRIRs: smoother spatial transitions at the cost of
-    // discarding the natural-phase response of the SOFA measurements.
-    bool mph = atomic_load(&m_state->direct_min_phase) != 0;
-    if (ImGui::Checkbox("Direct HRIRs minimum-phase", &mph)) {
-        atomic_store(&m_state->direct_min_phase, mph ? 1 : 0);
-        // Force HRIR reload on every channel so the change takes effect.
-        atomic_store(&m_state->speaker_pos_changed, 1);
-    }
-
-    ImGui::Separator();
-
-    // Master volume
-    float vol = atomic_load(&m_state->master_volume);
-    if (ImGui::SliderFloat("Master Volume", &vol, 0.0f, 1.5f, "%.2f")) {
-        atomic_store(&m_state->master_volume, vol);
-    }
-
-    ImGui::Separator();
+    ImGui::Spacing();
 
     // --- Debug section ---
     if (ImGui::CollapsingHeader("Debug")) {
@@ -795,11 +736,11 @@ void ControlPanel::render(bool* p_open) {
         }
     }
 
-    ImGui::Separator();
+    ImGui::Spacing();
 
     // Reset button — restores Home Theater positions but does NOT touch
     // num_channels (the loaded track owns that).
-    if (ImGui::Button("Reset to Default")) {
+    if (ImGui::Button("Reset to Home Theater defaults")) {
         Settings::setRoomPreset(1); // Home Theater
         const RoomPreset& room = roomPresets[1];
         int numCh = atomic_load(&m_state->num_channels);
@@ -808,7 +749,6 @@ void ControlPanel::render(bool* p_open) {
             m_state->speaker_pos[i] = room.positions[i];
         atomic_store(&m_state->speaker_pos_changed, 1);
 
-        // Reset room geometry for early reflections
         atomic_store(&m_state->room_width, room.width);
         atomic_store(&m_state->room_depth, room.depth);
         atomic_store(&m_state->room_height, room.height);
@@ -817,30 +757,83 @@ void ControlPanel::render(bool* p_open) {
         atomic_store(&m_state->room_changed, 1);
     }
 
-    // Status
-    ImGui::Separator();
+    // Status footer.
+    ImGui::SeparatorText("Status");
     bool active = atomic_load(&m_state->active) != 0;
     int sr = atomic_load(&m_state->sample_rate);
-    ImGui::Text("Status: %s", active ? "Processing" : "Idle");
+    ImGui::TextDisabled("Engine: %s", active ? "processing" : "idle");
     if (active) {
-        ImGui::Text("Sample Rate: %d Hz", sr);
-        ImGui::Text("Channels: %d", atomic_load(&m_state->num_channels));
+        ImGui::TextDisabled("Sample rate: %d Hz", sr);
+        ImGui::TextDisabled("Channels: %d", atomic_load(&m_state->num_channels));
     }
-
-    // Spatial object status (sidecar or real-time ObjMeta from decoder)
     {
         int numObj = atomic_load(&m_state->num_objects);
         if (m_sidecarLoaded) {
-            ImGui::Separator();
-            ImGui::Text("Spatial Objects: %d (sidecar: %zu frames)",
-                         numObj, m_sidecarFrames.size());
+            ImGui::TextDisabled("Spatial objects: %d (sidecar: %zu frames)",
+                                 numObj, m_sidecarFrames.size());
         } else if (numObj > 0 && active) {
-            ImGui::Separator();
-            ImGui::Text("Spatial Objects: %d (ObjMeta)", numObj);
+            ImGui::TextDisabled("Spatial objects: %d (ObjMeta)", numObj);
         }
     }
+}
 
-    ImGui::End();
+// ---------------------------------------------------------------------------
+// EQ tab body — headphone calibration + lateral-mix knobs.  These touch
+// the post-binaural signal only; nothing in this section reloads HRIRs.
+// ---------------------------------------------------------------------------
+void ControlPanel::renderEqContent() {
+    ImGui::SeparatorText("Headphone EQ");
+    ImGui::TextWrapped(
+        "Neutralises the headphone's own coloration so the HRTF reaches "
+        "the ear with the intended response.  Drop AutoEQ "
+        "ParametricEq.txt files into assets/headphone_eq/ to populate.");
+    ImGui::Spacing();
+
+    if (!m_hpEqScanned) scanHpEqs();
+    {
+        std::vector<const char*> labels;
+        labels.push_back("None");
+        for (const auto& f : m_hpEqFiles) {
+            size_t slash = f.find_last_of('/');
+            const char* name = (slash == std::string::npos)
+                                 ? f.c_str()
+                                 : f.c_str() + slash + 1;
+            labels.push_back(name);
+        }
+        int idx = m_selectedHpEq;
+        if (ImGui::Combo("Profile", &idx,
+                          labels.data(), (int)labels.size())) {
+            m_selectedHpEq = idx;
+            if (idx == 0) {
+                m_state->hp_eq_path[0] = '\0';
+            } else {
+                const std::string& p = m_hpEqFiles[idx - 1];
+                strncpy(m_state->hp_eq_path, p.c_str(),
+                        sizeof(m_state->hp_eq_path) - 1);
+                m_state->hp_eq_path[sizeof(m_state->hp_eq_path) - 1] = '\0';
+            }
+            atomic_store(&m_state->hp_eq_changed, 1);
+        }
+        bool hp_on = atomic_load(&m_state->hp_eq_enabled) != 0;
+        if (ImGui::Checkbox("Enabled", &hp_on))
+            atomic_store(&m_state->hp_eq_enabled, hp_on ? 1 : 0);
+    }
+
+    ImGui::SeparatorText("Crossfeed");
+    ImGui::TextWrapped(
+        "Broadband (signed): positive narrows the stereo image, negative "
+        "widens it.  Bauer is LF-only contralateral bleed — fixes "
+        "\"frontals collapsed to one side\" without softening the "
+        "high-frequency localisation cues.");
+    ImGui::Spacing();
+
+    float xfeed = atomic_load(&m_state->crossfeed);
+    if (ImGui::SliderFloat("Broadband", &xfeed, -0.3f, 0.3f, "%.2f"))
+        atomic_store(&m_state->crossfeed, xfeed);
+
+    float bauer = atomic_load(&m_state->bauer_crossfeed);
+    if (ImGui::SliderFloat("Bauer (LF only)", &bauer, 0.0f, 0.5f, "%.2f"))
+        atomic_store(&m_state->bauer_crossfeed, bauer);
 }
 
 // ---------------------------------------------------------------------------

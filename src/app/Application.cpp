@@ -138,7 +138,6 @@ bool Application::init(int argc, char* argv[]) {
                                                        m_player.get());
     m_transportBar = std::make_unique<TransportBar>(m_player.get());
     m_transportBar->setFullscreenCallback([this]() { toggleVideoFullscreen(); });
-    m_transportBar->setControlsCallback([this]() { toggleControlPanel(); });
 
     m_trackPicker = std::make_unique<TrackPicker>(m_player.get());
     m_transportBar->setAudioPickerCallback([this]() {
@@ -148,7 +147,8 @@ bool Application::init(int argc, char* argv[]) {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
 
-    m_prefsDialog = std::make_unique<PreferencesDialog>(m_player.get());
+    m_prefsDialog = std::make_unique<PreferencesDialog>(m_player.get(),
+                                                          m_controlPanel.get());
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
@@ -372,15 +372,9 @@ void Application::processInput() {
         m_f2KeyHeld = false;
     }
 
-    // F3: toggle Control Panel drawer
-    if (glfwGetKey(handle, GLFW_KEY_F3) == GLFW_PRESS) {
-        if (!m_f3KeyHeld) {
-            toggleControlPanel();
-            m_f3KeyHeld = true;
-        }
-    } else {
-        m_f3KeyHeld = false;
-    }
+    // F3 used to toggle the legacy Control Panel drawer.  That panel
+    // moved into Preferences (Spatial / Headphone EQ tabs), so the
+    // shortcut is gone — Ctrl+, opens the same controls now.
 }
 
 void Application::update(float dt) {
@@ -604,8 +598,6 @@ void Application::renderUI() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(ICON_LC_EYE "  View")) {
-            ImGui::MenuItem(ICON_LC_SLIDERS  "  Controls",      "F3",
-                             &m_showControlPanel);
             ImGui::MenuItem(ICON_LC_FILM     "  3D Visualizer", "F2",
                              &m_show3DViz);
             ImGui::EndMenu();
@@ -705,41 +697,33 @@ void Application::renderUI() {
     // Enable docking
     ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 
-    // Rebuild the dock layout whenever the set of opt-in side panels changes.
-    // The right column only exists while Controls and/or 3D Viz are open, so
-    // the video grows to the full width when both are hidden.
+    // Rebuild the dock layout whenever the 3D Visualizer's visibility
+    // toggles.  The right column hosts only the 3D Viz now (the legacy
+    // Control Panel moved into Preferences), so the video occupies the
+    // full dock space whenever the viz is hidden.
     static bool layoutBuilt = false;
-    static bool prevShowCtrl = false;
-    static bool prevShowViz  = false;
-    bool wantRight = m_showControlPanel || m_show3DViz;
-    if (!layoutBuilt ||
-        prevShowCtrl != m_showControlPanel ||
-        prevShowViz  != m_show3DViz) {
+    static bool prevShowViz = false;
+    if (!layoutBuilt || prevShowViz != m_show3DViz) {
 
         ImGui::DockBuilderRemoveNode(dockspace_id);
         ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
 
-        // The "left column" hosts video + transport.  When no side panels are
-        // open it occupies the full dockspace, so we only split off the right
-        // 25% drawer when at least one panel is visible.
-        ImGuiID leftCol = dockspace_id;
+        ImGuiID leftCol  = dockspace_id;
         ImGuiID rightCol = 0;
-        if (wantRight) {
+        if (m_show3DViz) {
             ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left,
                                          0.75f, &leftCol, &rightCol);
         }
 
-        // Left: video on top, transport docked below.  The transport now
+        // Left: video on top, transport docked below.  The transport
         // hosts three rows of content (header, full-width timeline,
-        // controls), so a fixed pixel height is more honest than a
-        // ratio — at 8% on a 900 px viewport it overflowed and forced
-        // the whole panel into a scrollbar.  Convert the desired height
-        // to a ratio of the current dock space and clamp so we never
-        // squeeze the video on a tiny viewport.
-        const float transportPx = 150.0f;   // ≈ 3 rows + tab bar + padding
+        // controls), so a fixed pixel height converted to a ratio is
+        // more honest than a flat ratio — at 8% on a 900 px viewport
+        // it overflowed and forced the whole panel into a scrollbar.
+        const float transportPx = 150.0f;
         const float dockPx      = ImGui::GetMainViewport()->Size.y -
-                                   ImGui::GetFrameHeight();   // sub menu bar
+                                   ImGui::GetFrameHeight();
         float transportRatio = transportPx / dockPx;
         if (transportRatio < 0.08f) transportRatio = 0.08f;
         if (transportRatio > 0.45f) transportRatio = 0.45f;
@@ -748,27 +732,15 @@ void Application::renderUI() {
         ImGui::DockBuilderSplitNode(leftCol, ImGuiDir_Down,
                                      transportRatio,
                                      &transportNode, &videoNode);
-        ImGui::DockBuilderDockWindow("Video", videoNode);
+        ImGui::DockBuilderDockWindow("Video",     videoNode);
         ImGui::DockBuilderDockWindow("Transport", transportNode);
 
-        // Right column: 50/50 split when both side panels open, otherwise
-        // the single visible panel takes the full drawer width.
-        if (m_showControlPanel && m_show3DViz) {
-            ImGuiID vizNode, ctrlNode;
-            ImGui::DockBuilderSplitNode(rightCol, ImGuiDir_Up, 0.50f,
-                                         &vizNode, &ctrlNode);
-            ImGui::DockBuilderDockWindow("HRTF Visualizer", vizNode);
-            ImGui::DockBuilderDockWindow("Control Panel",   ctrlNode);
-        } else if (m_show3DViz) {
+        if (m_show3DViz)
             ImGui::DockBuilderDockWindow("HRTF Visualizer", rightCol);
-        } else if (m_showControlPanel) {
-            ImGui::DockBuilderDockWindow("Control Panel",   rightCol);
-        }
 
         ImGui::DockBuilderFinish(dockspace_id);
         layoutBuilt = true;
-        prevShowCtrl = m_showControlPanel;
-        prevShowViz  = m_show3DViz;
+        prevShowViz = m_show3DViz;
     }
 
     // Video panel
@@ -945,12 +917,10 @@ void Application::renderUI() {
     ImGui::End();
     } // if (m_show3DViz)
 
-    // Control panel — opt-in drawer; F3 / View menu / gear button on the
-    // transport bar.  When hidden, the right-side dock node collapses and
-    // the video reclaims the freed width.
-    if (m_showControlPanel) {
-        m_controlPanel->render(&m_showControlPanel);
-    }
+    // (Control Panel as a docked window has been removed; its content
+    // lives on the Preferences page now under the Spatial / Headphone
+    // EQ tabs.  The ControlPanel object is still alive because it owns
+    // the SOFA / IR / EQ scanning + spatial-sidecar loading code.)
 
     // Transport bar
     m_transportBar->render();

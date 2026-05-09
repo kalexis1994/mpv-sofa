@@ -26,14 +26,20 @@ class ControlPanel {
 public:
     ControlPanel(HrtfSharedState* state, int* selectedSpeaker = nullptr,
                  MpvPlayer* player = nullptr);
-    // p_open: optional bool* so the window's close (X) button writes back to
-    // the caller's "is panel visible?" flag.  Pass nullptr for an always-open
-    // panel.
-    void render(bool* p_open = nullptr);
 
-    // Speaker list with colour indicators, position sliders, RMS bars and
-    // Test buttons.  Owns the same state as render() — it's kept as a
-    // separate entry so the 3D Visualizer panel can host it as a sidebar
+    // Renders the Spatial tab body inside the Preferences page — HRTF
+    // profile, speaker layout, room preset, reverb, advanced toggles,
+    // master volume, debug, status.  No Begin/End: caller owns the
+    // window/child.
+    void renderSpatialContent();
+
+    // Renders the Headphone EQ tab body — EQ profile selection plus the
+    // two crossfeed knobs.  These are pure post-processing on the
+    // binaural mix, hence the split from the spatial environment knobs.
+    void renderEqContent();
+
+    // Speaker list with colour indicators, position sliders, RMS bars
+    // and Test buttons.  Hosted by the 3D Visualizer panel as a sidebar
     // (positions only really make sense alongside the 3D view).
     void renderSpeakerList();
 

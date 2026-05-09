@@ -99,12 +99,12 @@ private:
     bool m_f2KeyHeld = false;
     void toggle3DViz() { m_show3DViz = !m_show3DViz; }
 
-    // Control panel — hidden by default; toggled via View menu, F3, or the
-    // gear button on the transport bar.  Without it, the app reads as a
-    // straightforward video player.
+    // Vestigial: Settings::load/save still take a showControls flag for
+    // forward-compatible .ini layout.  The field stays here so those
+    // signatures don't have to change all at once, but the legacy
+    // dockable Control Panel is gone — its body migrated to the
+    // Preferences page (Spatial / Headphone EQ tabs).
     bool m_showControlPanel = false;
-    bool m_f3KeyHeld = false;
-    void toggleControlPanel() { m_showControlPanel = !m_showControlPanel; }
 
     // Video fullscreen mode
     bool m_videoFullscreen = false;

@@ -170,7 +170,10 @@ static void setupFonts() {
         // glyph coverage but keeps the UI from going textless.
         base = io.Fonts->AddFontDefault();
     }
-    io.Fonts->Build();   // bake metrics so GetFontBaked has data
+    // No explicit Build() needed: with ImGuiBackendFlags_RendererHasTextures
+    // set (via the backend's Init), the atlas is built lazily and the
+    // GetFontBaked() call below triggers the bake on demand under the
+    // new dynamic-texture path.
 
     ImFontBaked* baked = base->GetFontBaked(base->LegacySize);
     const float baseAscent  = baked->Ascent;
@@ -199,12 +202,19 @@ void ImGuiLayer::init(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
+    // Init the backends BEFORE configuring fonts.  The OpenGL backend
+    // sets ImGuiBackendFlags_RendererHasTextures during its Init(), and
+    // any font loading / size variants requested later will silently
+    // call ImFontAtlas::Build() if that flag isn't yet set — flooding
+    // the console with "Called ImFontAtlas::Build() before
+    // ImGuiBackendFlags_RendererHasTextures got set!" errors and
+    // skipping the dynamic-atlas path the new ImGui expects.
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 410");
+
     setupFonts();
     ImGui::StyleColorsDark();
     applyTheme();
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 410");
 
     m_initialized = true;
 }
