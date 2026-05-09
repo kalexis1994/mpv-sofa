@@ -84,6 +84,30 @@ jobs:
           patch -p1 --no-backup-if-mismatch \
                 < ../ffmpeg-patches/ffmpeg-spatial-audio.patch
 
+          # The patch defines ff_mlp_rematrix_interp_channel in
+          # mlpdsp.c and calls it from mlpdec.c, but never declares it
+          # in mlpdsp.h.  FFmpeg builds with -Werror=missing-prototypes
+          # so the missing prototype kills the build.  Inject one
+          # right before the header guard's closing #endif (idempotent).
+          # Single-line prototype to avoid YAML / Python indent fights.
+          python3 << 'PYEOF'
+          proto = ('void ff_mlp_rematrix_interp_channel('
+                   'int32_t *samples, const int32_t *seed_coeffs, '
+                   'const int32_t *delta_coeffs, const uint8_t *bypassed_lsbs, '
+                   'const int8_t *noise_buffer, int index, '
+                   'unsigned int sample_offset, unsigned int samples_per_au, '
+                   'unsigned int dest_ch, uint16_t blockpos, '
+                   'unsigned int maxchan, int matrix_noise_shift, '
+                   'int access_unit_size_pow2, int32_t mask);\n\n')
+          with open('libavcodec/mlpdsp.h', 'r') as f:
+              src = f.read()
+          endif = '#endif /* AVCODEC_MLPDSP_H */'
+          if 'ff_mlp_rematrix_interp_channel' not in src and endif in src:
+              src = src.replace(endif, proto + endif)
+              with open('libavcodec/mlpdsp.h', 'w') as f:
+                  f.write(src)
+          PYEOF
+
           # Copy new source files
           cp ../ffmpeg-patches/mlp_atmos_coeff.c libavcodec/mlp_atmos_coeff.c
           cp ../ffmpeg-patches/spatial_ext_coeff.h libavcodec/spatial_ext_coeff.h
