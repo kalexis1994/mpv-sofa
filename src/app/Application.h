@@ -47,6 +47,20 @@ private:
     // the d-pad has somewhere to start from.
     bool m_homeFreshlyShown = true;
 
+    // In-playback overlay menu — same four big tiles as the home
+    // landing, but composited on top of the (paused) video so the
+    // user can pop into Open / Recent / Settings / Exit without
+    // tearing themselves out of the cinema view.  Triggered by Start
+    // or B on the gamepad while a file is loaded.  m_pausedByMenu
+    // tracks whether *we* paused playback to open the menu — if the
+    // user already had it paused, we don't auto-resume on close.
+    bool m_playbackMenuOpen          = false;
+    bool m_playbackMenuPausedUs      = false;
+    bool m_playbackMenuFreshlyShown  = true;
+    void openPlaybackMenu();
+    void closePlaybackMenu();
+    void renderPlaybackMenu();
+
     // Windows-style auto-hidden main menu bar.  Hidden by default; tap
     // Alt (keyboard) or the Start button (gamepad) to toggle, Escape
     // to dismiss.  Keeps the chrome out of the way during playback and

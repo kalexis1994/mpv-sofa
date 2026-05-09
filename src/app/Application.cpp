@@ -615,31 +615,54 @@ void Application::renderUI() {
 
     // --- Normal docked mode ---
 
-    // Windows-style menu-bar toggle.  Tap Alt (or the gamepad Start
-    // button for TV-mode users) to surface the chrome, tap again or
-    // press Escape to put it away.  IsKeyChordPressed wouldn't work
-    // here because Alt by itself doesn't form a chord — we want the
-    // edge on the modifier key release/press, hence IsKeyPressed on
-    // ImGuiKey_LeftAlt / ImGuiKey_RightAlt directly.
+    // Top-level keyboard / gamepad routing.  The same physical buttons
+    // mean different things depending on whether a file is loaded:
+    //
+    //   No media (home screen):
+    //     Alt / Start  → toggle the developer menu bar
+    //     Esc          → dismiss the menu bar (when no popup is open)
+    //
+    //   Media playing:
+    //     Start / B    → toggle the in-playback overlay menu (and
+    //                    pause/resume the video alongside it).  Skipped
+    //                    when Preferences or any popup is up so those
+    //                    layers can consume the cancel key first.
+    //     Alt          → still toggles the dev menu bar, for parity.
     {
         const bool altEdge =
             ImGui::IsKeyPressed(ImGuiKey_LeftAlt,  false) ||
             ImGui::IsKeyPressed(ImGuiKey_RightAlt, false);
         const bool startEdge =
             ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
+        const bool bEdge =
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
         const bool escEdge =
             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 
-        if (altEdge || startEdge) {
-            m_menuBarVisible = !m_menuBarVisible;
-        } else if (escEdge && m_menuBarVisible &&
-                   !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
-                                                 ImGuiPopupFlags_AnyPopupLevel)) {
-            // Only let Esc dismiss the bar when no dropdown is open —
-            // otherwise ImGui's own Esc handler should close the menu
-            // first (matches Windows: Esc closes the dropdown, second
-            // Esc takes focus off the bar / hides it).
-            m_menuBarVisible = false;
+        const bool hasMediaNow  = m_player && m_player->hasVideo();
+        const bool prefsOpenNow = m_prefsDialog && m_prefsDialog->isOpen();
+        const bool anyPopupNow  = ImGui::IsPopupOpen(nullptr,
+                                       ImGuiPopupFlags_AnyPopupId |
+                                       ImGuiPopupFlags_AnyPopupLevel);
+
+        if (hasMediaNow) {
+            // Playback context.  Start always toggles the menu; B only
+            // does so when nothing else owns the cancel gesture, so
+            // popups in Preferences / dropdowns close first.
+            if (startEdge ||
+                (bEdge && !prefsOpenNow && !anyPopupNow)) {
+                if (m_playbackMenuOpen) closePlaybackMenu();
+                else                    openPlaybackMenu();
+            }
+            if (altEdge) m_menuBarVisible = !m_menuBarVisible;
+        } else {
+            // Home / Preferences context — keep the original menu-bar
+            // muscle memory.
+            if (altEdge || startEdge) {
+                m_menuBarVisible = !m_menuBarVisible;
+            } else if (escEdge && m_menuBarVisible && !anyPopupNow) {
+                m_menuBarVisible = false;
+            }
         }
     }
 
@@ -998,6 +1021,14 @@ void Application::renderUI() {
     // Transport bar
     m_transportBar->render();
 
+    // In-playback overlay menu — paint above the dock so it dims the
+    // (paused) video naturally.  Track picker / Preferences /
+    // Recent dialog still render on top of it because they're each a
+    // separate ImGui window opened later in the frame; that gives us
+    // the back-stack we want: Preferences → playback menu → video.
+    if (m_playbackMenuOpen)
+        renderPlaybackMenu();
+
     // Track picker modal — fires after a fresh load while playback is
     // still paused, so the user picks the audio stream up-front.
     if (m_trackPicker)
@@ -1134,6 +1165,98 @@ void Application::renderHomeScreen() {
     ImGui::SetNavCursorVisible(true);
 
     m_homeFreshlyShown = false;
+    ImGui::End();
+}
+
+// In-playback overlay menu: same shape as the home tiles, drawn on top
+// of the (paused) video so the user can pop into Open / Recent /
+// Settings / Exit without losing their seat in cinema mode.
+void Application::openPlaybackMenu() {
+    if (m_playbackMenuOpen) return;
+    m_playbackMenuOpen         = true;
+    m_playbackMenuFreshlyShown = true;
+    if (m_player && !m_player->isPaused()) {
+        m_player->pause();
+        m_playbackMenuPausedUs = true;
+    } else {
+        m_playbackMenuPausedUs = false;
+    }
+}
+
+void Application::closePlaybackMenu() {
+    if (!m_playbackMenuOpen) return;
+    m_playbackMenuOpen = false;
+    if (m_playbackMenuPausedUs && m_player) {
+        m_player->play();          // resume only if we were the ones who paused
+    }
+    m_playbackMenuPausedUs = false;
+}
+
+void Application::renderPlaybackMenu() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImVec2 pos  = vp->WorkPos;
+    ImVec2 size = vp->WorkSize;
+
+    if (m_playbackMenuFreshlyShown) ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    // Dim the underlying video without fully hiding it — the user
+    // needs to remember where they were so the cinema feel survives
+    // the menu pop.  0.85 backdrop alpha matches the rest of the
+    // app's modal styling.
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##playback_menu", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoDocking |
+                 ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar(2);
+
+    const float btnSize    = 180.0f;
+    const float btnGap     = 24.0f;
+    const float titleScale = 1.6f;
+
+    const float titleH    = ImGui::GetFontSize() * titleScale;
+    const float blockH    = titleH + 36.0f + btnSize;
+    const float yStart    = (size.y - blockH) * 0.5f;
+
+    // Subtitle hint at the top of the block.
+    {
+        const char* hint = "Paused — pick an action or press B to resume";
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * titleScale);
+        ImVec2 ts = ImGui::CalcTextSize(hint);
+        ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
+        ImGui::TextDisabled("%s", hint);
+        ImGui::PopFont();
+    }
+
+    // 4 tiles centred horizontally — same set as the home screen.
+    const float totalW   = btnSize * 4 + btnGap * 3;
+    const float xStart   = (size.x - totalW) * 0.5f;
+    const float yButtons = yStart + titleH + 36.0f;
+
+    ImGui::SetCursorPos(ImVec2(xStart, yButtons));
+
+    if (homeButton(ICON_LC_FOLDER_OPEN, "Open", btnSize)) {
+        closePlaybackMenu();
+        openFileDialog();
+    }
+    if (m_playbackMenuFreshlyShown) ImGui::FocusItem();
+    ImGui::SameLine(0.0f, btnGap);
+    if (homeButton(ICON_LC_HISTORY, "Recent", btnSize)) {
+        m_showRecentDialog = true;
+    }
+    ImGui::SameLine(0.0f, btnGap);
+    if (homeButton(ICON_LC_SETTINGS, "Settings", btnSize)) {
+        if (m_prefsDialog) m_prefsDialog->open();
+    }
+    ImGui::SameLine(0.0f, btnGap);
+    if (homeButton(ICON_LC_DOOR_OPEN, "Exit", btnSize)) {
+        m_running = false;
+    }
+
+    m_playbackMenuFreshlyShown = false;
     ImGui::End();
 }
 
