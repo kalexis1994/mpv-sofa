@@ -5,6 +5,7 @@
 // drifted from the last saved snapshot.
 
 #include <string>
+#include <vector>
 
 struct HrtfSharedState;
 class  MpvPlayer;
@@ -145,5 +146,13 @@ void               applyCinemaGrainToPlayer(MpvPlayer* p);
 // every frame (avoids the "frozen grain" look).  Call once per render
 // from the host loop while grain is enabled.  No-op when disabled.
 void               tickCinemaGrain(MpvPlayer* p);
+
+// Recent files list (most recent first).  Persisted under [recent] in
+// mpv-sofa.ini as `count` + `path_0`, `path_1`, …  pushRecent
+// deduplicates by full path and trims to a fixed length so the list
+// doesn't grow without bound.
+const std::vector<std::string>& recentFiles();
+void  pushRecent(const std::string& fullPath);
+void  clearRecents();
 
 } // namespace Settings

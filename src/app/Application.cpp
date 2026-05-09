@@ -15,64 +15,12 @@
 #include <cmath>
 #include <algorithm>
 
-namespace {
-
-// Forward GLFW gamepad state into ImGui every frame so the focus
-// navigation (D-pad / A / B / shoulders / sticks) works on the same
-// widgets the mouse already drives.  Phase 1 of the TV-mode rollout —
-// the existing dockable layout becomes navigable from a gamepad without
-// any new screens or layouts.
-void pollGamepadIntoImGui() {
-    if (!glfwJoystickPresent(GLFW_JOYSTICK_1) ||
-        !glfwJoystickIsGamepad(GLFW_JOYSTICK_1))
-        return;
-    GLFWgamepadstate gp;
-    if (!glfwGetGamepadState(GLFW_JOYSTICK_1, &gp))
-        return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    auto btn = [&](int g, ImGuiKey k) {
-        io.AddKeyEvent(k, gp.buttons[g] == GLFW_PRESS);
-    };
-    btn(GLFW_GAMEPAD_BUTTON_A,             ImGuiKey_GamepadFaceDown);  // confirm
-    btn(GLFW_GAMEPAD_BUTTON_B,             ImGuiKey_GamepadFaceRight); // cancel
-    btn(GLFW_GAMEPAD_BUTTON_X,             ImGuiKey_GamepadFaceLeft);
-    btn(GLFW_GAMEPAD_BUTTON_Y,             ImGuiKey_GamepadFaceUp);
-    btn(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER,   ImGuiKey_GamepadL1);
-    btn(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER,  ImGuiKey_GamepadR1);
-    btn(GLFW_GAMEPAD_BUTTON_BACK,          ImGuiKey_GamepadBack);
-    btn(GLFW_GAMEPAD_BUTTON_START,         ImGuiKey_GamepadStart);
-    btn(GLFW_GAMEPAD_BUTTON_DPAD_UP,       ImGuiKey_GamepadDpadUp);
-    btn(GLFW_GAMEPAD_BUTTON_DPAD_DOWN,     ImGuiKey_GamepadDpadDown);
-    btn(GLFW_GAMEPAD_BUTTON_DPAD_LEFT,     ImGuiKey_GamepadDpadLeft);
-    btn(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT,    ImGuiKey_GamepadDpadRight);
-
-    // Sticks come in [-1, 1].  We split each axis into two virtual keys
-    // (left+right or up+down) with a small dead-zone so the focus only
-    // moves when the user actually intends it to.
-    auto axisPair = [&](float v, ImGuiKey neg, ImGuiKey pos, float dz = 0.20f) {
-        const float a = std::fabs(v);
-        io.AddKeyAnalogEvent(neg, v < -dz, v < -dz ? a : 0.0f);
-        io.AddKeyAnalogEvent(pos, v >  dz, v >  dz ? a : 0.0f);
-    };
-    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X],
-             ImGuiKey_GamepadLStickLeft, ImGuiKey_GamepadLStickRight);
-    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y],
-             ImGuiKey_GamepadLStickUp,   ImGuiKey_GamepadLStickDown);
-    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X],
-             ImGuiKey_GamepadRStickLeft, ImGuiKey_GamepadRStickRight);
-    axisPair(gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y],
-             ImGuiKey_GamepadRStickUp,   ImGuiKey_GamepadRStickDown);
-
-    // Triggers: GLFW reports them as -1..1, with -1 being "released".
-    // Normalise to 0..1 and treat past 0.5 as a press for digital use.
-    const float lt = (gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER ] + 1.0f) * 0.5f;
-    const float rt = (gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] + 1.0f) * 0.5f;
-    io.AddKeyAnalogEvent(ImGuiKey_GamepadL2, lt > 0.5f, lt);
-    io.AddKeyAnalogEvent(ImGuiKey_GamepadR2, rt > 0.5f, rt);
-}
-
-} // anonymous namespace
+// Note: gamepad input is fed into ImGui by imgui_impl_glfw's built-in
+// ImGui_ImplGlfw_UpdateGamepads(), which is invoked from NewFrame.  An
+// earlier manual polling helper that ran here pre-NewFrame raced with
+// the backend on the same ImGuiKey_Gamepad* keys and broke directional
+// nav for some controllers (A/B activated buttons but d-pad / stick did
+// not move focus).  Removing it lets the backend be the single source.
 
 static bool isSubtitleFile(const std::string& path) {
     std::string ext;
@@ -266,6 +214,7 @@ bool Application::init(int argc, char* argv[]) {
     if (!m_pendingFile.empty()) {
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
+        Settings::pushRecent(m_pendingFile);
         m_pendingFile.clear();
     }
 
@@ -392,6 +341,7 @@ void Application::processInput() {
     if (!m_pendingFile.empty() && m_player) {
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
+        Settings::pushRecent(m_pendingFile);
         m_pendingFile.clear();
     }
 
@@ -493,7 +443,8 @@ void Application::render() {
 }
 
 void Application::renderUI() {
-    pollGamepadIntoImGui();
+    // Gamepad polling is handled by imgui_impl_glfw inside NewFrame —
+    // no manual call needed here.
     m_imgui->beginFrame();
 
     // Track mouse movement for auto-hiding transport in fullscreen.
@@ -598,22 +549,41 @@ void Application::renderUI() {
 
     // --- Normal docked mode ---
 
+    // Windows-style menu-bar toggle.  Tap Alt (or the gamepad Start
+    // button for TV-mode users) to surface the chrome, tap again or
+    // press Escape to put it away.  IsKeyChordPressed wouldn't work
+    // here because Alt by itself doesn't form a chord — we want the
+    // edge on the modifier key release/press, hence IsKeyPressed on
+    // ImGuiKey_LeftAlt / ImGuiKey_RightAlt directly.
+    {
+        const bool altEdge =
+            ImGui::IsKeyPressed(ImGuiKey_LeftAlt,  false) ||
+            ImGui::IsKeyPressed(ImGuiKey_RightAlt, false);
+        const bool startEdge =
+            ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
+        const bool escEdge =
+            ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+
+        if (altEdge || startEdge) {
+            m_menuBarVisible = !m_menuBarVisible;
+        } else if (escEdge && m_menuBarVisible &&
+                   !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
+                                                 ImGuiPopupFlags_AnyPopupLevel)) {
+            // Only let Esc dismiss the bar when no dropdown is open —
+            // otherwise ImGui's own Esc handler should close the menu
+            // first (matches Windows: Esc closes the dropdown, second
+            // Esc takes focus off the bar / hides it).
+            m_menuBarVisible = false;
+        }
+    }
+
     // Top menu bar — exposes panels and the persisted-config controls.
     bool dirty = Settings::isDirty(m_sharedState,
                                     m_showControlPanel, m_show3DViz);
-    if (ImGui::BeginMainMenuBar()) {
+    if (m_menuBarVisible && ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu(ICON_LC_FILE "  File")) {
             if (ImGui::MenuItem(ICON_LC_FOLDER_OPEN "  Open...", "Ctrl+O")) {
-                IGFD::FileDialogConfig cfg;
-                cfg.path = ".";
-                cfg.flags = ImGuiFileDialogFlags_Modal;
-                ImGuiFileDialog::Instance()->OpenDialog(
-                    "open_media",
-                    "Open media file",
-                    "Video/Audio{.mkv,.mp4,.avi,.webm,.mov,.m4v,"
-                                ".ts,.m2ts,.flac,.wav,.mp3,.opus,.ogg,.aac,.ac3,.thd},"
-                    "All files{.*}",
-                    cfg);
+                openFileDialog();
             }
             if (ImGui::MenuItem(ICON_LC_CAPTIONS "  Load Subtitle...",
                                  nullptr, false,
@@ -683,16 +653,7 @@ void Application::renderUI() {
         }
         // Ctrl+O: open file dialog (mirrors File > Open).
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) {
-            IGFD::FileDialogConfig cfg;
-            cfg.path = ".";
-            cfg.flags = ImGuiFileDialogFlags_Modal;
-            ImGuiFileDialog::Instance()->OpenDialog(
-                "open_media",
-                "Open media file",
-                "Video/Audio{.mkv,.mp4,.avi,.webm,.mov,.m4v,"
-                            ".ts,.m2ts,.flac,.wav,.mp3,.opus,.ogg,.aac,.ac3,.thd},"
-                "All files{.*}",
-                cfg);
+            openFileDialog();
         }
     }
 
@@ -715,6 +676,31 @@ void Application::renderUI() {
         }
         ImGuiFileDialog::Instance()->Close();
     }
+
+    // No file loaded → show the TV-mode home screen instead of an
+    // empty dockspace.  Dialogs (file picker / preferences / recent)
+    // are still rendered below this block on top of whatever is
+    // showing, so the home buttons can open them normally.
+    const bool hasMedia = m_player && m_player->hasVideo();
+    const bool prefsOpen = m_prefsDialog && m_prefsDialog->isOpen();
+    if (!hasMedia) {
+        // Skip the home screen when the preferences page is up — the
+        // page is full-screen, drawing the home buttons underneath
+        // would only confuse focus / nav routing.  Recent dialog stays
+        // because it's a modal opened *from* the home and small enough
+        // to overlay cleanly.
+        if (!prefsOpen) renderHomeScreen();
+        if (m_trackPicker)  m_trackPicker->render();
+        if (m_prefsDialog)  m_prefsDialog->render();
+        if (m_showRecentDialog) renderRecentDialog();
+        m_imgui->endFrame();
+        return;
+    }
+
+    // Media is loaded — arm the home screen's nav-seeding flag so the
+    // next time playback ends and we drop back to the landing, the
+    // gamepad cursor lands on the first button again.
+    m_homeFreshlyShown = true;
 
     // Enable docking
     ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
@@ -978,7 +964,349 @@ void Application::renderUI() {
     if (m_prefsDialog)
         m_prefsDialog->render();
 
+    // Recent-files modal opened from the home screen.
+    if (m_showRecentDialog)
+        renderRecentDialog();
+
     m_imgui->endFrame();
+}
+
+// Shared by the menu, the Ctrl+O hotkey and the home-screen "Open"
+// button so all three paths land on the same ImGuiFileDialog.
+void Application::openFileDialog() {
+    IGFD::FileDialogConfig cfg;
+    cfg.path  = ".";
+    cfg.flags = ImGuiFileDialogFlags_Modal;
+    ImGuiFileDialog::Instance()->OpenDialog(
+        "open_media",
+        "Open media file",
+        "Video/Audio{.mkv,.mp4,.avi,.webm,.mov,.m4v,"
+                    ".ts,.m2ts,.flac,.wav,.mp3,.opus,.ogg,.aac,.ac3,.thd},"
+        "All files{.*}",
+        cfg);
+}
+
+// Big-button TV-mode landing.  Drawn instead of the docked panels
+// whenever there's no media loaded.  Four buttons, gamepad-navigable
+// thanks to ImGuiConfigFlags_NavEnableGamepad already being on.
+void Application::renderHomeScreen() {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImVec2 pos  = vp->WorkPos;
+    ImVec2 size = vp->WorkSize;
+
+    // Pull the window to the front and request focus the first time
+    // the home screen appears (app start, or after a file finishes /
+    // is closed).  Without this, ImGui's nav system has no target and
+    // the gamepad d-pad / left stick can't move the focus cursor onto
+    // the buttons.  NoBringToFrontOnFocus was previously set here for
+    // the same reason it has to be removed: it suppressed nav routing.
+    if (m_homeFreshlyShown) ImGui::SetNextWindowFocus();
+
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##home", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                 ImGuiWindowFlags_NoDocking |
+                 ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleVar(2);
+
+    // Block geometry: title + subtitle + 4 big buttons.  Centred both
+    // axes so the layout stays tidy on whatever viewport size the host
+    // window happens to be.
+    const float btnSize    = 180.0f;
+    const float btnGap     = 24.0f;
+    const float titleScale = 2.4f;
+    const float subScale   = 1.1f;
+
+    const float titleH    = ImGui::GetFontSize() * titleScale;
+    const float subH      = ImGui::GetFontSize() * subScale;
+    const float blockH    = titleH + 12.0f + subH + 36.0f + btnSize;
+    const float yStart    = (size.y - blockH) * 0.5f;
+
+    // Title
+    {
+        const char* title = "mpv-sofa";
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * titleScale);
+        ImVec2 ts = ImGui::CalcTextSize(title);
+        ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
+        ImGui::TextUnformatted(title);
+        ImGui::PopFont();
+    }
+
+    // Subtitle
+    {
+        const char* sub = "Spatial audio cinema for headphones";
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * subScale);
+        ImVec2 ts = ImGui::CalcTextSize(sub);
+        ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f,
+                                    yStart + titleH + 12.0f));
+        ImGui::TextDisabled("%s", sub);
+        ImGui::PopFont();
+    }
+
+    // 4 buttons
+    {
+        const float totalW = btnSize * 4 + btnGap * 3;
+        const float xStart = (size.x - totalW) * 0.5f;
+        const float yButtons = yStart + titleH + 12.0f + subH + 36.0f;
+
+        ImGui::SetCursorPos(ImVec2(xStart, yButtons));
+
+        if (homeButton(ICON_LC_FOLDER_OPEN, "Open", btnSize))
+            openFileDialog();
+        // Seed the nav cursor on the first button when home has just
+        // become visible.  FocusItem() (internal API) is stronger than
+        // SetItemDefaultFocus(): the latter only takes effect on the
+        // first appearance of the window and is silently ignored when
+        // an unrelated window (e.g. the main menu bar drawn just above)
+        // already owns NavWindow, which is exactly what was happening
+        // here — A/B fired on whatever menu bar item nav had latched
+        // onto, the d-pad moved focus around inside the menu bar where
+        // nothing was visible, and the home buttons looked unresponsive.
+        if (m_homeFreshlyShown) ImGui::FocusItem();
+        ImGui::SameLine(0.0f, btnGap);
+        if (homeButton(ICON_LC_HISTORY,     "Recent", btnSize))
+            m_showRecentDialog = true;
+        ImGui::SameLine(0.0f, btnGap);
+        if (homeButton(ICON_LC_SETTINGS,    "Settings", btnSize)) {
+            if (m_prefsDialog) m_prefsDialog->open();
+        }
+        ImGui::SameLine(0.0f, btnGap);
+        if (homeButton(ICON_LC_DOOR_OPEN,   "Exit", btnSize))
+            m_running = false;
+    }
+
+    // ImGui hides the nav cursor by default until the user issues a
+    // directional input.  On a TV-mode landing where the d-pad / stick
+    // *is* the primary input, that initial-hidden state means the user
+    // sees no focus indicator and assumes nav is broken.  Force it on.
+    ImGui::SetNavCursorVisible(true);
+
+    // Live gamepad diagnostic — shows what GLFW is actually reporting
+    // so it's obvious whether nav failures are upstream (controller
+    // not detected, d-pad not mapped) vs. an ImGui issue.  Highlights
+    // each input in red while it's pressed / past dead-zone.
+    {
+        const bool joy   = glfwJoystickPresent(GLFW_JOYSTICK_1) != 0;
+        const bool gamep = joy && glfwJoystickIsGamepad(GLFW_JOYSTICK_1) != 0;
+        const float smallScale = 0.85f;
+
+        ImGui::PushFont(nullptr, ImGui::GetFontSize() * smallScale);
+
+        if (!joy) {
+            const char* hint = ICON_LC_GAMEPAD_2 "  No gamepad detected.";
+            ImVec2 ts = ImGui::CalcTextSize(hint);
+            ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f,
+                                        size.y - ts.y - 24.0f));
+            ImGui::TextDisabled("%s", hint);
+        } else {
+            // Header line: detected name (or generic joystick name).
+            char header[256];
+            const char* name =
+                gamep ? glfwGetGamepadName(GLFW_JOYSTICK_1)
+                      : glfwGetJoystickName(GLFW_JOYSTICK_1);
+            snprintf(header, sizeof(header),
+                     gamep ? ICON_LC_GAMEPAD_2 "  %s"
+                           : ICON_LC_JOYSTICK   "  %s  (no gamepad mapping)",
+                     name ? name : "controller");
+
+            // Read live state for the bottom indicator row.
+            GLFWgamepadstate gp = {};
+            const float* axes = nullptr;
+            const unsigned char* buttons = nullptr;
+            int axesCount = 0, buttonsCount = 0;
+            if (gamep) {
+                glfwGetGamepadState(GLFW_JOYSTICK_1, &gp);
+            } else {
+                axes    = glfwGetJoystickAxes   (GLFW_JOYSTICK_1, &axesCount);
+                buttons = glfwGetJoystickButtons(GLFW_JOYSTICK_1, &buttonsCount);
+            }
+
+            auto pressed = [&](int gpBtn, int rawBtn) -> bool {
+                if (gamep) return gp.buttons[gpBtn] == GLFW_PRESS;
+                return buttons && rawBtn < buttonsCount &&
+                       buttons[rawBtn] == GLFW_PRESS;
+            };
+            auto axis = [&](int gpAx, int rawAx) -> float {
+                if (gamep) return gp.axes[gpAx];
+                return (axes && rawAx < axesCount) ? axes[rawAx] : 0.0f;
+            };
+
+            const float lx = axis(GLFW_GAMEPAD_AXIS_LEFT_X, 0);
+            const float ly = axis(GLFW_GAMEPAD_AXIS_LEFT_Y, 1);
+
+            // Pull current ImGui NavWindow / NavId so we can tell at a
+            // glance whether nav focus is sitting on the home window
+            // (good — d-pad will move between buttons) or has been
+            // hijacked by the menu bar / some other window (bad — the
+            // d-pad is moving an invisible cursor up there instead).
+            ImGuiContext* g = ImGui::GetCurrentContext();
+            const char* navWin = (g && g->NavWindow) ? g->NavWindow->Name : "(none)";
+            unsigned navId = g ? g->NavId : 0u;
+
+            char status[512];
+            snprintf(status, sizeof(status),
+                     "DPad %s%s%s%s   A:%s  B:%s   LStick %+0.2f, %+0.2f   Nav: %s / %08X",
+                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_UP,    10) ? "U" : "·",
+                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_DOWN,  12) ? "D" : "·",
+                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_LEFT,  13) ? "L" : "·",
+                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, 11) ? "R" : "·",
+                     pressed(GLFW_GAMEPAD_BUTTON_A, 0) ? "✓" : "·",
+                     pressed(GLFW_GAMEPAD_BUTTON_B, 1) ? "✓" : "·",
+                     lx, ly,
+                     navWin, navId);
+
+            ImVec2 hts = ImGui::CalcTextSize(header);
+            ImVec2 sts = ImGui::CalcTextSize(status);
+            const float lineGap = 6.0f;
+            const float blockH  = hts.y + lineGap + sts.y;
+
+            ImGui::SetCursorPos(ImVec2((size.x - hts.x) * 0.5f,
+                                        size.y - blockH - 24.0f));
+            ImGui::TextDisabled("%s", header);
+            ImGui::SetCursorPos(ImVec2((size.x - sts.x) * 0.5f,
+                                        size.y - sts.y - 24.0f));
+            ImGui::TextDisabled("%s", status);
+        }
+
+        ImGui::PopFont();
+    }
+
+    m_homeFreshlyShown = false;
+    ImGui::End();
+}
+
+bool Application::homeButton(const char* icon, const char* label, float size) {
+    ImGui::PushID(label);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    // ImGuiButtonFlags_EnableNav is required for InvisibleButton to
+    // participate in gamepad / keyboard directional navigation.
+    // Without it, InvisibleButton calls ItemAdd with ImGuiItemFlags_NoNav
+    // (see imgui_widgets.cpp:846), so the d-pad can't move focus
+    // between the home tiles even though the inputs reach ImGui.
+    //
+    // InvisibleButton also unconditionally calls RenderNavCursor() when
+    // focused (imgui_widgets.cpp:851), which paints ImGui's default
+    // dotted/inset focus rectangle on top of our tile.  We already draw
+    // a thicker custom ring below to indicate focus, so suppress the
+    // auto cursor by pushing a fully transparent NavCursor colour.
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(0, 0, 0, 0));
+    ImGui::InvisibleButton("##btn", ImVec2(size, size),
+                            ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool focused = ImGui::IsItemFocused();
+    const bool active  = ImGui::IsItemActivated();
+    const bool emph    = hovered || focused;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 bg     = ImGui::GetColorU32(emph ? ImGuiCol_FrameBgHovered
+                                                 : ImGuiCol_FrameBg);
+    const ImU32 border = ImGui::GetColorU32(emph ? ImGuiCol_Text
+                                                 : ImGuiCol_Border);
+    const ImU32 textCol= ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 pmax(origin.x + size, origin.y + size);
+
+    dl->AddRectFilled(origin, pmax, bg, 12.0f);
+    dl->AddRect(origin, pmax, border, 12.0f, 0, emph ? 2.5f : 1.0f);
+
+    // Big icon (3.5× the body font) centred in the upper portion.
+    const float iconScale = 3.5f;
+    ImGui::PushFont(nullptr, ImGui::GetFontSize() * iconScale);
+    ImVec2 iconSz = ImGui::CalcTextSize(icon);
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                ImVec2(origin.x + (size - iconSz.x) * 0.5f,
+                       origin.y + size * 0.30f - iconSz.y * 0.5f),
+                textCol, icon);
+    ImGui::PopFont();
+
+    // Label centred in the lower portion at the body font size.
+    ImVec2 labelSz = ImGui::CalcTextSize(label);
+    dl->AddText(ImVec2(origin.x + (size - labelSz.x) * 0.5f,
+                       origin.y + size * 0.74f - labelSz.y * 0.5f),
+                textCol, label);
+
+    ImGui::PopID();
+    return active;
+}
+
+void Application::renderRecentDialog() {
+    if (!m_showRecentDialog) return;
+
+    ImGui::OpenPopup("##recent_dialog");
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImVec2 sz(std::min(800.0f, vp->Size.x * 0.8f),
+              std::min(600.0f, vp->Size.y * 0.8f));
+    ImVec2 p(vp->Pos.x + (vp->Size.x - sz.x) * 0.5f,
+             vp->Pos.y + (vp->Size.y - sz.y) * 0.5f);
+    ImGui::SetNextWindowPos(p, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(sz, ImGuiCond_Always);
+
+    bool open = true;
+    if (!ImGui::BeginPopupModal("##recent_dialog", &open,
+                                 ImGuiWindowFlags_NoTitleBar |
+                                 ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoResize)) {
+        if (!open) m_showRecentDialog = false;
+        return;
+    }
+
+    ImGui::Text(ICON_LC_HISTORY "  Recent files");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const auto& list = Settings::recentFiles();
+    if (list.empty()) {
+        ImGui::TextDisabled("No recently played files yet.");
+    } else {
+        const float footerH = ImGui::GetFrameHeightWithSpacing() +
+                              ImGui::GetStyle().ItemSpacing.y * 2 + 4.0f;
+        ImGui::BeginChild("##rlist", ImVec2(0, -footerH), false);
+        std::string picked;
+        for (const auto& path : list) {
+            // Display: filename in bold-ish + dim full path below.
+            const auto slash = path.find_last_of("\\/");
+            std::string name = (slash == std::string::npos)
+                                  ? path : path.substr(slash + 1);
+            ImGui::PushID(path.c_str());
+            if (ImGui::Selectable(name.c_str(), false, 0,
+                                   ImVec2(0, ImGui::GetFrameHeight() * 1.6f))) {
+                picked = path;
+            }
+            ImGui::SameLine(0, 0);
+            // The full path under the filename, truncated by clip rect.
+            ImGui::Dummy(ImVec2(0, 0));  // restore cursor
+            ImGui::SetCursorPosX(ImGui::GetStyle().ItemSpacing.x);
+            ImGui::TextDisabled("%s", path.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        if (!picked.empty()) {
+            m_pendingFile = picked;
+            m_showRecentDialog = false;
+            ImGui::CloseCurrentPopup();
+        }
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Clear list")) {
+        Settings::clearRecents();
+    }
+    ImGui::SameLine();
+    const float btnW = 100.0f;
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x +
+                     ImGui::GetCursorPosX() - btnW);
+    if (ImGui::Button("Close", ImVec2(btnW, 0))) {
+        m_showRecentDialog = false;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+    if (!open) m_showRecentDialog = false;
 }
 
 void Application::shutdown() {

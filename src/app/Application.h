@@ -30,6 +30,29 @@ private:
     void render();
     void renderUI();
 
+    // Big-button landing screen rendered when no file is loaded.  Acts
+    // as the TV-mode entry point: Open / Recent / Settings / Exit, all
+    // navigable from a gamepad's d-pad.
+    void renderHomeScreen();
+    bool homeButton(const char* icon, const char* label, float size);
+    void openFileDialog();          // shared between menu, hotkey and home
+
+    // Recent-files modal opened from the home screen.
+    bool m_showRecentDialog = false;
+    void renderRecentDialog();
+
+    // True the first frame the home screen is visible after either
+    // app startup or a transition from playing → idle.  Used to seed
+    // the gamepad / keyboard nav focus on the first home button so
+    // the d-pad has somewhere to start from.
+    bool m_homeFreshlyShown = true;
+
+    // Windows-style auto-hidden main menu bar.  Hidden by default; tap
+    // Alt (keyboard) or the Start button (gamepad) to toggle, Escape
+    // to dismiss.  Keeps the chrome out of the way during playback and
+    // matches the muscle memory most Windows users already have.
+    bool m_menuBarVisible = false;
+
     // Core systems
     std::unique_ptr<Window> m_window;
     std::unique_ptr<Renderer> m_renderer;

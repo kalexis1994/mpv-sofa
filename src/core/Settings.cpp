@@ -160,6 +160,8 @@ Settings::SubtitleStyle  g_subStyle;
 Settings::CinemaGrain    g_grain;
 Settings::DisplayConfig  g_display;
 Settings::PlaybackConfig g_playback;
+std::vector<std::string> g_recents;
+constexpr size_t kMaxRecents = 12;
 
 // Format an RGBA float[4] as the colour string mpv expects.  Note the
 // historical mpv convention is "#AARRGGBB" with alpha *first* — passing
@@ -434,6 +436,19 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_playback.audioDelay = getF(kv, "audio_delay", g_playback.audioDelay);
         }
+        if (auto it = ini.find("recent"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_recents.clear();
+            int n = getI(kv, "count", 0);
+            if (n < 0) n = 0;
+            if ((size_t)n > kMaxRecents) n = (int)kMaxRecents;
+            char key[32];
+            for (int i = 0; i < n; i++) {
+                snprintf(key, sizeof(key), "path_%d", i);
+                std::string p = getS(kv, key, "");
+                if (!p.empty()) g_recents.push_back(std::move(p));
+            }
+        }
         if (auto it = ini.find("cinema_grain"); it != ini.end()) {
             const KV& kv = it->second;
             g_grain.enabled     = getI(kv, "enabled", g_grain.enabled ? 1 : 0) != 0;
@@ -568,6 +583,12 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "audio_delay=%g\n", g_playback.audioDelay);
     fprintf(f, "\n");
 
+    fprintf(f, "[recent]\n");
+    fprintf(f, "count=%d\n", (int)g_recents.size());
+    for (size_t i = 0; i < g_recents.size(); i++)
+        fprintf(f, "path_%zu=%s\n", i, g_recents[i].c_str());
+    fprintf(f, "\n");
+
     fprintf(f, "[cinema_grain]\n");
     fprintf(f, "enabled=%d\n",       g_grain.enabled ? 1 : 0);
     fprintf(f, "stock=%d\n",         g_grain.stock);
@@ -648,6 +669,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_grain    = CinemaGrain{};
     g_display  = DisplayConfig{};
     g_playback = PlaybackConfig{};
+    g_recents.clear();
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
@@ -710,6 +732,25 @@ void Settings::setPlaybackConfig(const PlaybackConfig& c)  { g_playback = c; }
 void Settings::applyPlaybackConfigToPlayer(MpvPlayer* p) {
     if (!p) return;
     p->setDoubleProperty("audio-delay", g_playback.audioDelay);
+}
+
+const std::vector<std::string>& Settings::recentFiles() { return g_recents; }
+
+void Settings::pushRecent(const std::string& fullPath) {
+    if (fullPath.empty()) return;
+    // Dedup: drop any prior entry pointing at the same file so the new
+    // push lands at the front and doesn't multiply.
+    for (auto it = g_recents.begin(); it != g_recents.end(); ) {
+        if (*it == fullPath) it = g_recents.erase(it);
+        else                 ++it;
+    }
+    g_recents.insert(g_recents.begin(), fullPath);
+    if (g_recents.size() > kMaxRecents)
+        g_recents.resize(kMaxRecents);
+}
+
+void Settings::clearRecents() {
+    g_recents.clear();
 }
 
 void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {
