@@ -88,6 +88,10 @@ public:
     void renderToFBO(unsigned int fbo, int width, int height);
     bool needsRender() const { return m_renderRequested; }
 
+    // Returns true once after a fresh load completes; the flag self-clears
+    // so the host app can use it as a one-shot "show track picker" trigger.
+    bool consumeFreshFileLoaded();
+
     bool hasVideo() const { return m_hasVideo; }
     bool isPaused() const { return m_paused; }
     double getPosition() const { return m_position; }
@@ -131,4 +135,6 @@ private:
     bool   m_muted  = false;
     double m_speed  = 1.0;
     std::vector<Chapter> m_chapters;
+
+    bool m_freshFileLoaded = false;
 };

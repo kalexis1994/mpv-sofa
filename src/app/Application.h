@@ -6,6 +6,7 @@
 #include "ui/ImGuiLayer.h"
 #include "ui/ControlPanel.h"
 #include "ui/TransportBar.h"
+#include "ui/TrackPicker.h"
 #include "audio/MpvPlayer.h"
 
 #include <memory>
@@ -38,6 +39,7 @@ private:
     // UI panels
     std::unique_ptr<ControlPanel> m_controlPanel;
     std::unique_ptr<TransportBar> m_transportBar;
+    std::unique_ptr<TrackPicker>  m_trackPicker;
 
     // Shared state with audio filter
     HrtfSharedState* m_sharedState = nullptr;

@@ -132,6 +132,8 @@ bool Application::init(int argc, char* argv[]) {
     m_transportBar->setFullscreenCallback([this]() { toggleVideoFullscreen(); });
     m_transportBar->setControlsCallback([this]() { toggleControlPanel(); });
 
+    m_trackPicker = std::make_unique<TrackPicker>(m_player.get());
+
     // Create FBOs for video and 3D visualizer
     createFBOs();
 
@@ -348,6 +350,15 @@ void Application::update(float dt) {
     // Sync spatial object positions from sidecar to shared state
     if (m_controlPanel)
         m_controlPanel->updateObjectPositions();
+
+    // Open the audio-track picker the first frame after a fresh load.
+    // mpv has been kept paused so we can take our time before the first
+    // audible frame.
+    if (m_player && m_trackPicker &&
+        m_player->consumeFreshFileLoaded() &&
+        !m_player->getAudioTracks().empty()) {
+        m_trackPicker->open();
+    }
 }
 
 void Application::render() {
@@ -774,6 +785,11 @@ void Application::renderUI() {
     // Transport bar
     m_transportBar->render();
 
+    // Track picker modal — fires after a fresh load while playback is
+    // still paused, so the user picks the audio stream up-front.
+    if (m_trackPicker)
+        m_trackPicker->render();
+
     m_imgui->endFrame();
 }
 
@@ -791,6 +807,7 @@ void Application::shutdown() {
     if (m_vizTexture) glDeleteTextures(1, &m_vizTexture);
     if (m_vizDepth) glDeleteRenderbuffers(1, &m_vizDepth);
 
+    m_trackPicker.reset();
     m_transportBar.reset();
     m_controlPanel.reset();
     m_player.reset();

@@ -113,6 +113,7 @@ set(APP_SOURCES
     src/ui/ImGuiLayer.cpp
     src/ui/ControlPanel.cpp
     src/ui/TransportBar.cpp
+    src/ui/TrackPicker.cpp
     src/audio/MpvPlayer.cpp
     src/core/SharedState.c
     src/core/Settings.cpp

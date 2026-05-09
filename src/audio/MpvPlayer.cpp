@@ -206,11 +206,24 @@ void MpvPlayer::loadFile(const std::string& path) {
         return;
     }
 
+    // Hold the new file paused until the host UI confirms the audio track
+    // selection.  Setting `pause` BEFORE the loadfile command makes mpv
+    // pre-roll into the new file already paused, so the picker can take
+    // its time before the first audible frame is played.
+    int paused = 1;
+    mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &paused);
+
     fprintf(stderr, "[MpvPlayer] loadFile: %s\n", path.c_str());
     const char* cmd[] = {"loadfile", path.c_str(), nullptr};
     int err = mpv_command_async(m_mpv, 0, cmd);
     fprintf(stderr, "[MpvPlayer] loadFile async result: %d (%s)\n", err, mpv_error_string(err));
 #endif
+}
+
+bool MpvPlayer::consumeFreshFileLoaded() {
+    if (!m_freshFileLoaded) return false;
+    m_freshFileLoaded = false;
+    return true;
 }
 
 void MpvPlayer::play() {
@@ -623,6 +636,7 @@ void MpvPlayer::update() {
             m_hasVideo = true;
             refreshTrackList();
             refreshChapterList();
+            m_freshFileLoaded = true;
         }
         else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
             fprintf(stderr, "[MpvPlayer] PLAYBACK_RESTART event, hasVideo=%d\n", m_hasVideo);

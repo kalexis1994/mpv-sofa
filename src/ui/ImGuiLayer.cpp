@@ -131,29 +131,50 @@ static void applyTheme() {
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.45f);
 }
 
-// Centre Lucide icons against the visual midpoint of whatever base font we
-// merged them into.  ImGui anchors merged glyphs on the text baseline, but
-// Lucide fills the EM box from baseline upward (ascent ≈ size, descent ≈ 0)
-// while a body font is asymmetric (ascent + a small descent).  Their
-// vertical centres therefore disagree and the icons drift up.
+// Set up the base text font and merge Lucide icons on top.
 //
-//     base text mid (above baseline) = (baseAscent + baseDescent) / 2
-//                                       — note baseDescent is negative
-//     icon       mid (above baseline) =  iconSize / 2
-//     shift_down                      =  iconMid − textMid
+// ImGui's stock font (ProggyClean) only carries basic ASCII glyphs, so
+// any accented or non-Latin character in track titles, languages, file
+// paths or chapter names renders as '?'.  We prefer the system Segoe UI
+// on Windows — it ships with every install and covers the full Latin,
+// Greek and Cyrillic blocks — and fall back to ProggyClean only when we
+// can't read it from disk.
 //
-// We pull the metrics live from the loaded font so changing the default
-// font or the icon size automatically re-centres without further tuning.
-static void mergeIconFont() {
+// Centring Lucide against the loaded base font:  ImGui anchors merged
+// glyphs on the text baseline, but Lucide fills the EM box from baseline
+// upward.  We read the base font's ascent/descent live (newer ImGui
+// keeps them on ImFontBaked) and shift the icons by (iconMid − textMid)
+// so changing fonts or sizes re-centres automatically.
+static void setupFonts() {
     ImGuiIO& io = ImGui::GetIO();
 
-    ImFont* base = io.Fonts->AddFontDefault();
-    io.Fonts->Build();   // bake metrics so GetFontBaked has data to query
+    static const ImWchar text_ranges[] = {
+        0x0020, 0x00FF,   // Basic Latin + Latin-1 Supplement (ñ, é, ç, …)
+        0x0100, 0x017F,   // Latin Extended-A
+        0x0180, 0x024F,   // Latin Extended-B
+        0x0370, 0x03FF,   // Greek
+        0x0400, 0x04FF,   // Cyrillic
+        0x2010, 0x205F,   // General Punctuation (ellipsis, dashes, …)
+        0,
+    };
 
-    // Newer ImGui (1.92+) keeps Ascent/Descent on a per-size baked struct.
+    const float textSize = 15.0f;
+    ImFont* base = nullptr;
+
+#ifdef _WIN32
+    base = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf",
+                                         textSize, nullptr, text_ranges);
+#endif
+    if (!base) {
+        // Last-resort fallback: built-in ProggyClean.  Loses non-ASCII
+        // glyph coverage but keeps the UI from going textless.
+        base = io.Fonts->AddFontDefault();
+    }
+    io.Fonts->Build();   // bake metrics so GetFontBaked has data
+
     ImFontBaked* baked = base->GetFontBaked(base->LegacySize);
-    const float baseAscent  = baked->Ascent;     // px above baseline
-    const float baseDescent = baked->Descent;    // px below baseline (negative)
+    const float baseAscent  = baked->Ascent;
+    const float baseDescent = baked->Descent;     // negative
     const float iconSize    = 16.0f;
     const float textMid     = (baseAscent + baseDescent) * 0.5f;
     const float iconMid     = iconSize * 0.5f;
@@ -162,7 +183,7 @@ static void mergeIconFont() {
     cfg.MergeMode        = true;
     cfg.PixelSnapH       = true;
     cfg.GlyphOffset.y    = iconMid - textMid;
-    cfg.GlyphMinAdvanceX = iconSize;   // visually monospace the icons
+    cfg.GlyphMinAdvanceX = iconSize;
 
     static const ImWchar icon_ranges[] = { ICON_MIN_LC, ICON_MAX_16_LC, 0 };
     io.Fonts->AddFontFromFileTTF("assets/fonts/lucide.ttf",
@@ -177,7 +198,7 @@ void ImGuiLayer::init(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    mergeIconFont();
+    setupFonts();
     ImGui::StyleColorsDark();
     applyTheme();
 
