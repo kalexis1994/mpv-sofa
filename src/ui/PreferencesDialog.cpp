@@ -237,6 +237,82 @@ void PreferencesDialog::render() {
         }
     }
 
+    if (ImGui::CollapsingHeader(ICON_LC_EYE "  Display & HDR")) {
+        ImGui::TextWrapped(
+            "How mpv targets the colour pipeline at output.  Defaults "
+            "to SDR BT.709 because vo=libmpv can't probe your display; "
+            "switch to HDR10 passthrough when your TV is in HDR mode.");
+        ImGui::Spacing();
+
+        Settings::DisplayConfig d = Settings::displayConfig();
+        bool dirty = false;
+
+        const float labelW = 170.0f;
+
+        static const char* modeNames[] = {
+            "Auto (BT.709 / SDR)",
+            "Force SDR (BT.709)",
+            "HDR10 passthrough (BT.2020 / PQ)"
+        };
+        ImGui::TextUnformatted("Display mode");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::Combo("##disp_mode", &d.mode,
+                          modeNames, IM_ARRAYSIZE(modeNames)))
+            dirty = true;
+
+        ImGui::BeginDisabled(d.mode != 2);
+        ImGui::TextUnformatted("Display peak");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##disp_peak", &d.peakNits,
+                                100.0f, 4000.0f, "%.0f nits"))
+            dirty = true;
+        ImGui::EndDisabled();
+        if (d.mode == 2) {
+            ImGui::TextDisabled(
+                "    Typical OLED peak: 700-1000 nits.  Mini-LED: 1500-2000.");
+        }
+
+        static const char* toneNames[] = {
+            "BT.2390 (recommended)",
+            "Mobius (preserve highlights)",
+            "Hable (filmic)",
+            "Reinhard (classic)",
+            "Clip (no tone mapping)"
+        };
+        ImGui::TextUnformatted("Tone mapping");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::Combo("##disp_tone", &d.toneAlg,
+                          toneNames, IM_ARRAYSIZE(toneNames)))
+            dirty = true;
+
+        static const char* gamutNames[] = {
+            "Auto",
+            "Perceptual (smooth desaturate)",
+            "Relative (clip out-of-gamut)",
+            "Saturation (preserve hue)"
+        };
+        ImGui::TextUnformatted("Gamut mapping");
+        ImGui::SameLine(labelW);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::Combo("##disp_gamut", &d.gamutMode,
+                          gamutNames, IM_ARRAYSIZE(gamutNames)))
+            dirty = true;
+
+        ImGui::Spacing();
+        if (ImGui::Button("Reset to defaults##disp_reset")) {
+            d = Settings::DisplayConfig{};
+            dirty = true;
+        }
+
+        if (dirty) {
+            Settings::setDisplayConfig(d);
+            Settings::applyDisplayConfigToPlayer(m_player);
+        }
+    }
+
     if (ImGui::CollapsingHeader(ICON_LC_FILM "  35mm projection grain")) {
         ImGui::TextWrapped(
             "Real-time emulation of a 35mm release print being projected. "

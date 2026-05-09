@@ -216,6 +216,9 @@ bool Application::init(int argc, char* argv[]) {
     // Same for the 35mm projection-grain user shader.
     Settings::applyCinemaGrainToPlayer(m_player.get());
 
+    // And for the HDR / display target pipeline.
+    Settings::applyDisplayConfigToPlayer(m_player.get());
+
     // File-dialog typing.  Same accent colour for every entry so the only
     // visual differentiator between rows is the shape of the line-icon.
     {
@@ -371,12 +374,12 @@ void Application::toggleVideoFullscreen() {
 
     // The fullscreen swap resizes the video FBO from panel-size to
     // viewport-size, which makes libplacebo rebuild its render pipeline
-    // — and silently drops the active user shader on the way.  Re-push
-    // both subtitle styling and cinema grain so the new pipeline picks
-    // them up immediately.
+    // — and silently drops the active user shader / target overrides on
+    // the way.  Re-push everything so the new pipeline picks it up.
     if (m_player) {
         Settings::applySubtitleStyleToPlayer(m_player.get());
         Settings::applyCinemaGrainToPlayer (m_player.get());
+        Settings::applyDisplayConfigToPlayer(m_player.get());
     }
 }
 

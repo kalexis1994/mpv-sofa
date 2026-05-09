@@ -31,6 +31,20 @@ struct SubtitleStyle {
     int         pos           = 100;  // 0=top, 100=bottom (mpv convention)
 };
 
+// Display / HDR pipeline settings — what mpv targets at output.
+// mpv with vo=libmpv has no way to detect the host display's
+// capabilities, so by default it assumes SDR BT.709 and tone-maps any
+// HDR source down.  These knobs let the user opt into HDR10 passthrough
+// (e.g. an OLED in filmmaker / HDR mode), pick the tone-mapping
+// algorithm used when SDR-mapping is needed, and choose how
+// out-of-gamut colours are handled.
+struct DisplayConfig {
+    int   mode      = 0;       // 0=Auto, 1=Force SDR (BT.709), 2=HDR10 passthrough
+    float peakNits  = 1000.0f; // display peak luminance for HDR target
+    int   toneAlg   = 0;       // 0=bt.2390 (default), 1=mobius, 2=hable, 3=reinhard, 4=clip
+    int   gamutMode = 0;       // 0=auto, 1=perceptual, 2=relative, 3=saturation
+};
+
 // Real-time 35mm release-print projection grain emulation, applied
 // through mpv's user shader pipeline (assets/shaders/cinema_grain.glsl).
 // Models the grain accumulated on the duplicate positive that ran
@@ -92,6 +106,12 @@ void setRoomPreset(int idx);
 const SubtitleStyle& subtitleStyle();
 void                 setSubtitleStyle(const SubtitleStyle& s);
 void                 applySubtitleStyleToPlayer(MpvPlayer* p);
+
+// Display / HDR pipeline.  Pushes target-prim, target-trc, target-peak,
+// tone-mapping and gamut-mapping-mode to mpv.  Persisted in [display].
+const DisplayConfig& displayConfig();
+void                 setDisplayConfig(const DisplayConfig& c);
+void                 applyDisplayConfigToPlayer(MpvPlayer* p);
 
 // Real-time cinema grain.  Pushes glsl-shaders + glsl-shader-opts onto
 // the mpv pipeline.  Persisted in [cinema_grain].

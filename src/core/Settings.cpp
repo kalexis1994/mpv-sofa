@@ -77,6 +77,9 @@ struct Snapshot {
     // Cinema grain.
     Settings::CinemaGrain grain;
 
+    // Display / HDR.
+    Settings::DisplayConfig display;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -132,6 +135,10 @@ struct Snapshot {
         if (grain.grainSize   != o.grain.grainSize)   return false;
         if (grain.lumAdaptive != o.grain.lumAdaptive) return false;
         if (grain.chroma      != o.grain.chroma)      return false;
+        if (display.mode      != o.display.mode)      return false;
+        if (display.peakNits  != o.display.peakNits)  return false;
+        if (display.toneAlg   != o.display.toneAlg)   return false;
+        if (display.gamutMode != o.display.gamutMode) return false;
         return true;
     }
 };
@@ -146,6 +153,7 @@ std::string g_prefSubLang;
 int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
 Settings::SubtitleStyle g_subStyle;
 Settings::CinemaGrain   g_grain;
+Settings::DisplayConfig g_display;
 
 // Format an RGBA float[4] as the colour string mpv expects.  Note the
 // historical mpv convention is "#AARRGGBB" with alpha *first* — passing
@@ -228,6 +236,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.room_preset     = g_roomPreset;
     snap.sub_style       = g_subStyle;
     snap.grain           = g_grain;
+    snap.display         = g_display;
     return snap;
 }
 
@@ -406,6 +415,13 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             g_prefAudioLang = getS(kv, "audio_lang", "");
             g_prefSubLang   = getS(kv, "sub_lang",   "");
         }
+        if (auto it = ini.find("display"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_display.mode      = getI(kv, "mode",       g_display.mode);
+            g_display.peakNits  = getF(kv, "peak_nits",  g_display.peakNits);
+            g_display.toneAlg   = getI(kv, "tone_alg",   g_display.toneAlg);
+            g_display.gamutMode = getI(kv, "gamut_mode", g_display.gamutMode);
+        }
         if (auto it = ini.find("cinema_grain"); it != ini.end()) {
             const KV& kv = it->second;
             g_grain.enabled     = getI(kv, "enabled", g_grain.enabled ? 1 : 0) != 0;
@@ -528,6 +544,13 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "sub_lang=%s\n",   g_prefSubLang.c_str());
     fprintf(f, "\n");
 
+    fprintf(f, "[display]\n");
+    fprintf(f, "mode=%d\n",       g_display.mode);
+    fprintf(f, "peak_nits=%g\n",  g_display.peakNits);
+    fprintf(f, "tone_alg=%d\n",   g_display.toneAlg);
+    fprintf(f, "gamut_mode=%d\n", g_display.gamutMode);
+    fprintf(f, "\n");
+
     fprintf(f, "[cinema_grain]\n");
     fprintf(f, "enabled=%d\n",       g_grain.enabled ? 1 : 0);
     fprintf(f, "stock=%d\n",         g_grain.stock);
@@ -606,6 +629,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_roomPreset = 1;
     g_subStyle = SubtitleStyle{};
     g_grain    = CinemaGrain{};
+    g_display  = DisplayConfig{};
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
@@ -622,6 +646,42 @@ void Settings::setSubtitleStyle(const SubtitleStyle& s) { g_subStyle = s; }
 
 const Settings::CinemaGrain& Settings::cinemaGrain() { return g_grain; }
 void Settings::setCinemaGrain(const CinemaGrain& g)  { g_grain = g; }
+
+const Settings::DisplayConfig& Settings::displayConfig() { return g_display; }
+void Settings::setDisplayConfig(const DisplayConfig& c)  { g_display = c; }
+
+void Settings::applyDisplayConfigToPlayer(MpvPlayer* p) {
+    if (!p) return;
+    const DisplayConfig& d = g_display;
+
+    // mpv accepts "auto" for any of these to fall back to its own
+    // detection / default behaviour.  Mode 0 (Auto) clears all overrides
+    // so the user gets vanilla mpv defaults; the other modes pin the
+    // pipeline to a specific target colour space.
+    static const char* primMap[] = { "auto", "bt.709", "bt.2020"  };
+    static const char* trcMap[]  = { "auto", "bt.1886", "pq"       };
+    static const char* toneMap[] = { "bt.2390", "mobius", "hable",
+                                      "reinhard", "clip" };
+    static const char* gamutMap[] = { "auto", "perceptual",
+                                       "relative", "saturation" };
+
+    int idx = (d.mode < 0 || d.mode > 2) ? 0 : d.mode;
+    int ti  = (d.toneAlg   < 0 || d.toneAlg   > 4) ? 0 : d.toneAlg;
+    int gi  = (d.gamutMode < 0 || d.gamutMode > 3) ? 0 : d.gamutMode;
+
+    p->setStringProperty("target-prim",         primMap[idx]);
+    p->setStringProperty("target-trc",          trcMap[idx]);
+    p->setStringProperty("tone-mapping",        toneMap[ti]);
+    p->setStringProperty("gamut-mapping-mode",  gamutMap[gi]);
+
+    // Peak nits only meaningful for the HDR10 passthrough mode; the
+    // other modes let mpv pick (auto = use input or sensible default).
+    if (idx == 2) {
+        p->setDoubleProperty("target-peak", d.peakNits);
+    } else {
+        p->setStringProperty("target-peak", "auto");
+    }
+}
 
 void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {
     if (!p) return;
