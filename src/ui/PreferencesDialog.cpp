@@ -237,6 +237,107 @@ void PreferencesDialog::render() {
         }
     }
 
+    if (ImGui::CollapsingHeader(ICON_LC_FILM "  35mm projection grain")) {
+        ImGui::TextWrapped(
+            "Real-time emulation of a 35mm release print being projected. "
+            "This is GPU-bound — works fine on dGPUs and modern APUs (e.g. "
+            "ROG Ally Z2 Extreme).  Older integrated graphics may drop "
+            "frames at 4K.");
+        ImGui::Spacing();
+
+        Settings::CinemaGrain g = Settings::cinemaGrain();
+        bool dirty = false;
+
+        if (ImGui::Checkbox("Enable", &g.enabled))
+            dirty = true;
+
+        ImGui::BeginDisabled(!g.enabled);
+
+        // Stock preset combo.  Picking a stock writes the parameters to
+        // the working copy; nudging a slider after that flips the stock
+        // to "Custom" so the dropdown stops lying about what's active.
+        static const char* stockNames[] = {
+            "New release print",
+            "Repertory print",
+            "Worn 16mm",
+            "Custom"
+        };
+        struct StockPreset {
+            float intensity;
+            float grainSize;
+            float lumAdaptive;
+            float chroma;
+        };
+        static const StockPreset stockPresets[] = {
+            { 0.05f, 1.2f, 0.20f, 0.30f },  // New release print
+            { 0.10f, 1.6f, 0.30f, 0.40f },  // Repertory print
+            { 0.18f, 2.4f, 0.35f, 0.55f },  // Worn 16mm
+        };
+        ImGui::TextUnformatted("Stock");
+        ImGui::SameLine(170.0f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::Combo("##grain_stock", &g.stock,
+                          stockNames, IM_ARRAYSIZE(stockNames))) {
+            if (g.stock >= 0 && g.stock < 3) {
+                const auto& p   = stockPresets[g.stock];
+                g.intensity     = p.intensity;
+                g.grainSize     = p.grainSize;
+                g.lumAdaptive   = p.lumAdaptive;
+                g.chroma        = p.chroma;
+            }
+            dirty = true;
+        }
+
+        auto sliderTouched = [&]() {
+            // Any direct slider edit pops the dropdown into "Custom".
+            g.stock = 3;
+            dirty   = true;
+        };
+
+        ImGui::TextUnformatted("Intensity");
+        ImGui::SameLine(170.0f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##grain_intensity", &g.intensity,
+                                0.0f, 0.30f, "%.3f"))
+            sliderTouched();
+
+        ImGui::TextUnformatted("Grain size");
+        ImGui::SameLine(170.0f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##grain_size", &g.grainSize,
+                                0.5f, 4.0f, "%.2f px"))
+            sliderTouched();
+
+        ImGui::TextUnformatted("Tonal adaptive");
+        ImGui::SameLine(170.0f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##grain_lum", &g.lumAdaptive,
+                                0.0f, 1.0f,
+                                "%.2f  (0=uniform print, 1=peaks at midtones)"))
+            sliderTouched();
+
+        ImGui::TextUnformatted("Color decorrelation");
+        ImGui::SameLine(170.0f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+        if (ImGui::SliderFloat("##grain_chroma", &g.chroma,
+                                0.0f, 1.0f,
+                                "%.2f  (0=mono noise, 1=full RGB)"))
+            sliderTouched();
+
+        ImGui::EndDisabled();
+
+        ImGui::Spacing();
+        if (ImGui::Button("Reset to defaults##grain_reset")) {
+            g = Settings::CinemaGrain{};
+            dirty = true;
+        }
+
+        if (dirty) {
+            Settings::setCinemaGrain(g);
+            Settings::applyCinemaGrainToPlayer(m_player);
+        }
+    }
+
     ImGui::EndChild();
 
     ImGui::Separator();

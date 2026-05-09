@@ -31,6 +31,21 @@ struct SubtitleStyle {
     int         pos           = 100;  // 0=top, 100=bottom (mpv convention)
 };
 
+// Real-time 35mm release-print projection grain emulation, applied
+// through mpv's user shader pipeline (assets/shaders/cinema_grain.glsl).
+// Models the grain accumulated on the duplicate positive that ran
+// through the projector, not the cleaner camera-negative grain.
+// GPU-bound — disabled by default; OK on a ROG Ally Z2 Extreme, modern
+// dGPUs and APUs, will hurt on older integrated graphics.
+struct CinemaGrain {
+    bool  enabled     = false;
+    int   stock       = 1;     // 0=New release print, 1=Repertory print, 2=Worn 16mm, 3=Custom
+    float intensity   = 0.10f; // 0..0.30
+    float grainSize   = 1.6f;  // 0.5..4.0 px
+    float lumAdaptive = 0.30f; // 0=uniform across tonal range (print-like), 1=peaks at midtones (negative-like)
+    float chroma      = 0.4f;  // 0=mono noise, 1=fully decorrelated RGB
+};
+
 // Read mpv-sofa.ini.  Missing/unreadable file is not an error — caller's
 // defaults stay in place and a fresh snapshot is taken so isDirty() returns
 // false until the user changes something.
@@ -77,5 +92,16 @@ void setRoomPreset(int idx);
 const SubtitleStyle& subtitleStyle();
 void                 setSubtitleStyle(const SubtitleStyle& s);
 void                 applySubtitleStyleToPlayer(MpvPlayer* p);
+
+// Real-time cinema grain.  Pushes glsl-shaders + glsl-shader-opts onto
+// the mpv pipeline.  Persisted in [cinema_grain].
+const CinemaGrain& cinemaGrain();
+void               setCinemaGrain(const CinemaGrain& g);
+void               applyCinemaGrainToPlayer(MpvPlayer* p);
+
+// Advance the grain's time_seed param so the noise pattern changes
+// every frame (avoids the "frozen grain" look).  Call once per render
+// from the host loop while grain is enabled.  No-op when disabled.
+void               tickCinemaGrain(MpvPlayer* p);
 
 } // namespace Settings

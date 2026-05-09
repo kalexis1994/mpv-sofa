@@ -74,6 +74,9 @@ struct Snapshot {
     // Subtitle style.
     Settings::SubtitleStyle sub_style;
 
+    // Cinema grain.
+    Settings::CinemaGrain grain;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -123,6 +126,12 @@ struct Snapshot {
             if (a.shadowColor[i] != b.shadowColor[i]) return false;
             if (a.backColor[i]   != b.backColor[i])   return false;
         }
+        if (grain.enabled     != o.grain.enabled)     return false;
+        if (grain.stock       != o.grain.stock)       return false;
+        if (grain.intensity   != o.grain.intensity)   return false;
+        if (grain.grainSize   != o.grain.grainSize)   return false;
+        if (grain.lumAdaptive != o.grain.lumAdaptive) return false;
+        if (grain.chroma      != o.grain.chroma)      return false;
         return true;
     }
 };
@@ -136,6 +145,7 @@ std::string g_prefAudioLang;
 std::string g_prefSubLang;
 int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
 Settings::SubtitleStyle g_subStyle;
+Settings::CinemaGrain   g_grain;
 
 // Format an RGBA float[4] as the colour string mpv expects.  Note the
 // historical mpv convention is "#AARRGGBB" with alpha *first* — passing
@@ -217,6 +227,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.pref_sub_lang   = g_prefSubLang;
     snap.room_preset     = g_roomPreset;
     snap.sub_style       = g_subStyle;
+    snap.grain           = g_grain;
     return snap;
 }
 
@@ -395,6 +406,15 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             g_prefAudioLang = getS(kv, "audio_lang", "");
             g_prefSubLang   = getS(kv, "sub_lang",   "");
         }
+        if (auto it = ini.find("cinema_grain"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_grain.enabled     = getI(kv, "enabled", g_grain.enabled ? 1 : 0) != 0;
+            g_grain.stock       = getI(kv, "stock",        g_grain.stock);
+            g_grain.intensity   = getF(kv, "intensity",    g_grain.intensity);
+            g_grain.grainSize   = getF(kv, "grain_size",   g_grain.grainSize);
+            g_grain.lumAdaptive = getF(kv, "lum_adaptive", g_grain.lumAdaptive);
+            g_grain.chroma      = getF(kv, "chroma",       g_grain.chroma);
+        }
         if (auto it = ini.find("subtitle_style"); it != ini.end()) {
             const KV& kv = it->second;
             g_subStyle.font          = getS(kv, "font", g_subStyle.font.c_str());
@@ -508,6 +528,15 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "sub_lang=%s\n",   g_prefSubLang.c_str());
     fprintf(f, "\n");
 
+    fprintf(f, "[cinema_grain]\n");
+    fprintf(f, "enabled=%d\n",       g_grain.enabled ? 1 : 0);
+    fprintf(f, "stock=%d\n",         g_grain.stock);
+    fprintf(f, "intensity=%g\n",     g_grain.intensity);
+    fprintf(f, "grain_size=%g\n",    g_grain.grainSize);
+    fprintf(f, "lum_adaptive=%g\n",  g_grain.lumAdaptive);
+    fprintf(f, "chroma=%g\n",        g_grain.chroma);
+    fprintf(f, "\n");
+
     fprintf(f, "[subtitle_style]\n");
     fprintf(f, "font=%s\n",          g_subStyle.font.c_str());
     fprintf(f, "size_pt=%g\n",       g_subStyle.sizePt);
@@ -576,6 +605,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_prefSubLang.clear();
     g_roomPreset = 1;
     g_subStyle = SubtitleStyle{};
+    g_grain    = CinemaGrain{};
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
@@ -589,6 +619,88 @@ void Settings::setRoomPreset(int idx)   { g_roomPreset = idx;  }
 const Settings::SubtitleStyle& Settings::subtitleStyle() { return g_subStyle; }
 
 void Settings::setSubtitleStyle(const SubtitleStyle& s) { g_subStyle = s; }
+
+const Settings::CinemaGrain& Settings::cinemaGrain() { return g_grain; }
+void Settings::setCinemaGrain(const CinemaGrain& g)  { g_grain = g; }
+
+void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {
+    if (!p) return;
+    ensureIniPath();
+
+    // Locate the executable directory (where mpv-sofa.ini lives).
+    std::string baseDir = g_iniPath;
+    auto slash = baseDir.find_last_of("\\/");
+    baseDir = (slash != std::string::npos)
+                 ? baseDir.substr(0, slash + 1)
+                 : std::string();
+
+    if (!g_grain.enabled) {
+        p->setStringProperty("glsl-shaders", "");
+        return;
+    }
+
+    // Read the shader template and substitute {{KEY}} placeholders with
+    // the current parameter values.  We can't use //!PARAM / glsl-shader-
+    // opts because libplacebo's PARAM directive doesn't parse under our
+    // vo=libmpv pipeline; baking the constants into the source via
+    // #define is the next-best mechanism and matches what most user-
+    // shader collections do for tunable params.
+    const std::string templatePath = baseDir + "assets/shaders/cinema_grain.glsl";
+    const std::string runtimePath  = baseDir + "cinema_grain_runtime.glsl";
+
+    std::string source;
+    if (FILE* f = fopen(templatePath.c_str(), "rb")) {
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (sz > 0) {
+            source.resize((size_t)sz);
+            (void)fread(&source[0], 1, (size_t)sz, f);
+        }
+        fclose(f);
+    }
+    if (source.empty()) {
+        fprintf(stderr, "[grain] template missing: %s\n", templatePath.c_str());
+        return;
+    }
+
+    auto replaceAll = [&](const std::string& key, float value) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.6f", value);
+        std::string ph  = "{{" + key + "}}";
+        std::string val = buf;
+        size_t pos = 0;
+        while ((pos = source.find(ph, pos)) != std::string::npos) {
+            source.replace(pos, ph.size(), val);
+            pos += val.size();
+        }
+    };
+    replaceAll("INTENSITY",    g_grain.intensity);
+    replaceAll("GRAIN_SIZE",   g_grain.grainSize);
+    replaceAll("LUM_ADAPTIVE", g_grain.lumAdaptive);
+    replaceAll("CHROMA",       g_grain.chroma);
+
+    if (FILE* f = fopen(runtimePath.c_str(), "wb")) {
+        fwrite(source.data(), 1, source.size(), f);
+        fclose(f);
+    } else {
+        fprintf(stderr, "[grain] cannot write runtime shader: %s\n",
+                runtimePath.c_str());
+        return;
+    }
+
+    // Toggle to empty first so mpv treats the same path as a fresh load
+    // and re-reads our newly-substituted source.
+    p->setStringProperty("glsl-shaders", "");
+    p->setStringProperty("glsl-shaders", runtimePath.c_str());
+}
+
+void Settings::tickCinemaGrain(MpvPlayer* /*p*/) {
+    // Kept as a public no-op so existing callers don't break.  Temporal
+    // variation now comes from libplacebo's `frame` builtin inside the
+    // shader, no per-frame property update needed (touching shader-opts
+    // every frame forces a shader recompile and tanks audio sync).
+}
 
 void Settings::applySubtitleStyleToPlayer(MpvPlayer* p) {
     if (!p) return;

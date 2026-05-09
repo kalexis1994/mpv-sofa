@@ -213,6 +213,9 @@ bool Application::init(int argc, char* argv[]) {
     // played already inherits the user's choices.
     Settings::applySubtitleStyleToPlayer(m_player.get());
 
+    // Same for the 35mm projection-grain user shader.
+    Settings::applyCinemaGrainToPlayer(m_player.get());
+
     // File-dialog typing.  Same accent colour for every entry so the only
     // visual differentiator between rows is the shape of the line-icon.
     {
@@ -365,6 +368,16 @@ void Application::toggleVideoFullscreen() {
     m_videoFullscreen = !m_videoFullscreen;
     m_window->toggleFullscreen();
     m_fullscreenCursorTimer = 3.0f;
+
+    // The fullscreen swap resizes the video FBO from panel-size to
+    // viewport-size, which makes libplacebo rebuild its render pipeline
+    // — and silently drops the active user shader on the way.  Re-push
+    // both subtitle styling and cinema grain so the new pipeline picks
+    // them up immediately.
+    if (m_player) {
+        Settings::applySubtitleStyleToPlayer(m_player.get());
+        Settings::applyCinemaGrainToPlayer (m_player.get());
+    }
 }
 
 void Application::processInput() {
