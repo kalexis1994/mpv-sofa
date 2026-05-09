@@ -1,5 +1,6 @@
 #include "Settings.h"
 #include "SharedState.h"
+#include "audio/MpvPlayer.h"
 
 #include <cstdio>
 #include <cstring>
@@ -70,6 +71,9 @@ struct Snapshot {
     // Last room preset chosen (UI hint only).
     int room_preset = 1;
 
+    // Subtitle style.
+    Settings::SubtitleStyle sub_style;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -106,6 +110,19 @@ struct Snapshot {
         if (pref_audio_lang != o.pref_audio_lang) return false;
         if (pref_sub_lang   != o.pref_sub_lang)   return false;
         if (room_preset     != o.room_preset)     return false;
+        // Subtitle style equality
+        const auto& a = sub_style;
+        const auto& b = o.sub_style;
+        if (a.font != b.font || a.sizePt != b.sizePt ||
+            a.borderSize != b.borderSize || a.shadowOffset != b.shadowOffset ||
+            a.bold != b.bold || a.marginY != b.marginY || a.pos != b.pos)
+            return false;
+        for (int i = 0; i < 4; i++) {
+            if (a.color[i]       != b.color[i])       return false;
+            if (a.borderColor[i] != b.borderColor[i]) return false;
+            if (a.shadowColor[i] != b.shadowColor[i]) return false;
+            if (a.backColor[i]   != b.backColor[i])   return false;
+        }
         return true;
     }
 };
@@ -118,6 +135,42 @@ std::string g_iniPath;
 std::string g_prefAudioLang;
 std::string g_prefSubLang;
 int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
+Settings::SubtitleStyle g_subStyle;
+
+// Format an RGBA float[4] as the colour string mpv expects.  Note the
+// historical mpv convention is "#AARRGGBB" with alpha *first* — passing
+// "#RRGGBBAA" makes mpv interpret your alpha as red and so on.
+std::string toHexRgba(const float c[4]) {
+    auto clamp8 = [](float v) {
+        int i = (int)(v * 255.0f + 0.5f);
+        if (i < 0)   i = 0;
+        if (i > 255) i = 255;
+        return i;
+    };
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%02X%02X%02X%02X",
+             clamp8(c[3]), clamp8(c[0]), clamp8(c[1]), clamp8(c[2]));
+    return buf;
+}
+
+// Inverse: parse "#AARRGGBB" or "#RRGGBB" into rgba[4].
+void parseHexRgba(const char* s, float out[4]) {
+    if (!s || s[0] != '#') return;
+    size_t len = strlen(s);
+    unsigned r=0, g=0, b=0, a=255;
+    if (len >= 9 && sscanf(s, "#%2x%2x%2x%2x", &a, &r, &g, &b) == 4) {
+        // matched #AARRGGBB
+    } else if (len >= 7 && sscanf(s, "#%2x%2x%2x", &r, &g, &b) == 3) {
+        // matched #RRGGBB (no alpha)
+        a = 255;
+    } else {
+        return;
+    }
+    out[0] = r / 255.0f;
+    out[1] = g / 255.0f;
+    out[2] = b / 255.0f;
+    out[3] = a / 255.0f;
+}
 
 Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     Snapshot snap;
@@ -163,6 +216,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.pref_audio_lang = g_prefAudioLang;
     snap.pref_sub_lang   = g_prefSubLang;
     snap.room_preset     = g_roomPreset;
+    snap.sub_style       = g_subStyle;
     return snap;
 }
 
@@ -341,6 +395,20 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             g_prefAudioLang = getS(kv, "audio_lang", "");
             g_prefSubLang   = getS(kv, "sub_lang",   "");
         }
+        if (auto it = ini.find("subtitle_style"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_subStyle.font          = getS(kv, "font", g_subStyle.font.c_str());
+            g_subStyle.sizePt        = getF(kv, "size_pt",        g_subStyle.sizePt);
+            g_subStyle.borderSize    = getF(kv, "border_size",    g_subStyle.borderSize);
+            g_subStyle.shadowOffset  = getF(kv, "shadow_offset",  g_subStyle.shadowOffset);
+            g_subStyle.bold          = getI(kv, "bold",     g_subStyle.bold ? 1 : 0) != 0;
+            g_subStyle.marginY       = getI(kv, "margin_y", g_subStyle.marginY);
+            g_subStyle.pos           = getI(kv, "pos",      g_subStyle.pos);
+            parseHexRgba(getS(kv, "color",        ""), g_subStyle.color);
+            parseHexRgba(getS(kv, "border_color", ""), g_subStyle.borderColor);
+            parseHexRgba(getS(kv, "shadow_color", ""), g_subStyle.shadowColor);
+            parseHexRgba(getS(kv, "back_color",   ""), g_subStyle.backColor);
+        }
         if (auto it = ini.find("speakers"); it != ini.end()) {
             const KV& kv = it->second;
             int n = getI(kv, "count", atomic_load(&state->num_channels));
@@ -438,6 +506,20 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "[preferences]\n");
     fprintf(f, "audio_lang=%s\n", g_prefAudioLang.c_str());
     fprintf(f, "sub_lang=%s\n",   g_prefSubLang.c_str());
+    fprintf(f, "\n");
+
+    fprintf(f, "[subtitle_style]\n");
+    fprintf(f, "font=%s\n",          g_subStyle.font.c_str());
+    fprintf(f, "size_pt=%g\n",       g_subStyle.sizePt);
+    fprintf(f, "color=%s\n",         toHexRgba(g_subStyle.color).c_str());
+    fprintf(f, "border_color=%s\n",  toHexRgba(g_subStyle.borderColor).c_str());
+    fprintf(f, "border_size=%g\n",   g_subStyle.borderSize);
+    fprintf(f, "shadow_color=%s\n",  toHexRgba(g_subStyle.shadowColor).c_str());
+    fprintf(f, "shadow_offset=%g\n", g_subStyle.shadowOffset);
+    fprintf(f, "back_color=%s\n",    toHexRgba(g_subStyle.backColor).c_str());
+    fprintf(f, "bold=%d\n",          g_subStyle.bold ? 1 : 0);
+    fprintf(f, "margin_y=%d\n",      g_subStyle.marginY);
+    fprintf(f, "pos=%d\n",           g_subStyle.pos);
 
     fclose(f);
     g_lastSaved = capture(state, showControls, show3DViz);
@@ -493,6 +575,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_prefAudioLang.clear();
     g_prefSubLang.clear();
     g_roomPreset = 1;
+    g_subStyle = SubtitleStyle{};
 }
 
 const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
@@ -502,6 +585,36 @@ void Settings::setPreferredSubLang  (std::string lang) { g_prefSubLang   = std::
 
 int  Settings::roomPreset()             { return g_roomPreset; }
 void Settings::setRoomPreset(int idx)   { g_roomPreset = idx;  }
+
+const Settings::SubtitleStyle& Settings::subtitleStyle() { return g_subStyle; }
+
+void Settings::setSubtitleStyle(const SubtitleStyle& s) { g_subStyle = s; }
+
+void Settings::applySubtitleStyleToPlayer(MpvPlayer* p) {
+    if (!p) return;
+    const SubtitleStyle& s = g_subStyle;
+
+    // Most MKV subtitles are ASS, which carries its own font / colour /
+    // border styling.  By default mpv respects that ("sub-ass-override=no")
+    // and the user's --sub-color / --sub-font etc. are silently ignored.
+    // Forcing the override makes our settings apply across both ASS and
+    // plain-text formats (SRT / WebVTT / SubRip).
+    p->setStringProperty("sub-ass-override", "force");
+
+    // Font: empty string means "leave mpv default"; mpv accepts "" to
+    // mean "auto-pick a sans-serif", so passing through is fine either way.
+    p->setStringProperty("sub-font",          s.font.c_str());
+    p->setDoubleProperty("sub-font-size",     s.sizePt);
+    p->setStringProperty("sub-color",         toHexRgba(s.color).c_str());
+    p->setStringProperty("sub-border-color",  toHexRgba(s.borderColor).c_str());
+    p->setDoubleProperty("sub-border-size",   s.borderSize);
+    p->setStringProperty("sub-shadow-color",  toHexRgba(s.shadowColor).c_str());
+    p->setDoubleProperty("sub-shadow-offset", s.shadowOffset);
+    p->setStringProperty("sub-back-color",    toHexRgba(s.backColor).c_str());
+    p->setFlagProperty  ("sub-bold",          s.bold);
+    p->setIntProperty   ("sub-margin-y",      s.marginY);
+    p->setIntProperty   ("sub-pos",           s.pos);
+}
 
 bool Settings::langMatches(const std::string& trackLang,
                             const std::string& prefLang) {

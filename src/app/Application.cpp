@@ -200,7 +200,7 @@ bool Application::init(int argc, char* argv[]) {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
 
-    m_prefsDialog = std::make_unique<PreferencesDialog>();
+    m_prefsDialog = std::make_unique<PreferencesDialog>(m_player.get());
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
@@ -208,6 +208,10 @@ bool Application::init(int argc, char* argv[]) {
     // Restore persisted settings (sliders, paths, panel visibility) before
     // the first render so the UI reflects the user's last choices.
     Settings::load(m_sharedState, &m_showControlPanel, &m_show3DViz);
+
+    // Push the persisted subtitle styling into mpv so the first file
+    // played already inherits the user's choices.
+    Settings::applySubtitleStyleToPlayer(m_player.get());
 
     // File-dialog typing.  Same accent colour for every entry so the only
     // visual differentiator between rows is the shape of the line-icon.

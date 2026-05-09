@@ -7,8 +7,29 @@
 #include <string>
 
 struct HrtfSharedState;
+class  MpvPlayer;
 
 namespace Settings {
+
+// Visual styling for rendered subtitles.  Values map straight onto mpv
+// properties (`sub-font`, `sub-font-size`, `sub-color`, `sub-border-*`,
+// `sub-shadow-*`, `sub-back-color`, `sub-bold`, `sub-margin-y`, `sub-pos`).
+// Colours are stored as RGBA 0..1 float arrays so ImGui ColorEdit can
+// bind to them directly; the apply-to-player path serialises them as
+// `#RRGGBBAA` hex strings before pushing to mpv.
+struct SubtitleStyle {
+    std::string font          = "";   // "" → mpv default font (Sans)
+    float       sizePt        = 42.0f;
+    float       color[4]      = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float       borderColor[4]= { 0.0f, 0.0f, 0.0f, 1.0f };
+    float       borderSize    = 2.5f;
+    float       shadowColor[4]= { 0.0f, 0.0f, 0.0f, 0.6f };
+    float       shadowOffset  = 2.0f;
+    float       backColor[4]  = { 0.0f, 0.0f, 0.0f, 0.0f };
+    bool        bold          = false;
+    int         marginY       = 22;
+    int         pos           = 100;  // 0=top, 100=bottom (mpv convention)
+};
 
 // Read mpv-sofa.ini.  Missing/unreadable file is not an error — caller's
 // defaults stay in place and a fresh snapshot is taken so isDirty() returns
@@ -50,5 +71,11 @@ bool langMatches(const std::string& trackLang, const std::string& prefLang);
 // user customised them.
 int  roomPreset();
 void setRoomPreset(int idx);
+
+// Live subtitle styling — read the current values, write a new copy,
+// and push them to a running mpv player.  Persisted in [subtitle_style].
+const SubtitleStyle& subtitleStyle();
+void                 setSubtitleStyle(const SubtitleStyle& s);
+void                 applySubtitleStyleToPlayer(MpvPlayer* p);
 
 } // namespace Settings

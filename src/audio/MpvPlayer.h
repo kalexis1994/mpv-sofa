@@ -84,6 +84,14 @@ public:
     void frameStep();
     void frameStepBack();
 
+    // Generic property setters used by Settings to push subtitle styling
+    // (sub-font / sub-color / sub-bold / …) without coupling Settings to
+    // libmpv directly.  Silently no-op when the player isn't initialised.
+    void setStringProperty(const char* name, const char* value);
+    void setDoubleProperty(const char* name, double value);
+    void setIntProperty   (const char* name, int   value);
+    void setFlagProperty  (const char* name, bool  value);
+
     void update();
     void renderToFBO(unsigned int fbo, int width, int height);
     bool needsRender() const { return m_renderRequested; }

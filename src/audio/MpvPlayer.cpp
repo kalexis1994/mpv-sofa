@@ -572,6 +572,36 @@ void MpvPlayer::frameStepBack() {
 #endif
 }
 
+void MpvPlayer::setStringProperty(const char* name, const char* value) {
+#ifdef HAVE_MPV
+    if (!m_mpv || !name || !value) return;
+    mpv_set_property_string(m_mpv, name, value);
+#endif
+}
+
+void MpvPlayer::setDoubleProperty(const char* name, double value) {
+#ifdef HAVE_MPV
+    if (!m_mpv || !name) return;
+    mpv_set_property(m_mpv, name, MPV_FORMAT_DOUBLE, &value);
+#endif
+}
+
+void MpvPlayer::setIntProperty(const char* name, int value) {
+#ifdef HAVE_MPV
+    if (!m_mpv || !name) return;
+    int64_t v = value;
+    mpv_set_property(m_mpv, name, MPV_FORMAT_INT64, &v);
+#endif
+}
+
+void MpvPlayer::setFlagProperty(const char* name, bool value) {
+#ifdef HAVE_MPV
+    if (!m_mpv || !name) return;
+    int v = value ? 1 : 0;
+    mpv_set_property(m_mpv, name, MPV_FORMAT_FLAG, &v);
+#endif
+}
+
 void MpvPlayer::update() {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
