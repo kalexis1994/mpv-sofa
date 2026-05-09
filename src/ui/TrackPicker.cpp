@@ -1,5 +1,6 @@
 #include "TrackPicker.h"
 #include "audio/MpvPlayer.h"
+#include "core/Settings.h"
 
 #include <imgui.h>
 #include <IconsLucide.h>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -115,6 +117,46 @@ bool isSpatialCapable(const AudioTrack& t) {
     return false;
 }
 
+// Loot-style rarity tiers, driven by channel count.  Spatial-capable
+// streams (Atmos / DD+ JOC / DTS:X) bump the tier by one (capped at
+// Legendary), so a "5.1 Atmos" track reads as Epic instead of Rare.
+enum class Rarity { Common = 0, Uncommon, Rare, Epic, Legendary };
+
+Rarity rarityFor(const AudioTrack& t) {
+    Rarity r;
+    if      (t.channels >= 10) r = Rarity::Legendary;   // 7.1.2 / 7.1.4 / 5.1.4 / 7.1.6 / 9.1.6
+    else if (t.channels >=  8) r = Rarity::Epic;        // 7.1
+    else if (t.channels >=  6) r = Rarity::Rare;        // 5.1 / 6.1
+    else if (t.channels >=  4) r = Rarity::Uncommon;    // Quad / 4 ch
+    else                        r = Rarity::Common;     // Mono / Stereo / 2.1
+    if (isSpatialCapable(t) && r < Rarity::Legendary)
+        r = (Rarity)((int)r + 1);
+    return r;
+}
+
+// Tier border / accent colour.  Common returns 0 → caller falls back to
+// the regular ImGuiCol_Border so the card looks unchanged.
+ImU32 rarityColor(Rarity r) {
+    switch (r) {
+        case Rarity::Uncommon:  return IM_COL32( 92, 184,  92, 255); // green
+        case Rarity::Rare:      return IM_COL32( 91, 192, 222, 255); // blue
+        case Rarity::Epic:      return IM_COL32(157, 123, 216, 255); // purple
+        case Rarity::Legendary: return IM_COL32(240, 173,  78, 255); // gold
+        default:                return 0;
+    }
+}
+
+// Slightly brighter sibling for the hover state.
+ImU32 rarityColorHover(Rarity r) {
+    switch (r) {
+        case Rarity::Uncommon:  return IM_COL32(140, 220, 140, 255);
+        case Rarity::Rare:      return IM_COL32(150, 220, 240, 255);
+        case Rarity::Epic:      return IM_COL32(195, 165, 240, 255);
+        case Rarity::Legendary: return IM_COL32(255, 210, 130, 255);
+        default:                return 0;
+    }
+}
+
 // Friendly language name from ISO 639-2/B/T or 639-1 code.  Falls back
 // to the raw code when unknown.
 std::string langLabel(const std::string& code) {
@@ -184,14 +226,28 @@ bool drawCard(const AudioTrack& t, float w, float h) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 bg      = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
                                                      : ImGuiCol_FrameBg);
-    const ImU32 border  = ImGui::GetColorU32(hovered ? ImGuiCol_Text
-                                                     : ImGuiCol_Border);
     const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
     const ImU32 colDim  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
-    const ImVec2 pmax(origin.x + w, origin.y + h);
 
+    // Loot-tier outline: more channels (and spatial) → richer border.
+    const Rarity rarity   = rarityFor(t);
+    const ImU32 tierCol   = rarityColor(rarity);
+    const ImU32 tierHov   = rarityColorHover(rarity);
+    ImU32 border;
+    float borderThick;
+    if (tierCol) {
+        border      = hovered ? tierHov : tierCol;
+        borderThick = (rarity >= Rarity::Epic) ? 2.5f
+                    : (rarity >= Rarity::Uncommon) ? 2.0f : 1.0f;
+    } else {
+        border      = ImGui::GetColorU32(hovered ? ImGuiCol_Text
+                                                 : ImGuiCol_Border);
+        borderThick = hovered ? 1.5f : 1.0f;
+    }
+
+    const ImVec2 pmax(origin.x + w, origin.y + h);
     dl->AddRectFilled(origin, pmax, bg, 6.0f);
-    dl->AddRect(origin, pmax, border, 6.0f, 0, hovered ? 1.5f : 1.0f);
+    dl->AddRect(origin, pmax, border, 6.0f, 0, borderThick);
 
     dl->PushClipRect(ImVec2(origin.x + 4, origin.y + 4),
                      ImVec2(pmax.x - 4, pmax.y - 4), true);
@@ -201,9 +257,11 @@ bool drawCard(const AudioTrack& t, float w, float h) {
     const float padY = 12.0f;
     float       yc   = origin.y + padY;
 
-    // Codec heading.
+    // Codec heading — tinted toward the tier colour for Epic / Legendary
+    // so the eye lands on the high-end tracks first.
     const std::string codec = codecLabel(t);
-    dl->AddText(ImVec2(origin.x + padX, yc), colText, codec.c_str());
+    const ImU32 codecCol = (rarity >= Rarity::Epic) ? tierCol : colText;
+    dl->AddText(ImVec2(origin.x + padX, yc), codecCol, codec.c_str());
     yc += lh + 6.0f;
 
     // Title, dimmed and truncated, just below the heading.
@@ -493,11 +551,28 @@ void TrackPicker::render() {
             const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
                                         style.ItemSpacing.x, 240.0f, 340.0f);
 
+            // Render order: language match first, then most channels,
+            // then by track ID for stability.  Keeps the user's preferred
+            // language up top *and* leads each language block with its
+            // best stream (Atmos / 7.1.4 / 7.1 / 5.1 / Stereo).
+            const std::string& prefLang = Settings::preferredAudioLang();
+            std::vector<size_t> order(tracks.size());
+            std::iota(order.begin(), order.end(), 0);
+            std::sort(order.begin(), order.end(),
+                      [&](size_t a, size_t b) {
+                bool aMatch = Settings::langMatches(tracks[a].lang, prefLang);
+                bool bMatch = Settings::langMatches(tracks[b].lang, prefLang);
+                if (aMatch != bMatch) return aMatch;
+                if (tracks[a].channels != tracks[b].channels)
+                    return tracks[a].channels > tracks[b].channels;
+                return tracks[a].id < tracks[b].id;
+            });
+
             int picked = -1;
-            for (size_t i = 0; i < tracks.size(); i++) {
+            for (size_t i = 0; i < order.size(); i++) {
                 if ((int)(i % g.cols) != 0) ImGui::SameLine();
-                if (drawCard(tracks[i], g.cardW, cardH))
-                    picked = (int)i;
+                if (drawCard(tracks[order[i]], g.cardW, cardH))
+                    picked = (int)order[i];
             }
             ImGui::EndChild();
 
@@ -540,15 +615,27 @@ void TrackPicker::render() {
         const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
                                     style.ItemSpacing.x, 220.0f, 320.0f);
 
+        // Sort subs by preferred-language match first, then by id.
+        const std::string& prefSub = Settings::preferredSubLang();
+        std::vector<size_t> order(subs.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) {
+            bool aMatch = Settings::langMatches(subs[a].lang, prefSub);
+            bool bMatch = Settings::langMatches(subs[b].lang, prefSub);
+            if (aMatch != bMatch) return aMatch;
+            return subs[a].id < subs[b].id;
+        });
+
         int picked = -2;   // -2 = no pick, -1 = "Off", >=0 = sub index
         // "Off" card always first.
         if (drawSubOffCard(g.cardW, cardH, currentSubId == 0))
             picked = -1;
-        for (size_t i = 0; i < subs.size(); i++) {
+        for (size_t i = 0; i < order.size(); i++) {
             int idx = (int)(i + 1);            // +1 because Off is at 0
             if ((idx % g.cols) != 0) ImGui::SameLine();
-            if (drawSubCard(subs[i], g.cardW, cardH))
-                picked = (int)i;
+            if (drawSubCard(subs[order[i]], g.cardW, cardH))
+                picked = (int)order[i];
         }
         ImGui::EndChild();
 

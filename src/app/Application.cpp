@@ -140,6 +140,8 @@ bool Application::init(int argc, char* argv[]) {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
 
+    m_prefsDialog = std::make_unique<PreferencesDialog>();
+
     // Create FBOs for video and 3D visualizer
     createFBOs();
 
@@ -363,6 +365,25 @@ void Application::update(float dt) {
     if (m_player && m_trackPicker &&
         m_player->consumeFreshFileLoaded() &&
         !m_player->getAudioTracks().empty()) {
+        // Apply language preferences: pick the first track whose lang
+        // matches Settings::preferredAudio/SubLang.  The user can still
+        // override from the picker that opens right after.
+        const std::string& prefAud = Settings::preferredAudioLang();
+        if (!prefAud.empty()) {
+            for (const auto& t : m_player->getAudioTracks())
+                if (Settings::langMatches(t.lang, prefAud)) {
+                    m_player->setAudioTrack(t.id);
+                    break;
+                }
+        }
+        const std::string& prefSub = Settings::preferredSubLang();
+        if (!prefSub.empty()) {
+            for (const auto& s : m_player->getSubtitleTracks())
+                if (Settings::langMatches(s.lang, prefSub)) {
+                    m_player->setSubtitleTrack(s.id);
+                    break;
+                }
+        }
         m_trackPicker->open(TrackPicker::Mode::Audio, /*isAutoLoad=*/true);
     }
 }
@@ -511,6 +532,11 @@ void Application::renderUI() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(ICON_LC_SETTINGS "  Settings")) {
+            if (ImGui::MenuItem(ICON_LC_SLIDERS "  Preferences...",
+                                 "Ctrl+,")) {
+                if (m_prefsDialog) m_prefsDialog->open();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(ICON_LC_SAVE "  Save Now",
                                  "Ctrl+S", false, dirty)) {
                 Settings::save(m_sharedState,
@@ -541,6 +567,10 @@ void Application::renderUI() {
         ImGuiIO& io = ImGui::GetIO();
         if (dirty && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
             Settings::save(m_sharedState, m_showControlPanel, m_show3DViz);
+        }
+        // Ctrl+, : open preferences dialog (mirrors Settings > Preferences).
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Comma, false)) {
+            if (m_prefsDialog) m_prefsDialog->open();
         }
         // Ctrl+O: open file dialog (mirrors File > Open).
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) {
@@ -810,6 +840,10 @@ void Application::renderUI() {
     if (m_trackPicker)
         m_trackPicker->render();
 
+    // Preferences modal (Settings > Preferences / Ctrl+,)
+    if (m_prefsDialog)
+        m_prefsDialog->render();
+
     m_imgui->endFrame();
 }
 
@@ -827,6 +861,7 @@ void Application::shutdown() {
     if (m_vizTexture) glDeleteTextures(1, &m_vizTexture);
     if (m_vizDepth) glDeleteRenderbuffers(1, &m_vizDepth);
 
+    m_prefsDialog.reset();
     m_trackPicker.reset();
     m_transportBar.reset();
     m_controlPanel.reset();

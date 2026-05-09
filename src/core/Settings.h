@@ -4,6 +4,8 @@
 // (and on demand from the Settings menu) when the in-memory state has
 // drifted from the last saved snapshot.
 
+#include <string>
+
 struct HrtfSharedState;
 
 namespace Settings {
@@ -26,5 +28,20 @@ void resetToDefaults(HrtfSharedState* state, bool* showControls, bool* show3DViz
 
 // Absolute path the module reads from / writes to (for status display).
 const char* filePath();
+
+// User-level preferences applied when a file loads (track picker
+// pre-selects the matching audio / subtitle stream when one of these
+// is non-empty).  Stored as ISO 639-2/B/T codes ("eng", "spa", …) or
+// empty for "no preference".  Values flow through the same dirty +
+// auto-save path as the rest of the persisted state.
+const std::string& preferredAudioLang();
+const std::string& preferredSubLang();
+void setPreferredAudioLang(std::string lang);
+void setPreferredSubLang(std::string lang);
+
+// True when a track-list lang code (whatever the file has, e.g. "es" or
+// "spa") matches a preferences code, including the common 2 ↔ 3 letter
+// aliases ("eng" ↔ "en", "spa" ↔ "es", "fre"/"fra" ↔ "fr", …).
+bool langMatches(const std::string& trackLang, const std::string& prefLang);
 
 } // namespace Settings

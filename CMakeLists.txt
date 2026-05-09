@@ -114,6 +114,7 @@ set(APP_SOURCES
     src/ui/ControlPanel.cpp
     src/ui/TransportBar.cpp
     src/ui/TrackPicker.cpp
+    src/ui/PreferencesDialog.cpp
     src/audio/MpvPlayer.cpp
     src/core/SharedState.c
     src/core/Settings.cpp

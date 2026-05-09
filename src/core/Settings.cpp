@@ -63,6 +63,10 @@ struct Snapshot {
     int          num_speakers = 12;
     HrtfPosition speakers[HRTF_MAX_CHANNELS];
 
+    // Auto-selected language preferences.
+    std::string pref_audio_lang;
+    std::string pref_sub_lang;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -96,12 +100,19 @@ struct Snapshot {
             if (speakers[i].elevation != o.speakers[i].elevation) return false;
             if (speakers[i].distance  != o.speakers[i].distance)  return false;
         }
+        if (pref_audio_lang != o.pref_audio_lang) return false;
+        if (pref_sub_lang   != o.pref_sub_lang)   return false;
         return true;
     }
 };
 
 Snapshot g_lastSaved;
 std::string g_iniPath;
+
+// Live preferences, kept outside Snapshot so the UI can read/write them
+// without dragging the full snapshot around.
+std::string g_prefAudioLang;
+std::string g_prefSubLang;
 
 Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     Snapshot snap;
@@ -143,6 +154,9 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
         snap.num_speakers = 12;
     for (int i = 0; i < snap.num_speakers; i++)
         snap.speakers[i] = s->speaker_pos[i];
+
+    snap.pref_audio_lang = g_prefAudioLang;
+    snap.pref_sub_lang   = g_prefSubLang;
     return snap;
 }
 
@@ -315,6 +329,11 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             atomic_store(&state->near_field_comp,     getI(kv, "near_field_comp",     atomic_load(&state->near_field_comp)));
             atomic_store(&state->direct_min_phase,    getI(kv, "direct_min_phase",    atomic_load(&state->direct_min_phase)));
         }
+        if (auto it = ini.find("preferences"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_prefAudioLang = getS(kv, "audio_lang", "");
+            g_prefSubLang   = getS(kv, "sub_lang",   "");
+        }
         if (auto it = ini.find("speakers"); it != ini.end()) {
             const KV& kv = it->second;
             int n = getI(kv, "count", atomic_load(&state->num_channels));
@@ -406,6 +425,11 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
         fprintf(f, "speaker_%d_el=%g\n", i, state->speaker_pos[i].elevation);
         fprintf(f, "speaker_%d_d=%g\n",  i, state->speaker_pos[i].distance);
     }
+    fprintf(f, "\n");
+
+    fprintf(f, "[preferences]\n");
+    fprintf(f, "audio_lang=%s\n", g_prefAudioLang.c_str());
+    fprintf(f, "sub_lang=%s\n",   g_prefSubLang.c_str());
 
     fclose(f);
     g_lastSaved = capture(state, showControls, show3DViz);
@@ -457,4 +481,41 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
 
     hrtf_shared_state_init_714(state);
     atomic_store(&state->speaker_pos_changed, 1);
+
+    g_prefAudioLang.clear();
+    g_prefSubLang.clear();
+}
+
+const std::string& Settings::preferredAudioLang() { return g_prefAudioLang; }
+const std::string& Settings::preferredSubLang()   { return g_prefSubLang;   }
+void Settings::setPreferredAudioLang(std::string lang) { g_prefAudioLang = std::move(lang); }
+void Settings::setPreferredSubLang  (std::string lang) { g_prefSubLang   = std::move(lang); }
+
+bool Settings::langMatches(const std::string& trackLang,
+                            const std::string& prefLang) {
+    if (prefLang.empty() || trackLang.empty()) return false;
+    auto lower = [](std::string s) {
+        for (char& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    const std::string a = lower(trackLang);
+    const std::string b = lower(prefLang);
+    if (a == b) return true;
+
+    // Common 3 ↔ 2 letter aliases.  Both legs are matched so a track tagged
+    // "es" still matches a "spa" preference and vice-versa.
+    static const std::pair<const char*, const char*> pairs[] = {
+        {"eng","en"}, {"spa","es"}, {"fre","fr"}, {"fra","fr"},
+        {"ger","de"}, {"deu","de"}, {"ita","it"}, {"por","pt"},
+        {"jpn","ja"}, {"kor","ko"}, {"chi","zh"}, {"zho","zh"},
+        {"rus","ru"}, {"ara","ar"}, {"hin","hi"}, {"dut","nl"},
+        {"nld","nl"}, {"swe","sv"}, {"nor","no"}, {"dan","da"},
+        {"fin","fi"}, {"pol","pl"}, {"tur","tr"},
+    };
+    for (auto& p : pairs) {
+        if ((a == p.first && b == p.second) ||
+            (a == p.second && b == p.first))
+            return true;
+    }
+    return false;
 }
