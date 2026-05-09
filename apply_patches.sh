@@ -8,9 +8,10 @@ MPV_SRC="mpv-src"
 
 echo "=== Applying HRTF patches to mpv ==="
 
-# 1. Copy our filter
-echo "Copying af_hrtf.c..."
-cp mpv-patches/af_hrtf.c "$MPV_SRC/audio/filter/af_hrtf.c"
+# 1. Copy our filter and its module headers
+echo "Copying af_hrtf.c + module headers..."
+cp mpv-patches/af_hrtf.c   "$MPV_SRC/audio/filter/af_hrtf.c"
+cp mpv-patches/af_hrtf_*.h "$MPV_SRC/audio/filter/"
 
 # 2. Copy PFFFT (if submodule exists)
 if [ -f "external/pffft/pffft.c" ]; then

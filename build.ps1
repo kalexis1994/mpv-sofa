@@ -5,17 +5,20 @@ $ErrorActionPreference = "Stop"
 
 $hrtfRoot    = "F:\hrtf"
 $mpvSrc      = "$hrtfRoot\mpv-src"
-$patchFile   = "$hrtfRoot\mpv-patches\af_hrtf.c"
-$destFile    = "$mpvSrc\audio\filter\af_hrtf.c"
+$patchDir    = "$hrtfRoot\mpv-patches"
+$filterDir   = "$mpvSrc\audio\filter"
 $mpvBuildDir = "$mpvSrc\build"
 $appBuildDir = "$hrtfRoot\build"
 $distDir     = "$hrtfRoot\dist"
 $msys2Bash   = "C:\msys64\usr\bin\bash.exe"
 
-# ---- Step 1: Copy af_hrtf.c to mpv source ----
-Write-Host "=== Step 1: Copy af_hrtf.c ===" -ForegroundColor Cyan
-Copy-Item $patchFile $destFile -Force
-Write-Host "Copied $patchFile -> $destFile"
+# ---- Step 1: Copy af_hrtf.c + module headers to mpv source ----
+Write-Host "=== Step 1: Copy af_hrtf sources ===" -ForegroundColor Cyan
+Copy-Item "$patchDir\af_hrtf.c" "$filterDir\af_hrtf.c" -Force
+Get-ChildItem "$patchDir\af_hrtf_*.h" | ForEach-Object {
+    Copy-Item $_.FullName "$filterDir\$($_.Name)" -Force
+    Write-Host "  $($_.Name)"
+}
 
 # ---- Step 2: Build mpv (MSYS2 UCRT64) ----
 Write-Host "`n=== Step 2: Build mpv (MSYS2 UCRT64) ===" -ForegroundColor Cyan
