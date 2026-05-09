@@ -66,10 +66,19 @@ jobs:
           # Clone FFmpeg n8.0
           git clone --depth 1 --branch n8.0 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
 
-          # Apply the spatial audio patch (strip CRLF — actions/checkout adds CR on Windows)
+          # Apply the spatial audio patch.  Two cleanups before applying:
+          #   1. Strip CRLF — actions/checkout adds CR on Windows.
+          #   2. Drop anything before the first `diff --git` so a stray git
+          #      warning that leaked into the patch via stdout doesn't make
+          #      `git apply` choke on a non-diff line at offset 0.
+          # `--recount` recomputes the line counts in @@ headers from the
+          # actual content, so subtle off-by-one mistakes in the hunk
+          # metadata don't block the apply when the body is correct.
           cd ffmpeg-src
           sed -i 's/\r$//' ../ffmpeg-patches/ffmpeg-spatial-audio.patch
-          git apply ../ffmpeg-patches/ffmpeg-spatial-audio.patch
+          sed -i '1,/^diff --git/{/^diff --git/!d}' \
+               ../ffmpeg-patches/ffmpeg-spatial-audio.patch
+          git apply --recount ../ffmpeg-patches/ffmpeg-spatial-audio.patch
 
           # Copy new source files
           cp ../ffmpeg-patches/mlp_atmos_coeff.c libavcodec/mlp_atmos_coeff.c

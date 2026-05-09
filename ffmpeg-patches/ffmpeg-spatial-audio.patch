@@ -1,4 +1,3 @@
-warning: in the working copy of 'libavcodec/mlpdsp.c', LF will be replaced by CRLF the next time Git touches it
 diff --git a/libavcodec/mlpdec.c b/libavcodec/mlpdec.c
 index e85dac3..7c2e714 100644
 --- a/libavcodec/mlpdec.c
