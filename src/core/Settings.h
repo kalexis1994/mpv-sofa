@@ -136,6 +136,14 @@ const PlaybackConfig& playbackConfig();
 void                  setPlaybackConfig(const PlaybackConfig& p);
 void                  applyPlaybackConfigToPlayer(MpvPlayer* p);
 
+// OS-level window presentation mode.  0 = Fullscreen, 1 = Borderless,
+// 2 = Windowed.  Persisted in [window]; default Fullscreen so the app
+// reads as a TV-mode appliance on first run.  Application reads this
+// at startup to choose Window::init's mode and exposes a runtime
+// switch through Preferences > Display & HDR.
+int  windowMode();
+void setWindowMode(int m);
+
 // Real-time cinema grain.  Pushes glsl-shaders + glsl-shader-opts onto
 // the mpv pipeline.  Persisted in [cinema_grain].
 const CinemaGrain& cinemaGrain();

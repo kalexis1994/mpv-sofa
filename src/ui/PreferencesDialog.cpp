@@ -1,5 +1,6 @@
 #include "PreferencesDialog.h"
 #include "ControlPanel.h"
+#include "app/Window.h"
 #include "core/Settings.h"
 #include "audio/MpvPlayer.h"
 
@@ -58,8 +59,9 @@ bool langGetter(void* /*data*/, int idx, const char** out) {
 } // anonymous namespace
 
 PreferencesDialog::PreferencesDialog(MpvPlayer* player,
-                                     ControlPanel* controlPanel)
-    : m_player(player), m_controlPanel(controlPanel) {}
+                                     ControlPanel* controlPanel,
+                                     Window* window)
+    : m_player(player), m_controlPanel(controlPanel), m_window(window) {}
 
 void PreferencesDialog::open() {
     m_audioIdx     = findLangIndex(Settings::preferredAudioLang());
@@ -516,6 +518,36 @@ void PreferencesDialog::renderDisplay() {
         Settings::setDisplayConfig(d);
         Settings::applyDisplayConfigToPlayer(m_player);
     }
+
+    // Window presentation — modelled on the AAA-game pattern.
+    // Default Fullscreen so first-run reads as a TV-mode appliance;
+    // Borderless trades a tiny amount of latency for friendlier
+    // Alt-Tab + overlay behaviour; Windowed is the dev / multitasking
+    // option.  Live-applies to the running window so the user sees
+    // the swap immediately without a restart.
+    ImGui::Spacing();
+    ImGui::TextDisabled("Window presentation");
+    ImGui::Spacing();
+
+    static const char* winModeNames[] = {
+        "Fullscreen (exclusive)",
+        "Borderless window",
+        "Windowed",
+    };
+    int winMode = Settings::windowMode();
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine(labelW);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    if (ImGui::Combo("##win_mode", &winMode,
+                      winModeNames, IM_ARRAYSIZE(winModeNames))) {
+        Settings::setWindowMode(winMode);
+        if (m_window) m_window->setMode(static_cast<WindowMode>(winMode));
+    }
+    ImGui::TextDisabled(
+        "    Fullscreen takes over the display.  Borderless covers the\n"
+        "    monitor without the title bar but stays a regular window\n"
+        "    (better Alt-Tab / overlay behaviour).  Windowed leaves a\n"
+        "    resizable frame around the app.");
 }
 
 void PreferencesDialog::renderAudioSync() {

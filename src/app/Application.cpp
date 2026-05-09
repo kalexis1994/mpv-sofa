@@ -83,9 +83,21 @@ bool Application::init(int argc, char* argv[]) {
         return false;
     }
 
+    // Restore persisted settings before the window is created so the
+    // saved window-mode (Fullscreen / Borderless / Windowed) applies
+    // on first show — otherwise the app would always flash through a
+    // 1600×900 windowed frame on its way to the user's preferred mode.
+    // The HRTF / subtitle / display knobs all need a player or window
+    // to apply against, so the apply*ToPlayer calls stay later in
+    // init; only the load itself moves up.
+    Settings::load(m_sharedState, &m_showControlPanel, &m_show3DViz);
+
+    auto initialMode = static_cast<WindowMode>(Settings::windowMode());
+
     // Create window
     m_window = std::make_unique<Window>();
-    if (!m_window->init("HRTF Spatial Audio Virtualizer", 1600, 900)) {
+    if (!m_window->init("HRTF Spatial Audio Virtualizer", 1600, 900,
+                         initialMode)) {
         fprintf(stderr, "Failed to create window\n");
         return false;
     }
@@ -148,17 +160,15 @@ bool Application::init(int argc, char* argv[]) {
     });
 
     m_prefsDialog = std::make_unique<PreferencesDialog>(m_player.get(),
-                                                          m_controlPanel.get());
+                                                          m_controlPanel.get(),
+                                                          m_window.get());
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
 
-    // Restore persisted settings (sliders, paths, panel visibility) before
-    // the first render so the UI reflects the user's last choices.
-    Settings::load(m_sharedState, &m_showControlPanel, &m_show3DViz);
-
-    // Push the persisted subtitle styling into mpv so the first file
-    // played already inherits the user's choices.
+    // Settings::load already ran before window creation; here we just
+    // push the persisted preferences that need a live player into mpv
+    // so the first file played already inherits the user's choices.
     Settings::applySubtitleStyleToPlayer(m_player.get());
 
     // Same for the 35mm projection-grain user shader.
@@ -375,6 +385,68 @@ void Application::processInput() {
     // F3 used to toggle the legacy Control Panel drawer.  That panel
     // moved into Preferences (Spatial / Headphone EQ tabs), so the
     // shortcut is gone — Ctrl+, opens the same controls now.
+
+    // Left stick → directional nav.  ImGui's nav system reads the
+    // GamepadDpad* keys for nav-move and uses GamepadLStick* keys for
+    // scrolling instead, so the stick by itself doesn't move the focus
+    // cursor.  Forward the analog state into the keyboard arrow keys
+    // (which ImGui *does* use for nav when NavEnableKeyboard is set)
+    // so a TV-mode user can drive the UI with either input.  We pick
+    // arrows over GamepadDpad* on purpose: imgui_impl_glfw's own gamepad
+    // poll continuously writes the real DPad button state into those
+    // keys, so an injection there would be overwritten on the same
+    // frame.  Arrow keys aren't touched by the backend, leaving us as
+    // the sole writer.
+    if (glfwJoystickPresent(GLFW_JOYSTICK_1) &&
+        glfwJoystickIsGamepad(GLFW_JOYSTICK_1)) {
+        GLFWgamepadstate gp;
+        if (glfwGetGamepadState(GLFW_JOYSTICK_1, &gp)) {
+            const float dz = 0.45f;   // generous; avoids ghost moves on resting sticks
+            const float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X];
+            const float ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
+
+            const bool curLeft  = lx < -dz;
+            const bool curRight = lx >  dz;
+            const bool curUp    = ly < -dz;
+            const bool curDown  = ly >  dz;
+
+            ImGuiIO& io = ImGui::GetIO();
+            if (curLeft  != m_lstickLeft)  io.AddKeyEvent(ImGuiKey_LeftArrow,  curLeft);
+            if (curRight != m_lstickRight) io.AddKeyEvent(ImGuiKey_RightArrow, curRight);
+            if (curUp    != m_lstickUp)    io.AddKeyEvent(ImGuiKey_UpArrow,    curUp);
+            if (curDown  != m_lstickDown)  io.AddKeyEvent(ImGuiKey_DownArrow,  curDown);
+
+            m_lstickLeft  = curLeft;
+            m_lstickRight = curRight;
+            m_lstickUp    = curUp;
+            m_lstickDown  = curDown;
+
+            // File-dialog convenience bindings — only active while the
+            // ImGuiFileDialog popup is up so they don't pollute the
+            // rest of the UI.  Y forwards to Enter, mirroring the
+            // dialog's keyboard "confirm / open folder" gesture; X
+            // forwards to Backspace, mirroring "go up to parent".
+            // Done by polling GLFW directly (rather than IsKeyDown on
+            // ImGui's gamepad keys) because ImGui_ImplGlfw populates
+            // those during NewFrame, which runs *after* this
+            // processInput pass — IsKeyDown here would lag a frame.
+            if (ImGuiFileDialog::Instance()->IsOpened()) {
+                const bool curY = gp.buttons[GLFW_GAMEPAD_BUTTON_Y] == GLFW_PRESS;
+                const bool curX = gp.buttons[GLFW_GAMEPAD_BUTTON_X] == GLFW_PRESS;
+                if (curY != m_dialogYHeld) io.AddKeyEvent(ImGuiKey_Enter,     curY);
+                if (curX != m_dialogXHeld) io.AddKeyEvent(ImGuiKey_Backspace, curX);
+                m_dialogYHeld = curY;
+                m_dialogXHeld = curX;
+            } else if (m_dialogYHeld || m_dialogXHeld) {
+                // Dialog just closed while a button was still held —
+                // release the synthetic keys so they don't get stuck.
+                if (m_dialogYHeld) io.AddKeyEvent(ImGuiKey_Enter,     false);
+                if (m_dialogXHeld) io.AddKeyEvent(ImGuiKey_Backspace, false);
+                m_dialogYHeld = false;
+                m_dialogXHeld = false;
+            }
+        }
+    }
 }
 
 void Application::update(float dt) {
@@ -584,7 +656,8 @@ void Application::renderUI() {
                                  m_player && m_player->hasVideo())) {
                 IGFD::FileDialogConfig cfg;
                 cfg.path = ".";
-                cfg.flags = ImGuiFileDialogFlags_Modal;
+                cfg.flags = ImGuiFileDialogFlags_Modal |
+                            ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
                 ImGuiFileDialog::Instance()->OpenDialog(
                     "open_subtitle",
                     "Load subtitle",
@@ -946,7 +1019,13 @@ void Application::renderUI() {
 void Application::openFileDialog() {
     IGFD::FileDialogConfig cfg;
     cfg.path  = ".";
-    cfg.flags = ImGuiFileDialogFlags_Modal;
+    // CaseInsensitiveExtentionFiltering is critical: without it the
+    // dialog drops files whose on-disk extension casing differs from
+    // the filter (e.g. "Movie.MKV" doesn't match ".mkv").  That
+    // accounts for the missing-files reports on Windows where capture
+    // tools and rippers tend to emit uppercase extensions.
+    cfg.flags = ImGuiFileDialogFlags_Modal |
+                ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
     ImGuiFileDialog::Instance()->OpenDialog(
         "open_media",
         "Open media file",
@@ -1053,96 +1132,6 @@ void Application::renderHomeScreen() {
     // *is* the primary input, that initial-hidden state means the user
     // sees no focus indicator and assumes nav is broken.  Force it on.
     ImGui::SetNavCursorVisible(true);
-
-    // Live gamepad diagnostic — shows what GLFW is actually reporting
-    // so it's obvious whether nav failures are upstream (controller
-    // not detected, d-pad not mapped) vs. an ImGui issue.  Highlights
-    // each input in red while it's pressed / past dead-zone.
-    {
-        const bool joy   = glfwJoystickPresent(GLFW_JOYSTICK_1) != 0;
-        const bool gamep = joy && glfwJoystickIsGamepad(GLFW_JOYSTICK_1) != 0;
-        const float smallScale = 0.85f;
-
-        ImGui::PushFont(nullptr, ImGui::GetFontSize() * smallScale);
-
-        if (!joy) {
-            const char* hint = ICON_LC_GAMEPAD_2 "  No gamepad detected.";
-            ImVec2 ts = ImGui::CalcTextSize(hint);
-            ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f,
-                                        size.y - ts.y - 24.0f));
-            ImGui::TextDisabled("%s", hint);
-        } else {
-            // Header line: detected name (or generic joystick name).
-            char header[256];
-            const char* name =
-                gamep ? glfwGetGamepadName(GLFW_JOYSTICK_1)
-                      : glfwGetJoystickName(GLFW_JOYSTICK_1);
-            snprintf(header, sizeof(header),
-                     gamep ? ICON_LC_GAMEPAD_2 "  %s"
-                           : ICON_LC_JOYSTICK   "  %s  (no gamepad mapping)",
-                     name ? name : "controller");
-
-            // Read live state for the bottom indicator row.
-            GLFWgamepadstate gp = {};
-            const float* axes = nullptr;
-            const unsigned char* buttons = nullptr;
-            int axesCount = 0, buttonsCount = 0;
-            if (gamep) {
-                glfwGetGamepadState(GLFW_JOYSTICK_1, &gp);
-            } else {
-                axes    = glfwGetJoystickAxes   (GLFW_JOYSTICK_1, &axesCount);
-                buttons = glfwGetJoystickButtons(GLFW_JOYSTICK_1, &buttonsCount);
-            }
-
-            auto pressed = [&](int gpBtn, int rawBtn) -> bool {
-                if (gamep) return gp.buttons[gpBtn] == GLFW_PRESS;
-                return buttons && rawBtn < buttonsCount &&
-                       buttons[rawBtn] == GLFW_PRESS;
-            };
-            auto axis = [&](int gpAx, int rawAx) -> float {
-                if (gamep) return gp.axes[gpAx];
-                return (axes && rawAx < axesCount) ? axes[rawAx] : 0.0f;
-            };
-
-            const float lx = axis(GLFW_GAMEPAD_AXIS_LEFT_X, 0);
-            const float ly = axis(GLFW_GAMEPAD_AXIS_LEFT_Y, 1);
-
-            // Pull current ImGui NavWindow / NavId so we can tell at a
-            // glance whether nav focus is sitting on the home window
-            // (good — d-pad will move between buttons) or has been
-            // hijacked by the menu bar / some other window (bad — the
-            // d-pad is moving an invisible cursor up there instead).
-            ImGuiContext* g = ImGui::GetCurrentContext();
-            const char* navWin = (g && g->NavWindow) ? g->NavWindow->Name : "(none)";
-            unsigned navId = g ? g->NavId : 0u;
-
-            char status[512];
-            snprintf(status, sizeof(status),
-                     "DPad %s%s%s%s   A:%s  B:%s   LStick %+0.2f, %+0.2f   Nav: %s / %08X",
-                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_UP,    10) ? "U" : "·",
-                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_DOWN,  12) ? "D" : "·",
-                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_LEFT,  13) ? "L" : "·",
-                     pressed(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT, 11) ? "R" : "·",
-                     pressed(GLFW_GAMEPAD_BUTTON_A, 0) ? "✓" : "·",
-                     pressed(GLFW_GAMEPAD_BUTTON_B, 1) ? "✓" : "·",
-                     lx, ly,
-                     navWin, navId);
-
-            ImVec2 hts = ImGui::CalcTextSize(header);
-            ImVec2 sts = ImGui::CalcTextSize(status);
-            const float lineGap = 6.0f;
-            const float blockH  = hts.y + lineGap + sts.y;
-
-            ImGui::SetCursorPos(ImVec2((size.x - hts.x) * 0.5f,
-                                        size.y - blockH - 24.0f));
-            ImGui::TextDisabled("%s", header);
-            ImGui::SetCursorPos(ImVec2((size.x - sts.x) * 0.5f,
-                                        size.y - sts.y - 24.0f));
-            ImGui::TextDisabled("%s", status);
-        }
-
-        ImGui::PopFont();
-    }
 
     m_homeFreshlyShown = false;
     ImGui::End();

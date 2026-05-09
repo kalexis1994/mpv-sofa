@@ -8,11 +8,13 @@
 
 class MpvPlayer;
 class ControlPanel;
+class Window;
 
 class PreferencesDialog {
 public:
     PreferencesDialog(MpvPlayer* player = nullptr,
-                       ControlPanel* controlPanel = nullptr);
+                       ControlPanel* controlPanel = nullptr,
+                       Window* window = nullptr);
 
     void open();
     void render();
@@ -49,6 +51,7 @@ private:
 
     MpvPlayer*    m_player       = nullptr;
     ControlPanel* m_controlPanel = nullptr;
+    Window*       m_window       = nullptr;
 
     bool m_requestOpen  = false;
     bool m_isOpen       = false;

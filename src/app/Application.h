@@ -106,6 +106,22 @@ private:
     // Preferences page (Spatial / Headphone EQ tabs).
     bool m_showControlPanel = false;
 
+    // Left-stick edge tracking — used by processInput()'s LStick →
+    // arrow-key forwarder so the analog stick can drive ImGui nav the
+    // same way the d-pad does.  Edge-detection avoids spamming events
+    // every frame; ImGui's own repeat timing handles the held case.
+    bool m_lstickLeft  = false;
+    bool m_lstickRight = false;
+    bool m_lstickUp    = false;
+    bool m_lstickDown  = false;
+
+    // File-dialog gamepad shortcuts.  When ImGuiFileDialog is open we
+    // forward Y → Enter (confirm / open folder) and X → Backspace
+    // (go up to parent dir).  Edge-tracked so the events queue cleanly
+    // and don't get re-fired every frame the button is held.
+    bool m_dialogYHeld = false;
+    bool m_dialogXHeld = false;
+
     // Video fullscreen mode
     bool m_videoFullscreen = false;
     bool m_fullscreenKeyHeld = false;

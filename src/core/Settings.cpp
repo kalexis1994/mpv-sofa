@@ -83,6 +83,9 @@ struct Snapshot {
     // Playback (audio-delay).
     Settings::PlaybackConfig playback;
 
+    // OS-level window presentation mode.
+    int window_mode = 0;   // 0=Fullscreen, 1=Borderless, 2=Windowed
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -144,6 +147,7 @@ struct Snapshot {
         if (display.gamutMode != o.display.gamutMode) return false;
         if (display.panscan   != o.display.panscan)   return false;
         if (playback.audioDelay != o.playback.audioDelay) return false;
+        if (window_mode != o.window_mode) return false;
         return true;
     }
 };
@@ -160,6 +164,7 @@ Settings::SubtitleStyle  g_subStyle;
 Settings::CinemaGrain    g_grain;
 Settings::DisplayConfig  g_display;
 Settings::PlaybackConfig g_playback;
+int                      g_windowMode = 0;   // 0=Fullscreen
 std::vector<std::string> g_recents;
 constexpr size_t kMaxRecents = 12;
 
@@ -246,6 +251,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.grain           = g_grain;
     snap.display         = g_display;
     snap.playback        = g_playback;
+    snap.window_mode     = g_windowMode;
     return snap;
 }
 
@@ -436,6 +442,11 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_playback.audioDelay = getF(kv, "audio_delay", g_playback.audioDelay);
         }
+        if (auto it = ini.find("window"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_windowMode = getI(kv, "mode", g_windowMode);
+            if (g_windowMode < 0 || g_windowMode > 2) g_windowMode = 0;
+        }
         if (auto it = ini.find("recent"); it != ini.end()) {
             const KV& kv = it->second;
             g_recents.clear();
@@ -583,6 +594,10 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "audio_delay=%g\n", g_playback.audioDelay);
     fprintf(f, "\n");
 
+    fprintf(f, "[window]\n");
+    fprintf(f, "mode=%d\n", g_windowMode);
+    fprintf(f, "\n");
+
     fprintf(f, "[recent]\n");
     fprintf(f, "count=%d\n", (int)g_recents.size());
     for (size_t i = 0; i < g_recents.size(); i++)
@@ -668,7 +683,8 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_subStyle = SubtitleStyle{};
     g_grain    = CinemaGrain{};
     g_display  = DisplayConfig{};
-    g_playback = PlaybackConfig{};
+    g_playback   = PlaybackConfig{};
+    g_windowMode = 0;   // Fullscreen
     g_recents.clear();
 }
 
@@ -732,6 +748,12 @@ void Settings::setPlaybackConfig(const PlaybackConfig& c)  { g_playback = c; }
 void Settings::applyPlaybackConfigToPlayer(MpvPlayer* p) {
     if (!p) return;
     p->setDoubleProperty("audio-delay", g_playback.audioDelay);
+}
+
+int  Settings::windowMode()         { return g_windowMode; }
+void Settings::setWindowMode(int m) {
+    if (m < 0 || m > 2) m = 0;
+    g_windowMode = m;
 }
 
 const std::vector<std::string>& Settings::recentFiles() { return g_recents; }

@@ -219,13 +219,23 @@ bool drawCard(const AudioTrack& t, float w, float h) {
     ImGui::PushID(t.id);
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    ImGui::InvisibleButton("##card", ImVec2(w, h));
+    // EnableNav lets DPad / left-stick land focus on each card; without
+    // it InvisibleButton registers as ImGuiItemFlags_NoNav and the
+    // gamepad cursor skips over the entire grid.  The transparent
+    // NavCursor push suppresses ImGui's default focus rectangle so the
+    // custom rarity-coloured ring below is the only highlight.
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(0, 0, 0, 0));
+    ImGui::InvisibleButton("##card", ImVec2(w, h),
+                            ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
     const bool hovered = ImGui::IsItemHovered();
+    const bool focused = ImGui::IsItemFocused();
     const bool clicked = ImGui::IsItemActivated();
+    const bool emph    = hovered || focused;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 bg      = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
-                                                     : ImGuiCol_FrameBg);
+    const ImU32 bg      = ImGui::GetColorU32(emph ? ImGuiCol_FrameBgHovered
+                                                  : ImGuiCol_FrameBg);
     const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
     const ImU32 colDim  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
 
@@ -236,13 +246,14 @@ bool drawCard(const AudioTrack& t, float w, float h) {
     ImU32 border;
     float borderThick;
     if (tierCol) {
-        border      = hovered ? tierHov : tierCol;
+        border      = emph ? tierHov : tierCol;
         borderThick = (rarity >= Rarity::Epic) ? 2.5f
                     : (rarity >= Rarity::Uncommon) ? 2.0f : 1.0f;
+        if (focused) borderThick += 1.0f;   // bump on nav-focus
     } else {
-        border      = ImGui::GetColorU32(hovered ? ImGuiCol_Text
-                                                 : ImGuiCol_Border);
-        borderThick = hovered ? 1.5f : 1.0f;
+        border      = ImGui::GetColorU32(emph ? ImGuiCol_Text
+                                              : ImGuiCol_Border);
+        borderThick = emph ? 1.5f : 1.0f;
     }
 
     const ImVec2 pmax(origin.x + w, origin.y + h);
@@ -356,21 +367,26 @@ bool drawSubCard(const SubtitleTrack& t, float w, float h) {
     ImGui::PushID(0x10000 | t.id);  // separate ID-space from audio cards
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    ImGui::InvisibleButton("##subcard", ImVec2(w, h));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(0, 0, 0, 0));
+    ImGui::InvisibleButton("##subcard", ImVec2(w, h),
+                            ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
     const bool hovered = ImGui::IsItemHovered();
+    const bool focused = ImGui::IsItemFocused();
     const bool clicked = ImGui::IsItemActivated();
+    const bool emph    = hovered || focused;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 bg      = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
-                                                     : ImGuiCol_FrameBg);
-    const ImU32 border  = ImGui::GetColorU32(hovered ? ImGuiCol_Text
-                                                     : ImGuiCol_Border);
+    const ImU32 bg      = ImGui::GetColorU32(emph ? ImGuiCol_FrameBgHovered
+                                                  : ImGuiCol_FrameBg);
+    const ImU32 border  = ImGui::GetColorU32(emph ? ImGuiCol_Text
+                                                  : ImGuiCol_Border);
     const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
     const ImU32 colDim  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     const ImVec2 pmax(origin.x + w, origin.y + h);
 
     dl->AddRectFilled(origin, pmax, bg, 6.0f);
-    dl->AddRect(origin, pmax, border, 6.0f, 0, hovered ? 1.5f : 1.0f);
+    dl->AddRect(origin, pmax, border, 6.0f, 0, focused ? 2.5f : (hovered ? 1.5f : 1.0f));
 
     dl->PushClipRect(ImVec2(origin.x + 4, origin.y + 4),
                      ImVec2(pmax.x - 4, pmax.y - 4), true);
@@ -438,15 +454,20 @@ bool drawSubCard(const SubtitleTrack& t, float w, float h) {
 bool drawSubOffCard(float w, float h, bool selected) {
     ImGui::PushID("##suboff");
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##suboffbtn", ImVec2(w, h));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(0, 0, 0, 0));
+    ImGui::InvisibleButton("##suboffbtn", ImVec2(w, h),
+                            ImGuiButtonFlags_EnableNav);
+    ImGui::PopStyleColor();
     const bool hovered = ImGui::IsItemHovered();
+    const bool focused = ImGui::IsItemFocused();
     const bool clicked = ImGui::IsItemActivated();
+    const bool emph    = hovered || focused;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 bg      = ImGui::GetColorU32(selected ? ImGuiCol_HeaderActive
-                                          : (hovered  ? ImGuiCol_FrameBgHovered
+                                          : (emph     ? ImGuiCol_FrameBgHovered
                                                       : ImGuiCol_FrameBg));
-    const ImU32 border  = ImGui::GetColorU32(hovered || selected
+    const ImU32 border  = ImGui::GetColorU32(emph || selected
                                               ? ImGuiCol_Text
                                               : ImGuiCol_Border);
     const ImU32 colText = ImGui::GetColorU32(ImGuiCol_Text);
@@ -454,7 +475,7 @@ bool drawSubOffCard(float w, float h, bool selected) {
     const ImVec2 pmax(origin.x + w, origin.y + h);
 
     dl->AddRectFilled(origin, pmax, bg, 6.0f);
-    dl->AddRect(origin, pmax, border, 6.0f, 0, hovered ? 1.5f : 1.0f);
+    dl->AddRect(origin, pmax, border, 6.0f, 0, focused ? 2.5f : (hovered ? 1.5f : 1.0f));
 
     const float padX = 14.0f, padY = 12.0f;
     const float lh   = ImGui::GetTextLineHeight();

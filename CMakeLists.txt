@@ -120,7 +120,13 @@ set(APP_SOURCES
     src/core/Settings.cpp
 )
 
-add_executable(mpv-sofa ${APP_SOURCES})
+# WIN32: link against the GUI subsystem on Windows so a console window
+# isn't spawned alongside the app on every launch.  CMake's WIN32 flag
+# is silently ignored on other platforms.  An optional console can
+# still be opened on demand via the --console command-line flag (see
+# main.cpp), and launching from cmd / PowerShell auto-attaches to the
+# parent console so logs flow back to the user's terminal.
+add_executable(mpv-sofa WIN32 ${APP_SOURCES})
 
 target_include_directories(mpv-sofa PRIVATE
     ${CMAKE_SOURCE_DIR}/src
