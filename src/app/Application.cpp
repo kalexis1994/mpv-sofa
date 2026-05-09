@@ -599,10 +599,24 @@ void Application::renderUI() {
                                          0.75f, &leftCol, &rightCol);
         }
 
-        // Left: top 92% video, bottom 8% transport (slim media-player bar).
+        // Left: video on top, transport docked below.  The transport now
+        // hosts three rows of content (header, full-width timeline,
+        // controls), so a fixed pixel height is more honest than a
+        // ratio — at 8% on a 900 px viewport it overflowed and forced
+        // the whole panel into a scrollbar.  Convert the desired height
+        // to a ratio of the current dock space and clamp so we never
+        // squeeze the video on a tiny viewport.
+        const float transportPx = 150.0f;   // ≈ 3 rows + tab bar + padding
+        const float dockPx      = ImGui::GetMainViewport()->Size.y -
+                                   ImGui::GetFrameHeight();   // sub menu bar
+        float transportRatio = transportPx / dockPx;
+        if (transportRatio < 0.08f) transportRatio = 0.08f;
+        if (transportRatio > 0.45f) transportRatio = 0.45f;
+
         ImGuiID videoNode, transportNode;
-        ImGui::DockBuilderSplitNode(leftCol, ImGuiDir_Up, 0.92f,
-                                     &videoNode, &transportNode);
+        ImGui::DockBuilderSplitNode(leftCol, ImGuiDir_Down,
+                                     transportRatio,
+                                     &transportNode, &videoNode);
         ImGui::DockBuilderDockWindow("Video", videoNode);
         ImGui::DockBuilderDockWindow("Transport", transportNode);
 

@@ -284,8 +284,8 @@ void TrackPicker::render() {
 
     // Sized as a comfortable but not full-screen modal.
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 size(std::min(900.0f, vp->Size.x * 0.85f),
-                 std::min(600.0f, vp->Size.y * 0.85f));
+    ImVec2 size(std::min(1200.0f, vp->Size.x * 0.9f),
+                 std::min(680.0f,  vp->Size.y * 0.85f));
     ImVec2 pos(vp->Pos.x + (vp->Size.x - size.x) * 0.5f,
                 vp->Pos.y + (vp->Size.y - size.y) * 0.5f);
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
@@ -295,7 +295,8 @@ void TrackPicker::render() {
     if (ImGui::BeginPopupModal("##track_picker", &open,
                                 ImGuiWindowFlags_NoTitleBar |
                                 ImGuiWindowFlags_NoResize   |
-                                ImGuiWindowFlags_NoMove)) {
+                                ImGuiWindowFlags_NoMove     |
+                                ImGuiWindowFlags_NoScrollbar)) {
         // Header
         ImGui::Text(ICON_LC_AUDIO_LINES "  Select audio track");
         std::string fname = m_player->getFilename();
@@ -310,32 +311,41 @@ void TrackPicker::render() {
             ImGui::Spacing();
             ImGui::TextDisabled("No audio tracks in this file.");
         } else {
-            const float cardW = 280.0f;
-            const float cardH = 170.0f;
             ImGuiStyle& style = ImGui::GetStyle();
 
             // Reserve space for the footer so the grid scrolls if needed.
-            float footerH = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+            // Footer layout: Separator (≈ ItemSpacing.y * 2 + 1) followed
+            // by a Text/Button row sharing one frame height.  Reserving
+            // only a single frame height (the original mistake) left the
+            // modal a few pixels short and gave it its own scrollbar.
+            const float footerH = ImGui::GetFrameHeightWithSpacing() +
+                                   style.ItemSpacing.y * 2.0f + 4.0f;
+            // Drop the child window's own padding so the responsive math
+            // gets every pixel of horizontal real estate the modal offers.
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
             ImGui::BeginChild("##cards", ImVec2(0, -footerH), false);
+            ImGui::PopStyleVar();
 
-            // Canonical ImGui flow-layout: render each card, peek at its
-            // right edge, and keep on the same row only while there's
-            // still room.  ItemSpacing.y handles the vertical gap between
-            // rows automatically.
-            float visX2 = ImGui::GetCursorScreenPos().x +
-                          ImGui::GetContentRegionAvail().x;
+            // Responsive grid à la CSS `repeat(auto-fit, minmax(minW, 1fr))`:
+            // pick as many columns as fit at minCardW, then stretch each
+            // card so the row fills the available width — no awkward gap
+            // on the right that begs the eye for "one more card".
+            const float minCardW = 240.0f;
+            const float maxCardW = 340.0f;
+            const float cardH    = 170.0f;
+            const float spacingX = style.ItemSpacing.x;
+            const float availW   = ImGui::GetContentRegionAvail().x;
+            int cols = std::max(1,
+                (int)((availW + spacingX) / (minCardW + spacingX)));
+            float cardW = (availW - spacingX * (cols - 1)) / (float)cols;
+            if (cardW > maxCardW) cardW = maxCardW;
 
             int picked = -1;
             for (size_t i = 0; i < tracks.size(); i++) {
+                if ((int)(i % cols) != 0)
+                    ImGui::SameLine();
                 if (drawCard(tracks[i], cardW, cardH))
                     picked = (int)i;
-
-                if (i + 1 < tracks.size()) {
-                    float lastX2 = ImGui::GetItemRectMax().x;
-                    float nextX2 = lastX2 + style.ItemSpacing.x + cardW;
-                    if (nextX2 < visX2)
-                        ImGui::SameLine();
-                }
             }
             ImGui::EndChild();
 
