@@ -418,18 +418,27 @@ void Application::renderUI() {
             ImGui::End();
             ImGui::PopStyleVar(2);
 
-            // Show transport bar overlay at bottom when mouse is active
+            // Show transport bar overlay at bottom when mouse is active.
+            // The new transport bar has three rows (header / timeline /
+            // controls) and varies with theme padding, so we anchor the
+            // window's bottom-left to the viewport's bottom-left
+            // (pivot 0,1) and let AlwaysAutoResize compute the height.
+            // Width is pinned to the viewport via size constraints.
             if (m_fullscreenCursorTimer > 0) {
-                float barH = 80.0f;
                 float fadeAlpha = m_fullscreenCursorTimer < 1.0f ? m_fullscreenCursorTimer : 1.0f;
 
-                ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vpSize.y - barH));
-                ImGui::SetNextWindowSize(ImVec2(vpSize.x, barH));
+                ImGui::SetNextWindowPos(
+                    ImVec2(vp->Pos.x, vp->Pos.y + vpSize.y),
+                    ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+                ImGui::SetNextWindowSizeConstraints(
+                    ImVec2(vpSize.x, 0.0f),
+                    ImVec2(vpSize.x, vpSize.y));
                 ImGui::SetNextWindowBgAlpha(0.7f * fadeAlpha);
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, fadeAlpha);
                 ImGui::Begin("##fullscreen_transport", nullptr,
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                             ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_AlwaysAutoResize);
+                             ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_AlwaysAutoResize);
                 m_transportBar->renderContent();
                 ImGui::End();
                 ImGui::PopStyleVar();

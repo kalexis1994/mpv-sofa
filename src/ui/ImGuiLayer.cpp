@@ -131,20 +131,40 @@ static void applyTheme() {
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.45f);
 }
 
+// Centre Lucide icons against the visual midpoint of whatever base font we
+// merged them into.  ImGui anchors merged glyphs on the text baseline, but
+// Lucide fills the EM box from baseline upward (ascent ≈ size, descent ≈ 0)
+// while a body font is asymmetric (ascent + a small descent).  Their
+// vertical centres therefore disagree and the icons drift up.
+//
+//     base text mid (above baseline) = (baseAscent + baseDescent) / 2
+//                                       — note baseDescent is negative
+//     icon       mid (above baseline) =  iconSize / 2
+//     shift_down                      =  iconMid − textMid
+//
+// We pull the metrics live from the loaded font so changing the default
+// font or the icon size automatically re-centres without further tuning.
 static void mergeIconFont() {
     ImGuiIO& io = ImGui::GetIO();
-    // Default font first so the merged icon font lands inside its glyph
-    // table and shares the line-height.
-    io.Fonts->AddFontDefault();
 
-    static const ImWchar icon_ranges[] = { ICON_MIN_LC, ICON_MAX_16_LC, 0 };
+    ImFont* base = io.Fonts->AddFontDefault();
+    io.Fonts->Build();   // bake metrics so GetFontBaked has data to query
+
+    // Newer ImGui (1.92+) keeps Ascent/Descent on a per-size baked struct.
+    ImFontBaked* baked = base->GetFontBaked(base->LegacySize);
+    const float baseAscent  = baked->Ascent;     // px above baseline
+    const float baseDescent = baked->Descent;    // px below baseline (negative)
+    const float iconSize    = 16.0f;
+    const float textMid     = (baseAscent + baseDescent) * 0.5f;
+    const float iconMid     = iconSize * 0.5f;
+
     ImFontConfig cfg;
     cfg.MergeMode        = true;
     cfg.PixelSnapH       = true;
-    // Slight Y nudge so the line-icons sit visually on the text baseline.
-    cfg.GlyphOffset.y    = 1.0f;
-    // Lucide outlines render best at a hair under the body font.
-    const float iconSize = 14.0f;
+    cfg.GlyphOffset.y    = iconMid - textMid;
+    cfg.GlyphMinAdvanceX = iconSize;   // visually monospace the icons
+
+    static const ImWchar icon_ranges[] = { ICON_MIN_LC, ICON_MAX_16_LC, 0 };
     io.Fonts->AddFontFromFileTTF("assets/fonts/lucide.ttf",
                                   iconSize, &cfg, icon_ranges);
 }
