@@ -72,7 +72,13 @@
                 <span id="audio-info"></span>
                 <span id="hrtf-status">HRTF: Loading...</span>
             </div>
-            <div class="player-hint">◀ ▶ seek · OK play/pause · Back menu</div>
+            <div id="player-controls" class="player-controls hidden">
+                <button id="pc-menu" class="pc-btn focusable" aria-label="Menu">☰</button>
+                <button id="pc-rew" class="pc-btn focusable" aria-label="Back 10 seconds">⏪</button>
+                <button id="pc-playpause" class="pc-btn pc-primary focusable" aria-label="Play or pause">⏸</button>
+                <button id="pc-fwd" class="pc-btn focusable" aria-label="Forward 10 seconds">⏩</button>
+            </div>
+            <div class="player-hint">▼ controls · ◀ ▶ seek · OK play/pause · Back menu</div>
         </div>
         <canvas id="visualizer" width="300" height="150"></canvas>
     </div>

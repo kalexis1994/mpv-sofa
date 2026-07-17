@@ -858,3 +858,38 @@ input[type="range"]::-moz-range-thumb {
     border-top: 1px solid var(--bg-tertiary);
     padding-top: 24px;
 }
+
+/* --- Player transport control bar (progressive overlay level 2) -------- */
+.player-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 28px;
+    margin-top: 24px;
+}
+.player-controls.hidden { display: none; }
+
+.pc-btn {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    background: rgba(20, 24, 44, 0.85);
+    color: var(--text-primary);
+    font-size: 36px;
+    line-height: 1;
+    cursor: pointer;
+    outline: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.08s ease-out;
+}
+.pc-btn.pc-primary {
+    width: 104px;
+    height: 104px;
+    font-size: 46px;
+    border-color: var(--accent);
+    background: rgba(233, 69, 96, 0.22);
+}
+.pc-btn:hover { border-color: var(--accent); }

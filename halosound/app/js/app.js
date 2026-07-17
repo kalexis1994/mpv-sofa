@@ -15,6 +15,8 @@
     let trackSelector = null;
     let pendingFile = null;      // file waiting for track selection
     let overlayTimer = null;
+    let overlayLevel = 0;        // 0 hidden · 1 timeline · 2 controls
+    let pausedByMenu = false;    // playback frozen because the menu is up
 
     // ---- Screen / focus management ---------------------------------------
 
@@ -37,34 +39,81 @@
         if (el) el.classList.add('active');
 
         if (name === 'player') {
-            // Player owns navigation: arrows seek, OK toggles play/pause,
-            // any key wakes the overlay.  All defer to the menu when open.
-            ui.onNav = (dir) => {
-                if (menu.isOpen() || !player) return false;
-                if (dir === 'left')  player.seekRelative(-10);
-                if (dir === 'right') player.seekRelative(10);
-                wakeOverlay();
-                return true;
-            };
-            ui.onOk = () => {
-                if (menu.isOpen() || !player) return false;
-                player.togglePlayPause();
-                wakeOverlay();
-                return true;
-            };
-            ui.onAnyKey = () => { if (!menu.isOpen()) wakeOverlay(); };
-            focus.setScope(el);         // no focusables → engine idle here
+            ui.onNav = playerNav;
+            ui.onOk = playerOk;
+            ui.onAnyKey = () => { if (overlayLevel > 0 && !menu.isOpen()) resetOverlayTimer(); };
+            focus.setScope(el);         // controls become focusable at level 2
         } else {
             ui.onNav = ui.onOk = ui.onAnyKey = null;
             focus.setScope(el, defaultFocus(name));
         }
     }
 
+    // ---- Player: progressive overlay + transport controls ----------------
+
+    // Level 0 → nothing; 1 → title + timeline; 2 → + control buttons (focusable).
+    // Down escalates the level, Up collapses it. In seek mode (level < 2)
+    // Left/Right seek and OK toggles play/pause; once the control row is up
+    // the FocusEngine drives the buttons directly.
+    function setOverlay(level) {
+        const prev = overlayLevel;
+        overlayLevel = Math.max(0, Math.min(2, level));
+        const ov = document.getElementById('player-overlay');
+        const ctl = document.getElementById('player-controls');
+        if (ov)  ov.classList.toggle('visible', overlayLevel >= 1);
+        if (ctl) ctl.classList.toggle('hidden', overlayLevel < 2);
+        if (overlayLevel >= 2 && prev < 2) { updatePlayPauseIcon(); focus.refresh('#pc-playpause'); }
+        if (overlayLevel < 2 && prev >= 2) focus.refresh();   // release control focus
+        resetOverlayTimer();
+    }
+
+    function resetOverlayTimer() {
+        clearTimeout(overlayTimer);
+        if (overlayLevel > 0) overlayTimer = setTimeout(() => setOverlay(0), 5000);
+    }
+
+    // Keep the overlay awake at its current level (used on seek / play-pause).
+    function bumpOverlay() {
+        if (overlayLevel < 1) setOverlay(1);
+        else resetOverlayTimer();
+    }
+
+    function updatePlayPauseIcon() {
+        const b = document.getElementById('pc-playpause');
+        if (b && player) b.textContent = player.playing ? '⏸' : '▶';
+    }
+
+    function playerNav(dir) {
+        if (menu.isOpen() || !player) return false;
+        if (dir === 'down') { setOverlay(overlayLevel + 1); return true; }
+        if (dir === 'up')   { setOverlay(overlayLevel - 1); return true; }
+        if (overlayLevel >= 2) return false;   // controls focused → engine moves
+        if (dir === 'left')  { player.seekRelative(-10); bumpOverlay(); }
+        if (dir === 'right') { player.seekRelative(10);  bumpOverlay(); }
+        return true;
+    }
+
+    function playerOk() {
+        if (menu.isOpen() || !player) return false;
+        if (overlayLevel >= 2) return false;   // engine activates focused button
+        player.togglePlayPause();
+        updatePlayPauseIcon();
+        bumpOverlay();
+        return true;
+    }
+
     // ---- Back / main menu -------------------------------------------------
 
     function handleBack() {
         if (focus.editing) { focus.exitEdit(); return; }
-        if (menu.isOpen()) { menu.hide(); return; }
+        if (menu.isOpen()) {
+            menu.hide();
+            // Closing the menu back onto a paused video resumes it.
+            if (ui.currentScreen === 'player' && pausedByMenu && player) {
+                player.resume(); pausedByMenu = false; updatePlayPauseIcon();
+            }
+            return;
+        }
         switch (ui.currentScreen) {
             case 'connect':  exitApp(); break;
             case 'tracks':   showScreen('browser'); refreshFileList(); break;
@@ -76,9 +125,8 @@
     }
 
     function openMenu() {
-        // Freeze playback while the menu sits over the video.
         if (ui.currentScreen === 'player' && player && player.playing) {
-            player.pause();
+            player.pause(); pausedByMenu = true; updatePlayPauseIcon();
         }
         const server = connection.httpBase
             ? connection.httpBase.replace(/^https?:\/\//, '') : '';
@@ -90,18 +138,22 @@
         switch (action) {
             case 'resume':
                 showScreen('player');
-                if (player) player.resume();
+                if (player) { player.resume(); pausedByMenu = false; updatePlayPauseIcon(); }
+                setOverlay(0);
                 break;
             case 'library':
+                pausedByMenu = false;
                 showScreen('browser');
                 refreshFileList();
                 break;
             case 'settings':
+                pausedByMenu = false;
                 showScreen('settings');
                 break;
             case 'server':
                 if (player) player.stop();
                 if (visualizer) visualizer.stop();
+                pausedByMenu = false;
                 connection.disconnect();
                 showScreen('connect');
                 break;
@@ -112,21 +164,8 @@
     };
 
     function exitApp() {
-        if (window.webOS && typeof webOS.platformBack === 'function') {
-            webOS.platformBack();
-        } else {
-            window.close();
-        }
-    }
-
-    // ---- Player overlay auto-hide ----------------------------------------
-
-    function wakeOverlay() {
-        const overlay = document.getElementById('player-overlay');
-        if (!overlay) return;
-        overlay.classList.add('visible');
-        clearTimeout(overlayTimer);
-        overlayTimer = setTimeout(() => overlay.classList.remove('visible'), 4000);
+        if (window.webOS && typeof webOS.platformBack === 'function') webOS.platformBack();
+        else window.close();
     }
 
     // ---- Connection persistence ------------------------------------------
@@ -152,17 +191,20 @@
         visualizer = new HaloVisualizer('visualizer');
 
         ui.onBack = handleBack;
-        ui.onPlayPause = () => { if (ui.currentScreen === 'player' && player) player.togglePlayPause(); };
+        ui.onPlayPause = () => { if (ui.currentScreen === 'player' && player) { player.togglePlayPause(); updatePlayPauseIcon(); bumpOverlay(); } };
 
-        // Header / back buttons still work as direct clicks.
+        // Header / back buttons.
         document.getElementById('btn-connect').addEventListener('click', doConnect);
         document.getElementById('btn-settings').addEventListener('click', () => showScreen('settings'));
         document.getElementById('btn-back-settings').addEventListener('click', () => showScreen('browser'));
-        document.getElementById('btn-back-tracks').addEventListener('click', () => {
-            showScreen('browser'); refreshFileList();
-        });
+        document.getElementById('btn-back-tracks').addEventListener('click', () => { showScreen('browser'); refreshFileList(); });
 
-        // Restore last successful connection.
+        // Player control bar.
+        document.getElementById('pc-menu').addEventListener('click', () => openMenu());
+        document.getElementById('pc-rew').addEventListener('click', () => { if (player) { player.seekRelative(-10); bumpOverlay(); } });
+        document.getElementById('pc-fwd').addEventListener('click', () => { if (player) { player.seekRelative(10); bumpOverlay(); } });
+        document.getElementById('pc-playpause').addEventListener('click', () => { if (player) { player.togglePlayPause(); updatePlayPauseIcon(); bumpOverlay(); } });
+
         const origin = detectServerOrigin();
         if (origin) {
             document.getElementById('server-ip').value = origin.ip;
@@ -215,10 +257,8 @@
         player.onPlaybackEnded = () => { if (visualizer) visualizer.stop(); showScreen('browser'); refreshFileList(); };
         player.onAudioInfo = (info) => settings.updateAudioInfo(info);
 
-        document.getElementById('mute-bed').addEventListener('change', (e) =>
-            audioEngine.setChannelMute('bed', e.target.checked));
-        document.getElementById('mute-height').addEventListener('change', (e) =>
-            audioEngine.setChannelMute('height', e.target.checked));
+        document.getElementById('mute-bed').addEventListener('change', (e) => audioEngine.setChannelMute('bed', e.target.checked));
+        document.getElementById('mute-height').addEventListener('change', (e) => audioEngine.setChannelMute('height', e.target.checked));
 
         browser.onFileSelected = (file) => showTrackSelector(file);
         trackSelector.onPlay = (selection) => startPlayback(pendingFile, selection);
@@ -231,15 +271,16 @@
         pendingFile = file;
         showScreen('tracks');
         await trackSelector.loadTracks(file.id);
-        focus.refresh('#btn-play-tracks');   // re-scan now that tracks exist
+        focus.refresh('#btn-play-tracks');
     }
 
     async function startPlayback(file, selection) {
         document.getElementById('player-title').textContent = file.name;
         showScreen('player');
-        wakeOverlay();
+        setOverlay(1);
         if (visualizer) visualizer.start();
         await player.play(file, selection);
+        updatePlayPauseIcon();
         document.getElementById('hrtf-status').textContent =
             'HRTF: ' + (audioEngine.wasmReady ? 'Active' : 'Fallback');
     }
