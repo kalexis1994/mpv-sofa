@@ -25,17 +25,31 @@ class HaloPlayer {
         this.video.addEventListener('ended', () => this.onEnded());
 
         // Video stalled: pause the audio pipeline too, so A/V can't drift
-        // apart while the video buffers.
+        // apart while the video buffers.  During a seek/starvation reacquire
+        // the resume path owns the whole show — stay out of its way (its
+        // release depends on the server refilling, which holdAudio would
+        // pause, deadlocking the wait).
         this.video.addEventListener('waiting', () => {
-            if (!this.videoStarted) return;
+            if (!this.videoStarted || this.audioStarved || this.pendingVideoSeek) return;
             this.videoStalls = (this.videoStalls || 0) + 1;
             this.showLoading('Buffering...');
             this.holdAudio(true);
         });
         this.video.addEventListener('playing', () => {
+            // Phase A of a seek just revealed real playback: give the
+            // pipeline a moment to settle on its true (keyframe-snapped)
+            // position, then chase it with the audio (phase B).
+            if (this.pendingVideoSeek) {
+                this.pendingVideoSeek = false;
+                setTimeout(() => alignTimer(this), 600);
+                return;
+            }
             this.hideLoading();
             if (this.playing) this.holdAudio(false);
         });
+        function alignTimer(self) {
+            if (self.videoStarted && self.playing) self.alignAudioToVideo();
+        }
 
         // Click-to-seek on progress bar
         const progressBar = document.getElementById('progress-bar');
@@ -59,6 +73,10 @@ class HaloPlayer {
         this.audioHold = false;
         this.audioStarved = false;
         this.starvedStats = 0;
+        this.awaitingSeek = false;
+        this.pendingSeeks = 0;
+        this.pendingVideoSeek = false;
+        this.reacquireServerPaused = false;
         this.syncBaseline = null;    // recalibrated per playback session
         this.driftSamples = [];
 
@@ -112,6 +130,19 @@ class HaloPlayer {
             if (this.onAudioInfo) this.onAudioInfo(audioInfo);
         };
 
+        // Drop stale in-flight audio at the exact protocol boundary: chunks
+        // sent before the server processed our seek keep arriving after our
+        // local flush and would poison the reacquire anchor (the realign
+        // then pins the video to PRE-seek audio and everything cascades).
+        this.connection.onSeekDone = () => {
+            this.audioEngine.flush();
+            // Rapid consecutive seeks each arm the gate; only the LAST
+            // seek_done opens it, so the release can't anchor to audio of
+            // an intermediate seek target.
+            this.pendingSeeks = Math.max(0, (this.pendingSeeks || 0) - 1);
+            if (this.pendingSeeks === 0) this.awaitingSeek = false;
+        };
+
         this.connection.onAudioData = (data) => {
             if (!this.audioReady && data.byteLength >= 8) {
                 this.audioStartPts = new DataView(data).getFloat64(0, false);
@@ -150,12 +181,17 @@ class HaloPlayer {
             // pause it, and once the queue has refilled realign it to the
             // audio position and resume.  ~3 stats messages ≈ 250ms dry
             // before we react, so seek flushes don't false-trigger.
-            if (this.videoStarted && this.playing && !this.audioHold) {
+            // While reacquiring (audioStarved) this block OWNS the pipeline:
+            // a stray audioHold from a video-stall event must not block the
+            // release (that deadlocked rapid-seek sequences).
+            if (this.videoStarted && this.playing && !this.pendingVideoSeek &&
+                (this.audioStarved || !this.audioHold)) {
                 if (s.queued === 0) {
                     this.starvedStats = (this.starvedStats || 0) + 1;
                     if (this.starvedStats >= 3 && !this.audioStarved) {
                         this.audioStarved = true;
                         this.audioStalls = (this.audioStalls || 0) + 1;
+                        this.resumeAtChunks = 375;   // real starvation: deep refill (~2s)
                         this.showLoading('Buffering audio...');
                         this.video.pause();
                         // Freeze the worklet too (but NOT the server — it
@@ -165,22 +201,54 @@ class HaloPlayer {
                     }
                 } else {
                     this.starvedStats = 0;
-                    // Resume only once a solid cushion is back (~2s), so a
-                    // trickling refill can't cause starve/resume ping-pong.
-                    if (this.audioStarved && s.queued >= 375) {
-                        this.audioStarved = false;
-                        this.hideLoading();
-                        // Realign while still paused using the calibrated
-                        // pipeline offset — this lands exactly where the
-                        // video stopped, so resume is seamless.
-                        if (s.pts >= 0 && this.syncBaseline !== null) {
-                            const target = s.pts + this.syncBaseline - this.userAudioDelay;
-                            if (Math.abs(this.video.currentTime - target) > 0.15) {
-                                this.video.currentTime = Math.max(0, target);
-                            }
+
+                    // Long reacquire (slow video buffering): stop the server
+                    // from streaming the whole movie into our capped queue —
+                    // overflow drops would advance the realign anchor and
+                    // chase the video into never-buffered territory.
+                    if (this.audioStarved && s.queued >= 750 && !this.reacquireServerPaused) {
+                        this.reacquireServerPaused = true;
+                        this.connection.pauseAudio();
+                    }
+
+                    // Release only when BOTH sides are ready: enough fresh
+                    // audio AND a decodable video. Releasing on audio alone
+                    // let the audio free-run ~5s whenever the post-seek video
+                    // was still buffering ('waiting' had already fired during
+                    // the reacquire and never re-fires, so nothing held it).
+                    // Buffered runway: readyState alone lets a big-jump video
+                    // start with barely any data — it then plays in judders
+                    // (with no 'waiting' events) while audio runs free.
+                    let runway = 0;
+                    try {
+                        const b = this.video.buffered, t = this.video.currentTime;
+                        for (let i = 0; i < b.length; i++) {
+                            if (b.start(i) <= t + 0.1 && b.end(i) > t) { runway = b.end(i) - t; break; }
                         }
+                    } catch (e) { runway = 99; }
+
+                    if (this.audioStarved && !this.awaitingSeek &&
+                        s.queued >= (this.resumeAtChunks || 375) &&
+                        this.video.readyState >= 3 && runway >= 3) {
+                        this.audioStarved = false;
+                        this.resumeAtChunks = 375;
+                        if (this.reacquireServerPaused) {
+                            this.reacquireServerPaused = false;
+                            this.connection.resumeAudio();
+                        }
+                        this.hideLoading();
+                        // NO video realign here: the video's position is the
+                        // ground truth (webOS snaps video seeks to keyframes,
+                        // so moving it would land somewhere else entirely).
+                        // The queued audio was requested at exactly the
+                        // video's position — release and play together.
+                        this.holdAudio(false);       // release any stray video-stall hold
                         this.audioEngine.setHold(false);
-                        this.suppressSync();
+                        // Short settle + a 12s convergence phase in which
+                        // checkSync corrects faster (the video clock creeps
+                        // while the decoder ramps up after a jump).
+                        this.suppressSync(1500);
+                        this.convergeUntil = performance.now() + 12000;
                         this.video.play().catch(() => {});
                     }
                 }
@@ -246,7 +314,8 @@ class HaloPlayer {
      * pipelines stutter on it), rate-limited to one per 5s.
      */
     checkSync() {
-        if (!this.playing || !this.videoStarted || this.audioHold || this.audioStarved) return;
+        if (!this.playing || !this.videoStarted || this.audioHold ||
+            this.audioStarved || this.pendingVideoSeek) return;
         if (this.lastAudioPts < 0 || this.video.paused || this.video.seeking) return;
         // Stale stats (e.g. right after a seek flush) → don't extrapolate.
         if (performance.now() - this.lastStatsAt > 1000) return;
@@ -275,10 +344,32 @@ class HaloPlayer {
         // HEARD late (BT headphone transmission latency).
         const residual = drift - this.syncBaseline + this.userAudioDelay;
         const now = performance.now();
-        if (Math.abs(residual) > 0.4 && now - (this.lastHardSync || 0) > 5000) {
+
+        // Two phases:
+        //  - convergence (12s after a seek release): the TV's video clock
+        //    creeps while the decoder ramps — correct fast and often.
+        //  - steady state: the video frame clock saw-tooths ±0.2s and the
+        //    extrapolated audio clock adds noise, so require two CONSECUTIVE
+        //    out-of-range checks before correcting (a spurious correction
+        //    seek triggers rebuffering and cascades).
+        const converging = now < (this.convergeUntil || 0);
+        const threshold  = converging ? 0.35 : 0.5;
+        const strikesReq = converging ? 1 : 2;
+        const rateMs     = converging ? 2500 : 5000;
+
+        if (Math.abs(residual) > threshold) {
+            this.driftStrikes = (this.driftStrikes || 0) + 1;
+        } else {
+            this.driftStrikes = 0;
+        }
+
+        if (this.driftStrikes >= strikesReq && now - (this.lastHardSync || 0) > rateMs) {
             this.lastHardSync = now;
-            console.log(`[sync] residual ${residual.toFixed(2)}s → correcting video`);
-            this.video.currentTime = audioPts + this.syncBaseline - this.userAudioDelay;
+            this.driftStrikes = 0;
+            console.log(`[sync] residual ${residual.toFixed(2)}s → re-aligning audio to video`);
+            // NEVER seek the video to correct drift — webOS snaps it to the
+            // previous keyframe (up to ~10s back).  Re-seek the audio.
+            this.alignAudioToVideo();
         }
     }
 
@@ -342,12 +433,51 @@ class HaloPlayer {
         else this.resume();
     }
 
+    /*
+     * Seek architecture: THE VIDEO IS THE POSITION MASTER.
+     *
+     * The webOS <video> pipeline snaps every seek to the previous keyframe
+     * (up to ~10s back on long-GOP x265 encodes) and only reveals the TRUE
+     * landing position a moment after playback resumes — seeking the video
+     * to a computed position is therefore impossible.  The audio stream,
+     * being sample-accurate, is the one that chases: after the video lands
+     * we re-seek the SERVER to the video's actual position (phase B).
+     */
     seek(seconds) {
-        // Flush old audio from worklet queue before seeking
-        this.audioEngine.flush();
+        if (!this.videoStarted) return;
         this.suppressSync();
+        this.showLoading('Buffering...');
+        // Phase A: reposition the video and let it start playing (silently,
+        // worklet held) so its keyframe-snapped true position materializes.
+        this.pendingVideoSeek = true;
+        this.audioEngine.flush();
+        this.audioEngine.setHold(true);
+        this.audioStarved = false;
         this.video.currentTime = seconds;
-        this.connection.seekAudio(seconds);
+        this.video.play().catch(() => {});
+    }
+
+    /*
+     * Phase B: align the sample-accurate audio to wherever the video
+     * actually is.  Reuses the reacquire machinery: pause video, seek the
+     * server to the matching pts, release when fresh audio + video runway
+     * are both ready.  Also used for drift corrections — the video must
+     * NEVER be corrected by seeking it (keyframe snap-back).
+     */
+    alignAudioToVideo() {
+        if (!this.videoStarted) return;
+        const base = this.syncBaseline !== null ? this.syncBaseline : 0;
+        const target = Math.max(0, this.video.currentTime - base + this.userAudioDelay);
+        this.audioStarved = true;
+        this.starvedStats = 0;
+        this.resumeAtChunks = 94;         // ~500ms cushion: stays snappy
+        this.awaitingSeek = true;
+        this.pendingSeeks = (this.pendingSeeks || 0) + 1;
+        this.audioEngine.flush();
+        this.audioEngine.setHold(true);
+        this.showLoading('Buffering...');
+        this.video.pause();
+        this.connection.seekAudio(target);
     }
 
     seekRelative(delta) {
@@ -360,6 +490,11 @@ class HaloPlayer {
         this.audioHold = false;
         this.audioStarved = false;
         this.starvedStats = 0;
+        this.resumeAtChunks = 375;
+        this.awaitingSeek = false;
+        this.pendingSeeks = 0;
+        this.pendingVideoSeek = false;
+        this.reacquireServerPaused = false;
         this.video.pause();
         this.clearSubtitles();
         this.video.removeAttribute('src');

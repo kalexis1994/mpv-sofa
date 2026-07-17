@@ -62,6 +62,10 @@ class HaloConnection {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'info' && this.onAudioInfo) {
                     this.onAudioInfo(msg);
+                } else if (msg.type === 'seek_done' && this.onSeekDone) {
+                    // The WS is ordered: every binary frame before this
+                    // message is pre-seek audio, everything after is fresh.
+                    this.onSeekDone(msg.pts);
                 } else if (msg.type === 'error' && this.onAudioError) {
                     this.onAudioError(msg.message || 'Audio stream error');
                 }

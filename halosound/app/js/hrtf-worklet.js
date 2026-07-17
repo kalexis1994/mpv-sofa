@@ -439,9 +439,14 @@ class HrtfProcessor extends AudioWorkletProcessor {
         if (++this.statCounter < 32) return;
         this.statCounter = 0;
         const windowMs = 32 * RENDER_QUANTUM / sampleRate * 1000;
+        // headPts: PTS of the next sample that WILL play. Unlike playbackPts
+        // (anchored on consumption) it stays exact while the worklet is held
+        // or right after a flush — the realign-after-seek path needs that.
+        const head = this.audioQueue[0];
         this.port.postMessage({
             type: 'stats',
             pts: this.playbackPts,
+            headPts: head ? head.pts + head.readPos / sampleRate : this.playbackPts,
             queued: this.audioQueue.length,
             underruns: this.underruns,
             dropped: this.dropped,
