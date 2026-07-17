@@ -1,10 +1,10 @@
 {
   "id": "com.halosound.app",
   "version": "1.0.0",
-  "vendor": "HaloSound",
+  "vendor": "mpv-sofa",
   "type": "web",
   "main": "index.html",
-  "title": "HaloSound",
+  "title": "mpv-sofa client",
   "icon": "icon.png",
   "largeIcon": "largeIcon.png",
   "requiredPermissions": ["all"],
