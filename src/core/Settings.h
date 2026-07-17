@@ -77,6 +77,16 @@ struct CinemaGrain {
     float chroma      = 0.4f;  // 0=mono noise, 1=fully decorrelated RGB
 };
 
+// HaloSound media server — the GUI can host the library server that the
+// HaloSound TV app connects to (video over HTTP, multichannel PCM over
+// WebSocket).  The server process itself is managed by MediaServer;
+// these are just its persisted knobs.  Stored in [server].
+struct ServerConfig {
+    bool        enabled  = false;  // auto-start the server with the app
+    std::string mediaDir = "";     // library folder served to the TV
+    int         port     = 8080;   // HTTP port (WebSocket uses port+1)
+};
+
 // Read mpv-sofa.ini.  Missing/unreadable file is not an error — caller's
 // defaults stay in place and a fresh snapshot is taken so isDirty() returns
 // false until the user changes something.
@@ -154,6 +164,10 @@ void               applyCinemaGrainToPlayer(MpvPlayer* p);
 // every frame (avoids the "frozen grain" look).  Call once per render
 // from the host loop while grain is enabled.  No-op when disabled.
 void               tickCinemaGrain(MpvPlayer* p);
+
+// HaloSound media server knobs.  Persisted in [server].
+const ServerConfig& serverConfig();
+void                setServerConfig(const ServerConfig& c);
 
 // Recent files list (most recent first).  Persisted under [recent] in
 // mpv-sofa.ini as `count` + `path_0`, `path_1`, …  pushRecent

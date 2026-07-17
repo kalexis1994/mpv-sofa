@@ -94,6 +94,7 @@ copy_deps.bat
 /tmp
 
 # HaloSound
+*.ipk
 halosound/dsp/build_wasm*/
 halosound/emsdk/
 halosound/server/node_modules/

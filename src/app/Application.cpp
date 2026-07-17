@@ -159,9 +159,21 @@ bool Application::init(int argc, char* argv[]) {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
 
+    m_mediaServer = std::make_unique<MediaServer>();
+
     m_prefsDialog = std::make_unique<PreferencesDialog>(m_player.get(),
                                                           m_controlPanel.get(),
-                                                          m_window.get());
+                                                          m_window.get(),
+                                                          m_mediaServer.get());
+
+    // Auto-start the HaloSound media server when the user enabled it and
+    // a library folder is configured.  Failure is non-fatal — status and
+    // error live in Preferences > Media Server.
+    {
+        const Settings::ServerConfig& sc = Settings::serverConfig();
+        if (sc.enabled && !sc.mediaDir.empty())
+            m_mediaServer->start(sc.mediaDir, sc.port);
+    }
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
@@ -1499,6 +1511,10 @@ void Application::shutdown() {
         Settings::isDirty(m_sharedState, m_showControlPanel, m_show3DViz)) {
         Settings::save(m_sharedState, m_showControlPanel, m_show3DViz);
     }
+
+    // Stop the media server child (the Job object would also reap it,
+    // but an explicit stop keeps the exit orderly).
+    if (m_mediaServer) m_mediaServer->stop();
 
     if (m_videoFBO) glDeleteFramebuffers(1, &m_videoFBO);
     if (m_videoTexture) glDeleteTextures(1, &m_videoTexture);

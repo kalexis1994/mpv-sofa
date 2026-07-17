@@ -9,6 +9,7 @@
 #include "ui/TrackPicker.h"
 #include "ui/PreferencesDialog.h"
 #include "audio/MpvPlayer.h"
+#include "core/MediaServer.h"
 
 #include <memory>
 #include <string>
@@ -79,6 +80,7 @@ private:
     std::unique_ptr<TransportBar> m_transportBar;
     std::unique_ptr<TrackPicker>       m_trackPicker;
     std::unique_ptr<PreferencesDialog> m_prefsDialog;
+    std::unique_ptr<MediaServer>       m_mediaServer;
 
     // Shared state with audio filter
     HrtfSharedState* m_sharedState = nullptr;

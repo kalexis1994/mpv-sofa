@@ -105,6 +105,7 @@ set(APP_SOURCES
     src/main.cpp
     src/app/Application.cpp
     src/app/Window.cpp
+    src/core/MediaServer.cpp
     src/renderer/Renderer.cpp
     src/renderer/Camera.cpp
     src/renderer/Shader.cpp
@@ -148,7 +149,8 @@ endif()
 
 # Windows-specific
 if(WIN32)
-    target_link_libraries(mpv-sofa PRIVATE opengl32)
+    # iphlpapi + ws2_32: MediaServer::lanAddress (adapter enumeration)
+    target_link_libraries(mpv-sofa PRIVATE opengl32 iphlpapi ws2_32)
 endif()
 
 # Copy assets to build directory

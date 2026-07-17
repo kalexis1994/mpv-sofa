@@ -9,12 +9,14 @@
 class MpvPlayer;
 class ControlPanel;
 class Window;
+class MediaServer;
 
 class PreferencesDialog {
 public:
     PreferencesDialog(MpvPlayer* player = nullptr,
                        ControlPanel* controlPanel = nullptr,
-                       Window* window = nullptr);
+                       Window* window = nullptr,
+                       MediaServer* mediaServer = nullptr);
 
     void open();
     void render();
@@ -30,6 +32,7 @@ private:
         TAB_EQ,
         TAB_AUDIO_SYNC,
         TAB_GRAIN,
+        TAB_SERVER,
         TAB_COUNT
     };
 
@@ -45,6 +48,7 @@ private:
     void renderEq();
     void renderAudioSync();
     void renderCinemaGrain();
+    void renderServer();
 
     // Pill-style tab button.  Returns true on activation.
     bool tabPill(const char* icon, const char* label, bool active);
@@ -52,6 +56,7 @@ private:
     MpvPlayer*    m_player       = nullptr;
     ControlPanel* m_controlPanel = nullptr;
     Window*       m_window       = nullptr;
+    MediaServer*  m_mediaServer  = nullptr;
 
     bool m_requestOpen  = false;
     bool m_isOpen       = false;

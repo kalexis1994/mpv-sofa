@@ -86,6 +86,9 @@ struct Snapshot {
     // OS-level window presentation mode.
     int window_mode = 0;   // 0=Fullscreen, 1=Borderless, 2=Windowed
 
+    // HaloSound media server.
+    Settings::ServerConfig server;
+
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
@@ -148,6 +151,9 @@ struct Snapshot {
         if (display.panscan   != o.display.panscan)   return false;
         if (playback.audioDelay != o.playback.audioDelay) return false;
         if (window_mode != o.window_mode) return false;
+        if (server.enabled  != o.server.enabled)  return false;
+        if (server.mediaDir != o.server.mediaDir) return false;
+        if (server.port     != o.server.port)     return false;
         return true;
     }
 };
@@ -164,6 +170,7 @@ Settings::SubtitleStyle  g_subStyle;
 Settings::CinemaGrain    g_grain;
 Settings::DisplayConfig  g_display;
 Settings::PlaybackConfig g_playback;
+Settings::ServerConfig   g_server;
 int                      g_windowMode = 0;   // 0=Fullscreen
 std::vector<std::string> g_recents;
 constexpr size_t kMaxRecents = 12;
@@ -252,6 +259,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.display         = g_display;
     snap.playback        = g_playback;
     snap.window_mode     = g_windowMode;
+    snap.server          = g_server;
     return snap;
 }
 
@@ -447,6 +455,13 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             g_windowMode = getI(kv, "mode", g_windowMode);
             if (g_windowMode < 0 || g_windowMode > 2) g_windowMode = 0;
         }
+        if (auto it = ini.find("server"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_server.enabled  = getI(kv, "enabled", g_server.enabled ? 1 : 0) != 0;
+            g_server.mediaDir = getS(kv, "media_dir", g_server.mediaDir.c_str());
+            g_server.port     = getI(kv, "port", g_server.port);
+            if (g_server.port < 1 || g_server.port > 65534) g_server.port = 8080;
+        }
         if (auto it = ini.find("recent"); it != ini.end()) {
             const KV& kv = it->second;
             g_recents.clear();
@@ -598,6 +613,12 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "mode=%d\n", g_windowMode);
     fprintf(f, "\n");
 
+    fprintf(f, "[server]\n");
+    fprintf(f, "enabled=%d\n",   g_server.enabled ? 1 : 0);
+    fprintf(f, "media_dir=%s\n", g_server.mediaDir.c_str());
+    fprintf(f, "port=%d\n",      g_server.port);
+    fprintf(f, "\n");
+
     fprintf(f, "[recent]\n");
     fprintf(f, "count=%d\n", (int)g_recents.size());
     for (size_t i = 0; i < g_recents.size(); i++)
@@ -685,6 +706,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_display  = DisplayConfig{};
     g_playback   = PlaybackConfig{};
     g_windowMode = 0;   // Fullscreen
+    g_server     = ServerConfig{};
     g_recents.clear();
 }
 
@@ -748,6 +770,12 @@ void Settings::setPlaybackConfig(const PlaybackConfig& c)  { g_playback = c; }
 void Settings::applyPlaybackConfigToPlayer(MpvPlayer* p) {
     if (!p) return;
     p->setDoubleProperty("audio-delay", g_playback.audioDelay);
+}
+
+const Settings::ServerConfig& Settings::serverConfig() { return g_server; }
+void Settings::setServerConfig(const ServerConfig& c)  {
+    g_server = c;
+    if (g_server.port < 1 || g_server.port > 65534) g_server.port = 8080;
 }
 
 int  Settings::windowMode()         { return g_windowMode; }

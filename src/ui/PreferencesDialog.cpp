@@ -2,11 +2,13 @@
 #include "ControlPanel.h"
 #include "app/Window.h"
 #include "core/Settings.h"
+#include "core/MediaServer.h"
 #include "audio/MpvPlayer.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <IconsLucide.h>
+#include <ImGuiFileDialog.h>
 
 #include <algorithm>
 #include <cstring>
@@ -60,8 +62,10 @@ bool langGetter(void* /*data*/, int idx, const char** out) {
 
 PreferencesDialog::PreferencesDialog(MpvPlayer* player,
                                      ControlPanel* controlPanel,
-                                     Window* window)
-    : m_player(player), m_controlPanel(controlPanel), m_window(window) {}
+                                     Window* window,
+                                     MediaServer* mediaServer)
+    : m_player(player), m_controlPanel(controlPanel), m_window(window),
+      m_mediaServer(mediaServer) {}
 
 void PreferencesDialog::open() {
     m_audioIdx     = findLangIndex(Settings::preferredAudioLang());
@@ -158,6 +162,7 @@ void PreferencesDialog::render() {
         case TAB_EQ:         renderEq();          break;
         case TAB_AUDIO_SYNC: renderAudioSync();   break;
         case TAB_GRAIN:      renderCinemaGrain(); break;
+        case TAB_SERVER:     renderServer();      break;
         default: break;
     }
     ImGui::EndChild();
@@ -201,6 +206,7 @@ void PreferencesDialog::renderTabs() {
         { ICON_LC_HEADPHONES,  "Headphone EQ"  },
         { ICON_LC_AUDIO_LINES, "Audio sync"    },
         { ICON_LC_FILM,        "Cinema grain"  },
+        { ICON_LC_SERVER,      "Media Server"  },
     };
 
     // Measure each pill, accumulate total width, then draw centred.
@@ -695,4 +701,119 @@ void PreferencesDialog::renderSpatial() {
 void PreferencesDialog::renderEq() {
     if (m_controlPanel) m_controlPanel->renderEqContent();
     else                ImGui::TextDisabled("(EQ controls unavailable)");
+}
+
+void PreferencesDialog::renderServer() {
+    ImGui::TextWrapped(
+        "Host the HaloSound media server: the TV app connects to this "
+        "machine over the local network, video streams straight from "
+        "the source file and the multichannel audio is spatialized on "
+        "the TV.  Requires Node.js on this machine.");
+    ImGui::Spacing();
+
+    if (!m_mediaServer) {
+        ImGui::TextDisabled("(server management unavailable)");
+        return;
+    }
+
+    Settings::ServerConfig cfg = Settings::serverConfig();
+    bool dirty = false;
+    const float labelW = 200.0f;
+    const bool running = m_mediaServer->isRunning();
+
+    // --- Status line -----------------------------------------------------
+    {
+        const ImVec4 green(0.35f, 0.85f, 0.45f, 1.0f);
+        const ImVec4 grey (0.55f, 0.55f, 0.58f, 1.0f);
+        ImGui::TextUnformatted("Status");
+        ImGui::SameLine(labelW);
+        ImGui::TextColored(running ? green : grey,
+                           running ? ICON_LC_SERVER "  Running" : ICON_LC_SERVER_OFF "  Stopped");
+        if (running) {
+            const std::string ip = MediaServer::lanAddress();
+            if (!ip.empty()) {
+                ImGui::TextUnformatted("TV address");
+                ImGui::SameLine(labelW);
+                ImGui::Text("%s : %d", ip.c_str(), m_mediaServer->port());
+                ImGui::SameLine();
+                ImGui::TextDisabled("(enter this in the HaloSound TV app)");
+            }
+        } else if (!m_mediaServer->lastError().empty()) {
+            ImGui::TextUnformatted(" ");
+            ImGui::SameLine(labelW);
+            ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1.0f), "%s",
+                               m_mediaServer->lastError().c_str());
+        }
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // --- Config ----------------------------------------------------------
+    ImGui::TextUnformatted("Media folder");
+    ImGui::SameLine(labelW);
+    {
+        const float browseW = 130.0f;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browseW - 16.0f);
+        char buf[1024];
+        snprintf(buf, sizeof(buf), "%s", cfg.mediaDir.c_str());
+        if (ImGui::InputText("##srv_dir", buf, sizeof(buf))) {
+            cfg.mediaDir = buf;
+            dirty = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(ICON_LC_FOLDER "  Browse", ImVec2(browseW, 0))) {
+            IGFD::FileDialogConfig fdCfg;
+            fdCfg.path = cfg.mediaDir.empty() ? "." : cfg.mediaDir;
+            fdCfg.flags = ImGuiFileDialogFlags_Modal;
+            ImGuiFileDialog::Instance()->OpenDialog(
+                "choose_media_dir", "Select media folder", nullptr, fdCfg);
+        }
+    }
+
+    ImGui::TextUnformatted("HTTP port");
+    ImGui::SameLine(labelW);
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::InputInt("##srv_port", &cfg.port, 0, 0)) {
+        if (cfg.port < 1)     cfg.port = 1;
+        if (cfg.port > 65534) cfg.port = 65534;
+        dirty = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(audio WebSocket uses port + 1)");
+
+    if (ImGui::Checkbox("Start server automatically with the app", &cfg.enabled))
+        dirty = true;
+
+    ImGui::Spacing();
+
+    // --- Start / Stop ------------------------------------------------------
+    if (!running) {
+        ImGui::BeginDisabled(cfg.mediaDir.empty());
+        if (ImGui::Button(ICON_LC_SERVER "  Start server", ImVec2(220, 0)))
+            m_mediaServer->start(cfg.mediaDir, cfg.port);
+        ImGui::EndDisabled();
+        if (cfg.mediaDir.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("select a media folder first");
+        }
+    } else {
+        if (ImGui::Button(ICON_LC_SERVER_OFF "  Stop server", ImVec2(220, 0)))
+            m_mediaServer->stop();
+    }
+
+    // Folder-picker result.
+    ImVec2 vpSize = ImGui::GetMainViewport()->Size;
+    ImVec2 dlgMin(640, 420);
+    ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
+    if (ImGuiFileDialog::Instance()->Display("choose_media_dir", 0, dlgMin, dlgMax)) {
+        if (ImGuiFileDialog::Instance()->IsOk()) {
+            cfg.mediaDir = ImGuiFileDialog::Instance()->GetCurrentPath();
+            dirty = true;
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+
+    if (dirty)
+        Settings::setServerConfig(cfg);
 }
