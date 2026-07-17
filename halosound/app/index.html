@@ -153,6 +153,11 @@
     </div>
 
     <!-- Scripts -->
+    <!-- libpgs ships as an ES module; expose it as the `libpgs` global -->
+    <script type="module">
+        import { PgsRenderer } from './js/vendor/libpgs.js';
+        window.libpgs = { PgsRenderer };
+    </script>
     <script src="js/focus.js"></script>
     <script src="js/connection.js"></script>
     <script src="js/audio-engine.js"></script>

@@ -95,9 +95,12 @@ class HaloPlayer {
             setTimeout(() => this.hideLoading(), 4000);
         };
 
-        // Subtitles: embedded stream index or an external file's URL
+        // Subtitles: embedded text stream, external file, or image-based
+        // PGS rendered onto a canvas overlay by libpgs.
         this.clearSubtitles();
-        if (selection.subtitleExt) {
+        if (selection.subtitlePgs != null) {
+            this.attachPgs(file.id, selection.subtitlePgs);
+        } else if (selection.subtitleExt) {
             this.addSubtitleUrl(selection.subtitleExt);
         } else if (selection.subtitleTrack >= 0) {
             this.addSubtitleTrack(file.id, selection.subtitleTrack);
@@ -375,6 +378,37 @@ class HaloPlayer {
         this.addSubtitleUrl(`${this.connection.httpBase}/api/files/${fileId}/subtitles/${streamIndex}`);
     }
 
+    /*
+     * Attach image-based (PGS) subtitles: the server extracts the raw .sup
+     * stream and libpgs renders it onto a canvas overlaid on the video.
+     * First selection of a track on a big file takes a while server-side
+     * (the whole container must be demuxed once); it's cached after that.
+     */
+    attachPgs(fileId, streamIndex) {
+        this.disposePgs();
+        if (typeof libpgs === 'undefined') {
+            this.setDiag('PGS renderer unavailable (libpgs missing)');
+            return;
+        }
+        try {
+            this.pgsRenderer = new libpgs.PgsRenderer({
+                workerUrl: 'js/vendor/libpgs.worker.js',
+                video: this.video,
+                subUrl: `${this.connection.httpBase}/api/files/${fileId}/pgssub/${streamIndex}`,
+            });
+        } catch (e) {
+            console.warn('PGS renderer failed:', e);
+            this.setDiag('PGS subtitles failed: ' + e);
+        }
+    }
+
+    disposePgs() {
+        if (this.pgsRenderer) {
+            try { this.pgsRenderer.dispose(); } catch (e) {}
+            this.pgsRenderer = null;
+        }
+    }
+
     /* Attach a subtitle track from any VTT URL (embedded or external file). */
     addSubtitleUrl(url) {
         const track = document.createElement('track');
@@ -395,6 +429,7 @@ class HaloPlayer {
     clearSubtitles() {
         const tracks = this.video.querySelectorAll('track');
         tracks.forEach(t => t.remove());
+        this.disposePgs();
     }
 
     onTimeUpdate() {

@@ -1,5 +1,6 @@
 const express = require('express');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const config = require('./config');
@@ -270,6 +271,74 @@ function createHttpServer(files, options = {}) {
             if (!res.headersSent) res.status(500).send('Subtitle conversion failed');
         });
         req.on('close', () => { try { ffmpeg.kill('SIGTERM'); } catch (e) {} });
+    });
+
+    /*
+     * PGS (image-based) subtitle stream as a raw .sup file, for client-side
+     * rendering with libpgs.  Extraction has to demux the whole container,
+     * so results are cached in the OS temp dir (keyed by file id + stream +
+     * source size, so replacing the movie invalidates).  Concurrent requests
+     * for the same track share one extraction.
+     */
+    const pgsInflight = new Map();
+
+    app.get('/api/files/:id/pgssub/:streamIndex', (req, res) => {
+        const file = files.find(f => f.id === parseInt(req.params.id));
+        if (!file) return res.status(404).send('File not found');
+        const streamIndex = parseInt(req.params.streamIndex);
+        if (!Number.isFinite(streamIndex) || streamIndex < 0) {
+            return res.status(400).send('Bad stream index');
+        }
+
+        const cacheDir = path.join(os.tmpdir(), 'halosound-pgs');
+        try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (e) {}
+        let st = null;
+        try { st = fs.statSync(file.path); } catch (e) {}
+        const key = `${file.id}-${streamIndex}-${st ? st.size : 0}.sup`;
+        const cached = path.join(cacheDir, key);
+
+        const sendSup = () => {
+            res.set('Content-Type', 'application/octet-stream');
+            res.set('Access-Control-Allow-Origin', '*');
+            res.sendFile(cached);
+        };
+
+        try {
+            if (fs.existsSync(cached) && fs.statSync(cached).size > 0) return sendSup();
+        } catch (e) { /* fall through to extraction */ }
+
+        let job = pgsInflight.get(key);
+        if (!job) {
+            job = new Promise((resolve, reject) => {
+                const tmp = cached + '.part';
+                const ffmpeg = spawn(config.FFMPEG_PATH, [
+                    '-v', 'error', '-y',
+                    '-i', file.path,
+                    '-map', `0:${streamIndex}`,
+                    '-c:s', 'copy',
+                    '-f', 'sup',
+                    tmp
+                ], { stdio: ['ignore', 'ignore', 'pipe'] });
+                let errOut = '';
+                ffmpeg.stderr.on('data', d => { errOut += d; });
+                ffmpeg.on('close', (code) => {
+                    if (code === 0) {
+                        try { fs.renameSync(tmp, cached); resolve(); }
+                        catch (e) { reject(e); }
+                    } else {
+                        try { fs.unlinkSync(tmp); } catch (e) {}
+                        reject(new Error(errOut.slice(0, 200) || `ffmpeg exit ${code}`));
+                    }
+                });
+                ffmpeg.on('error', reject);
+            }).finally(() => pgsInflight.delete(key));
+            pgsInflight.set(key, job);
+            if (options.verbose) console.log(`[PGS] extracting stream ${streamIndex} of ${file.name}`);
+        }
+
+        job.then(sendSup).catch((e) => {
+            if (!res.headersSent) res.status(500).send('PGS extraction failed: ' + e.message);
+        });
     });
 
     /*

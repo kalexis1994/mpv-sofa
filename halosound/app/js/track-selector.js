@@ -30,6 +30,7 @@ class TrackSelector {
         this.subtitleTracks = data.subtitleTracks || [];
         this.externalSubs = data.externalSubs || [];
         this.selectedSubtitleExt = null;
+        this.selectedSubtitlePgs = -1;
 
         this.renderAudio();
         this.renderSubtitles();
@@ -112,15 +113,11 @@ class TrackSelector {
             `;
 
             el.addEventListener('click', () => {
-                if (!t.isTextBased) return; // Can't use image-based subs in browser
-                this.selectSubtitle(t.index);
+                // Image-based (PGS) subs render through libpgs on a canvas
+                // overlay; text subs go through the native <track> element.
+                if (t.isTextBased) this.selectSubtitle(t.index);
+                else this.selectPgsSub(t.index);
             });
-
-            if (!t.isTextBased) {
-                el.classList.add('disabled');  // FocusEngine skips these
-                el.style.opacity = '0.4';
-                el.style.cursor = 'not-allowed';
-            }
 
             this.subsListEl.appendChild(el);
         }
@@ -142,10 +139,22 @@ class TrackSelector {
     selectExternalSub(name) {
         this.selectedSubtitle = -1;
         this.selectedSubtitleExt = name;
+        this.selectedSubtitlePgs = -1;
         const noneEl = this.subsListEl.querySelector('.track-item-none');
         if (noneEl) noneEl.classList.remove('selected');
         this.subsListEl.querySelectorAll('.track-item').forEach(el => {
             el.classList.toggle('selected', el.dataset.ext === name);
+        });
+    }
+
+    selectPgsSub(streamIndex) {
+        this.selectedSubtitle = -1;
+        this.selectedSubtitleExt = null;
+        this.selectedSubtitlePgs = streamIndex;
+        const noneEl = this.subsListEl.querySelector('.track-item-none');
+        if (noneEl) noneEl.classList.remove('selected');
+        this.subsListEl.querySelectorAll('.track-item').forEach(el => {
+            el.classList.toggle('selected', parseInt(el.dataset.index) === streamIndex);
         });
     }
 
@@ -182,6 +191,7 @@ class TrackSelector {
                 subtitleExt: this.selectedSubtitleExt
                     ? `${this.connection.httpBase}/api/files/${this.fileId}/extsub?name=${encodeURIComponent(this.selectedSubtitleExt)}`
                     : null,
+                subtitlePgs: this.selectedSubtitlePgs >= 0 ? this.selectedSubtitlePgs : null,
             });
         }
     }
