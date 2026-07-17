@@ -12,8 +12,10 @@
 //  16ch  → 7.1.4+Objects  (layout 4, Atmos with extract_objects)
 
 class HaloSettings {
-    constructor(audioEngine) {
+    constructor(audioEngine, player, connection) {
         this.audioEngine = audioEngine;
+        this.player = player || null;
+        this.connection = connection || null;
         this.outputMode = 'headphones';
         this.roomPreset = 1;
         this.reverbWet = 7;
@@ -68,7 +70,123 @@ class HaloSettings {
             this.audioEngine.setVolume(this.volume / 100);
         });
 
+        // Audio delay (BT headphone lip-sync compensation)
+        const delaySlider = document.getElementById('setting-audio-delay');
+        if (delaySlider) {
+            if (this.player) delaySlider.value = Math.round(this.player.userAudioDelay * 1000);
+            this._updateDelayHint();
+            delaySlider.addEventListener('input', (e) => {
+                if (this.player) this.player.setAudioDelay(parseInt(e.target.value, 10) || 0);
+                this._updateDelayHint();
+            });
+        }
+
+        // HRTF profile picker (populated from the server after connect)
+        const hrtfSel = document.getElementById('setting-hrtf-profile');
+        if (hrtfSel) {
+            hrtfSel.addEventListener('change', () => this.applyHrtfProfile(hrtfSel.value));
+        }
+
         this.applyOutputMode();
+        this.detectBtOutput();
+    }
+
+    _updateDelayHint(suffix) {
+        const hint = document.getElementById('hint-audio-delay');
+        const slider = document.getElementById('setting-audio-delay');
+        if (hint && slider) {
+            hint.textContent = `${slider.value} ms${suffix ? ' · ' + suffix : ''}` +
+                ' — increase until lips match what you hear';
+        }
+    }
+
+    /**
+     * Detect a Bluetooth sound output via the webOS Luna audio service.
+     * If BT is active and the user never set a delay, seed a typical BT
+     * (SBC codec) latency so lip-sync starts close.  Fails silently on
+     * platforms without PalmServiceBridge or the service.
+     */
+    detectBtOutput() {
+        if (typeof PalmServiceBridge === 'undefined') return;
+        const uris = [
+            'luna://com.webos.service.audio/getSoundOutput',
+            'luna://com.webos.audio/getSoundOutput',
+        ];
+        const tryUri = (i) => {
+            if (i >= uris.length) return;
+            try {
+                const bridge = new PalmServiceBridge();
+                bridge.onservicecallback = (raw) => {
+                    try {
+                        const r = JSON.parse(raw);
+                        if (r.returnValue === false || r.errorCode) { tryUri(i + 1); return; }
+                        const out = String(r.soundOutput || r.soundOut || '').toLowerCase();
+                        console.log('[audio-out]', out || raw.slice(0, 120));
+                        if (out.includes('bt') || out.includes('bluetooth') || out.includes('headset')) {
+                            let saved = null;
+                            try { saved = localStorage.getItem('mpvsofa.audioDelayMs'); } catch (e) {}
+                            if (saved === null && this.player) {
+                                this.player.setAudioDelay(200);   // typical SBC latency
+                                const slider = document.getElementById('setting-audio-delay');
+                                if (slider) slider.value = 200;
+                            }
+                            this._updateDelayHint(`BT output detected (${out})`);
+                        }
+                    } catch (e) { tryUri(i + 1); }
+                };
+                bridge.call(uris[i], '{}');
+            } catch (e) { /* bridge unavailable */ }
+        };
+        tryUri(0);
+    }
+
+    /**
+     * Populate the HRTF profile picker from the server and load the saved
+     * choice (or the built-in default).  Called once after connecting.
+     */
+    async initHrtf() {
+        const sel = document.getElementById('setting-hrtf-profile');
+        let saved = '';
+        try { saved = localStorage.getItem('mpvsofa.hrtfProfile') || ''; } catch (e) {}
+
+        if (sel && this.connection && this.connection.httpBase) {
+            try {
+                const resp = await fetch(`${this.connection.httpBase}/api/hrtf`);
+                const profiles = await resp.json();
+                // Rebuild options: built-in + server profiles
+                sel.innerHTML = '<option value="">Built-in (MIT KEMAR)</option>';
+                for (const p of profiles) {
+                    const opt = document.createElement('option');
+                    opt.value = p.name;
+                    opt.textContent = p.name.replace(/\.sofa$/i, '');
+                    sel.appendChild(opt);
+                }
+                if (saved && profiles.some(p => p.name === saved)) {
+                    sel.value = saved;
+                } else {
+                    saved = '';
+                }
+            } catch (e) {
+                console.warn('HRTF profile list unavailable:', e);
+                saved = '';
+            }
+        }
+        await this.applyHrtfProfile(saved, /*skipPersist=*/true);
+    }
+
+    async applyHrtfProfile(name, skipPersist) {
+        const url = name
+            ? `${this.connection.httpBase}/api/hrtf/${encodeURIComponent(name)}`
+            : 'assets/hrtf/default.sofa';
+        try {
+            await this.audioEngine.loadSofa(url);
+            console.log('HRTF profile loaded:', name || 'built-in');
+            if (!skipPersist) {
+                try { localStorage.setItem('mpvsofa.hrtfProfile', name || ''); } catch (e) {}
+            }
+        } catch (e) {
+            console.warn('HRTF profile load failed, keeping current:', e);
+        }
     }
 
     /**

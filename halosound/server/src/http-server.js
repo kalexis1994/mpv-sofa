@@ -206,7 +206,29 @@ function createHttpServer(files, options = {}) {
                     }
                 }
 
-                res.json({ duration, audioTracks, subtitleTracks });
+                /*
+                 * External subtitle files sitting in the same folder as the
+                 * movie (.srt/.ass/.ssa/.vtt/.sub).  Files whose name starts
+                 * with the movie's basename sort first.
+                 */
+                const externalSubs = [];
+                try {
+                    const dir = path.dirname(file.path);
+                    const base = path.basename(file.path, path.extname(file.path)).toLowerCase();
+                    const subExts = new Set(['.srt', '.ass', '.ssa', '.vtt', '.sub']);
+                    const entries = fs.readdirSync(dir)
+                        .filter(n => subExts.has(path.extname(n).toLowerCase()))
+                        .sort((a, b) => {
+                            const am = a.toLowerCase().startsWith(base) ? 0 : 1;
+                            const bm = b.toLowerCase().startsWith(base) ? 0 : 1;
+                            return am - bm || a.localeCompare(b);
+                        });
+                    for (const name of entries) {
+                        externalSubs.push({ name });
+                    }
+                } catch (e) { /* unreadable dir → no external subs */ }
+
+                res.json({ duration, audioTracks, subtitleTracks, externalSubs });
             } catch (e) {
                 res.status(500).json({ error: 'Failed to parse tracks' });
             }
@@ -214,6 +236,83 @@ function createHttpServer(files, options = {}) {
     });
 
     /* Extract subtitles as WebVTT */
+    /*
+     * Serve an EXTERNAL subtitle file (same folder as the movie) as WebVTT.
+     * The name is validated against a fresh directory listing — never joined
+     * blindly — so path traversal is impossible.
+     */
+    app.get('/api/files/:id/extsub', (req, res) => {
+        const file = files.find(f => f.id === parseInt(req.params.id));
+        if (!file) return res.status(404).send('File not found');
+
+        const wanted = String(req.query.name || '');
+        const dir = path.dirname(file.path);
+        const subExts = new Set(['.srt', '.ass', '.ssa', '.vtt', '.sub']);
+        let match = null;
+        try {
+            match = fs.readdirSync(dir).find(n =>
+                n === wanted && subExts.has(path.extname(n).toLowerCase()));
+        } catch (e) { /* fallthrough */ }
+        if (!match) return res.status(404).send('Subtitle not found');
+
+        res.set('Content-Type', 'text/vtt; charset=utf-8');
+        res.set('Access-Control-Allow-Origin', '*');
+
+        const ffmpeg = spawn(config.FFMPEG_PATH, [
+            '-i', path.join(dir, match),
+            '-f', 'webvtt',
+            '-'
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+        ffmpeg.stdout.pipe(res);
+        ffmpeg.stderr.on('data', () => {});
+        ffmpeg.on('error', () => {
+            if (!res.headersSent) res.status(500).send('Subtitle conversion failed');
+        });
+        req.on('close', () => { try { ffmpeg.kill('SIGTERM'); } catch (e) {} });
+    });
+
+    /*
+     * HRTF profiles: list and serve .sofa files so the TV app can offer
+     * more than its bundled default.  Profiles live in the media folder
+     * (root or an hrtf/ subfolder).
+     */
+    function hrtfDirs() {
+        const dirs = [];
+        if (options.mediaDir) {
+            dirs.push(options.mediaDir);
+            dirs.push(path.join(options.mediaDir, 'hrtf'));
+        }
+        return dirs;
+    }
+
+    function listHrtfProfiles() {
+        const seen = new Map();
+        for (const dir of hrtfDirs()) {
+            try {
+                for (const n of fs.readdirSync(dir)) {
+                    if (path.extname(n).toLowerCase() === '.sofa' && !seen.has(n)) {
+                        seen.set(n, path.join(dir, n));
+                    }
+                }
+            } catch (e) { /* dir missing → skip */ }
+        }
+        return seen;
+    }
+
+    app.get('/api/hrtf', (req, res) => {
+        const names = [...listHrtfProfiles().keys()];
+        res.json(names.map(n => ({ name: n })));
+    });
+
+    app.get('/api/hrtf/:name', (req, res) => {
+        const profiles = listHrtfProfiles();
+        const p = profiles.get(req.params.name);   // exact match only
+        if (!p) return res.status(404).send('Profile not found');
+        res.set('Content-Type', 'application/octet-stream');
+        res.sendFile(p);
+    });
+
     app.get('/api/files/:id/subtitles/:streamIndex', (req, res) => {
         const file = files.find(f => f.id === parseInt(req.params.id));
         if (!file) return res.status(404).send('File not found');

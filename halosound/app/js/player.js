@@ -7,7 +7,15 @@ class HaloPlayer {
         this.playing = false;
         this.currentFile = null;
         this.syncInterval = null;
-        this.audioLatencyOffset = 0;
+
+        // User-set audio delay compensation (seconds).  BT headphones add
+        // transmission latency invisible to both the video and audio clocks
+        // — the user tunes this until lips match what they hear.  Persisted.
+        this.userAudioDelay = 0;
+        try {
+            const d = parseFloat(localStorage.getItem('mpvsofa.audioDelayMs'));
+            if (!isNaN(d)) this.userAudioDelay = d / 1000;
+        } catch (e) { /* localStorage unavailable */ }
         this.onPlaybackEnded = null;
         this.onAudioInfo = null;    // callback when audio track info arrives
         this.audioStartPts = -1;
@@ -72,23 +80,26 @@ class HaloPlayer {
         this.startTimeout = setTimeout(() => {
             if (!this.videoStarted && this.videoReady) {
                 this.showLoading('Audio stream failed — starting video only');
-                document.getElementById('hrtf-status').textContent = 'HRTF: No audio!';
+                this.setDiag('HRTF: No audio!');
                 this.videoStarted = true;
                 this.video.play().catch(() => {});
                 setTimeout(() => this.hideLoading(), 3000);
             }
         }, 8000);
 
-        // Surface server-side audio errors on screen
+        // Surface server-side audio errors (diagnostics live in Settings)
         this.connection.onAudioError = (msg) => {
             console.error('Audio error:', msg);
-            document.getElementById('audio-info').textContent = 'Audio error: ' + msg;
-            document.getElementById('hrtf-status').textContent = 'HRTF: Error';
+            this.setDiag('Audio error: ' + msg);
+            this.showLoading('Audio error — see Settings > Diagnostics');
+            setTimeout(() => this.hideLoading(), 4000);
         };
 
-        // Add subtitle track if selected
+        // Subtitles: embedded stream index or an external file's URL
         this.clearSubtitles();
-        if (selection.subtitleTrack >= 0) {
+        if (selection.subtitleExt) {
+            this.addSubtitleUrl(selection.subtitleExt);
+        } else if (selection.subtitleTrack >= 0) {
             this.addSubtitleTrack(file.id, selection.subtitleTrack);
         }
 
@@ -96,11 +107,6 @@ class HaloPlayer {
         this.connection.onAudioInfo = (audioInfo) => {
             this.audioEngine.setAudioInfo(audioInfo);
             if (this.onAudioInfo) this.onAudioInfo(audioInfo);
-            const infoStr = `${audioInfo.codec || ''} ${audioInfo.channels}ch ${audioInfo.layout} ${audioInfo.sampleRate}Hz`;
-            document.getElementById('audio-info').textContent = infoStr;
-            if (audioInfo.trackTitle) {
-                document.getElementById('audio-info').textContent += ' | ' + audioInfo.trackTitle;
-            }
         };
 
         this.connection.onAudioData = (data) => {
@@ -123,10 +129,6 @@ class HaloPlayer {
         await this.audioEngine.resume();
 
         this.playing = true;
-
-        // Update HRTF status
-        document.getElementById('hrtf-status').textContent =
-            'HRTF: ' + (this.audioEngine.wasmReady ? 'Active' : 'Fallback');
 
         // Track the audio playback clock reported by the worklet
         this.lastAudioPts = -1;
@@ -169,9 +171,9 @@ class HaloPlayer {
                         // pipeline offset — this lands exactly where the
                         // video stopped, so resume is seamless.
                         if (s.pts >= 0 && this.syncBaseline !== null) {
-                            const target = s.pts + this.syncBaseline;
+                            const target = s.pts + this.syncBaseline - this.userAudioDelay;
                             if (Math.abs(this.video.currentTime - target) > 0.15) {
-                                this.video.currentTime = target;
+                                this.video.currentTime = Math.max(0, target);
                             }
                         }
                         this.audioEngine.setHold(false);
@@ -189,13 +191,12 @@ class HaloPlayer {
             const now = performance.now();
             if (!this._statsUiAt || now - this._statsUiAt > 1000) {
                 this._statsUiAt = now;
-                const el = document.getElementById('hrtf-status');
-                if (el && this.audioEngine.wasmReady) {
-                    const bufMs = Math.round(s.queued * 256 / 48);
-                    el.textContent = `HRTF: Active · buf ${(bufMs / 1000).toFixed(1)}s · dsp ${s.busyPct}%` +
-                        ` · vstall ${this.videoStalls || 0} · astall ${this.audioStalls || 0}` +
-                        ` · under ${s.underruns} · drop ${s.dropped}`;
-                }
+                const bufMs = Math.round(s.queued * 256 / 48);
+                this.setDiag(`HRTF: ${this.audioEngine.wasmReady ? 'Active' : 'Fallback'}` +
+                    ` · buf ${(bufMs / 1000).toFixed(1)}s · dsp ${s.busyPct}%` +
+                    ` · vstall ${this.videoStalls || 0} · astall ${this.audioStalls || 0}` +
+                    ` · under ${s.underruns} · drop ${s.dropped}` +
+                    ` · delay ${(this.userAudioDelay * 1000).toFixed(0)}ms`);
             }
         };
 
@@ -267,12 +268,14 @@ class HaloPlayer {
             return;
         }
 
-        const residual = drift - this.syncBaseline;
+        // userAudioDelay shifts the video back so it matches audio that is
+        // HEARD late (BT headphone transmission latency).
+        const residual = drift - this.syncBaseline + this.userAudioDelay;
         const now = performance.now();
         if (Math.abs(residual) > 0.4 && now - (this.lastHardSync || 0) > 5000) {
             this.lastHardSync = now;
             console.log(`[sync] residual ${residual.toFixed(2)}s → correcting video`);
-            this.video.currentTime = audioPts + this.syncBaseline;
+            this.video.currentTime = audioPts + this.syncBaseline - this.userAudioDelay;
         }
     }
 
@@ -291,6 +294,28 @@ class HaloPlayer {
     /* Pause drift corrections while the pipeline re-stabilizes. */
     suppressSync(ms = 4000) {
         this.syncSuppressUntil = performance.now() + ms;
+    }
+
+    /* Diagnostics line (lives in Settings > Diagnostics). */
+    setDiag(text) {
+        const el = document.getElementById('diag-line');
+        if (el) el.textContent = text;
+    }
+
+    /*
+     * Set the audio delay compensation in milliseconds and apply the change
+     * to a live video immediately (nudge, no waiting for checkSync).
+     */
+    setAudioDelay(ms) {
+        const newDelay = Math.max(0, ms) / 1000;
+        const delta = newDelay - this.userAudioDelay;
+        this.userAudioDelay = newDelay;
+        try { localStorage.setItem('mpvsofa.audioDelayMs', String(Math.round(newDelay * 1000))); }
+        catch (e) { /* localStorage unavailable */ }
+        if (this.videoStarted && Math.abs(delta) > 0.001) {
+            this.video.currentTime = Math.max(0, this.video.currentTime - delta);
+            this.suppressSync(2000);
+        }
     }
 
     pause() {
@@ -347,11 +372,16 @@ class HaloPlayer {
     }
 
     addSubtitleTrack(fileId, streamIndex) {
+        this.addSubtitleUrl(`${this.connection.httpBase}/api/files/${fileId}/subtitles/${streamIndex}`);
+    }
+
+    /* Attach a subtitle track from any VTT URL (embedded or external file). */
+    addSubtitleUrl(url) {
         const track = document.createElement('track');
         track.kind = 'subtitles';
         track.label = 'Subtitles';
         track.srclang = 'en';
-        track.src = `${this.connection.httpBase}/api/files/${fileId}/subtitles/${streamIndex}`;
+        track.src = url;
         track.default = true;
         this.video.appendChild(track);
         // Enable the track after adding

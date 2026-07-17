@@ -108,7 +108,7 @@ function rescanFiles() {
 }
 
 /* Start HTTP server */
-const app = createHttpServer(files, { verbose, rescan: rescanFiles });
+const app = createHttpServer(files, { verbose, rescan: rescanFiles, mediaDir });
 const httpServer = app.listen(httpPort, '0.0.0.0', () => {
     console.log(`HTTP server listening on port ${httpPort}`);
 });

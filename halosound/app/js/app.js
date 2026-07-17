@@ -246,13 +246,18 @@
         await audioEngine.init();
         try { await audioEngine.loadWasm(); console.log('WASM DSP loaded'); }
         catch (e) { console.warn('WASM load failed, using fallback:', e); }
-        try { await audioEngine.loadSofa('assets/hrtf/default.sofa'); console.log('Default SOFA loaded'); }
-        catch (e) { console.warn('SOFA load failed:', e); }
 
         player = new HaloPlayer(connection, audioEngine);
         browser = new FileBrowser(connection);
-        settings = new HaloSettings(audioEngine);
+        settings = new HaloSettings(audioEngine, player, connection);
         trackSelector = new TrackSelector(connection);
+
+        // SOFA profile: server-provided if one is saved, else built-in.
+        try { await settings.initHrtf(); }
+        catch (e) {
+            console.warn('HRTF init failed, loading built-in:', e);
+            try { await audioEngine.loadSofa('assets/hrtf/default.sofa'); } catch (e2) {}
+        }
 
         player.onPlaybackEnded = () => { if (visualizer) visualizer.stop(); showScreen('browser'); refreshFileList(); };
         player.onAudioInfo = (info) => settings.updateAudioInfo(info);
@@ -281,8 +286,6 @@
         if (visualizer) visualizer.start();
         await player.play(file, selection);
         updatePlayPauseIcon();
-        document.getElementById('hrtf-status').textContent =
-            'HRTF: ' + (audioEngine.wasmReady ? 'Active' : 'Fallback');
     }
 
     function refreshFileList() {

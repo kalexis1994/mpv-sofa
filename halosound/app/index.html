@@ -68,10 +68,6 @@
                 </div>
                 <span id="time-total">0:00</span>
             </div>
-            <div id="audio-status" class="audio-status">
-                <span id="audio-info"></span>
-                <span id="hrtf-status">HRTF: Loading...</span>
-            </div>
             <div id="player-controls" class="player-controls hidden">
                 <button id="pc-menu" class="pc-btn focusable" aria-label="Menu">☰</button>
                 <button id="pc-rew" class="pc-btn focusable" aria-label="Back 10 seconds">⏪</button>
@@ -127,7 +123,20 @@
                 <input type="range" id="setting-volume" class="focusable" min="0" max="100" value="80">
             </div>
             <div class="setting-group">
-                <h3>Debug</h3>
+                <h3>Audio Delay (BT headphones)</h3>
+                <label>Delay: <input type="range" id="setting-audio-delay" class="focusable" min="0" max="1000" step="25" value="0"></label>
+                <div class="setting-hint" id="hint-audio-delay">0 ms — increase until lips match what you hear</div>
+            </div>
+            <div class="setting-group">
+                <h3>HRTF Profile</h3>
+                <select id="setting-hrtf-profile" class="focusable">
+                    <option value="">Built-in (MIT KEMAR)</option>
+                </select>
+                <div class="setting-hint">Drop .sofa files in the server's media folder (or its hrtf/ subfolder)</div>
+            </div>
+            <div class="setting-group">
+                <h3>Diagnostics</h3>
+                <div class="setting-info" id="diag-line">No playback yet</div>
                 <label class="check-row"><input type="checkbox" id="mute-bed" class="focusable"> Mute Bed (ch 0-7)</label>
                 <label class="check-row"><input type="checkbox" id="mute-height" class="focusable"> Mute Objects (ch 8-15)</label>
             </div>

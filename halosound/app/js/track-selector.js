@@ -28,6 +28,8 @@ class TrackSelector {
 
         this.audioTracks = data.audioTracks || [];
         this.subtitleTracks = data.subtitleTracks || [];
+        this.externalSubs = data.externalSubs || [];
+        this.selectedSubtitleExt = null;
 
         this.renderAudio();
         this.renderSubtitles();
@@ -122,6 +124,29 @@ class TrackSelector {
 
             this.subsListEl.appendChild(el);
         }
+
+        // External subtitle files found next to the movie on the server.
+        for (const s of this.externalSubs) {
+            const el = document.createElement('div');
+            el.className = 'track-item focusable';
+            el.dataset.ext = s.name;
+            el.innerHTML = `
+                <div class="track-main"><span class="track-badge">External</span></div>
+                <div class="track-detail">${s.name}</div>
+            `;
+            el.addEventListener('click', () => this.selectExternalSub(s.name));
+            this.subsListEl.appendChild(el);
+        }
+    }
+
+    selectExternalSub(name) {
+        this.selectedSubtitle = -1;
+        this.selectedSubtitleExt = name;
+        const noneEl = this.subsListEl.querySelector('.track-item-none');
+        if (noneEl) noneEl.classList.remove('selected');
+        this.subsListEl.querySelectorAll('.track-item').forEach(el => {
+            el.classList.toggle('selected', el.dataset.ext === name);
+        });
     }
 
     selectAudio(streamIndex) {
@@ -133,6 +158,7 @@ class TrackSelector {
 
     selectSubtitle(streamIndex) {
         this.selectedSubtitle = streamIndex;
+        this.selectedSubtitleExt = null;
 
         // Update "None" item
         const noneEl = this.subsListEl.querySelector('.track-item-none');
@@ -153,6 +179,9 @@ class TrackSelector {
             this.onPlay({
                 audioTrack: this.selectedAudio,
                 subtitleTrack: this.selectedSubtitle,
+                subtitleExt: this.selectedSubtitleExt
+                    ? `${this.connection.httpBase}/api/files/${this.fileId}/extsub?name=${encodeURIComponent(this.selectedSubtitleExt)}`
+                    : null,
             });
         }
     }
