@@ -5,12 +5,10 @@
 // We accumulate 256 input samples before calling WASM, then drain output
 // over two process() calls.
 //
-// WASM export mapping (Emscripten 5.0.1 minified):
-//   b = memory, c = __wasm_call_ctors
-//   d = halo_create, e = halo_destroy, f = free
-//   g = halo_load_sofa, h = halo_set_layout, i = halo_set_speaker_pos
-//   j = halo_set_room, k = halo_set_room_preset, l = halo_process
-//   m = halo_get_num_channels, n = malloc
+// WASM export/import names are minified by Emscripten and change between
+// releases. The main thread (audio-engine.js) parses the JS glue and sends
+// {exportMap, importMap} along with the binary; we resolve real names first
+// and fall back to the mapped minified names.
 
 const HRTF_BLOCK = 256;   // Must match HRTF_BLOCK_SIZE in C code
 const RENDER_QUANTUM = 128; // Web Audio standard
@@ -19,6 +17,7 @@ class HrtfProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
         this.exports = null;
+        this.fn = null;        // resolved export functions (real names)
         this.memory = null;
         this.enginePtr = 0;
         this.wasmReady = false;
@@ -42,9 +41,19 @@ class HrtfProcessor extends AudioWorkletProcessor {
         this.inputPtr = 0;
         this.outputPtr = 0;
 
+        this.hold = false;     // silence output without consuming (buffering)
         this.useHrtf = true;   // false = speakers bypass mode
         this.muteBed = false;    // mute channels 0-7 (bed)
-        this.muteHeight = false; // mute channels 8-11 (height objects)
+        this.muteHeight = false; // mute channels 8-15 (height objects)
+
+        // --- Sync / diagnostics state ---
+        this.playbackPts = -1;   // PTS of the sample currently being output
+        this.underruns = 0;      // starved process() calls after playback began
+        this.dropped = 0;        // chunks dropped on overflow
+        this.wasPlaying = false;
+        this.gainRamp = 1;       // 0..1, ramps up after discontinuities
+        this.busyMs = 0;         // time spent inside halo_process
+        this.statCounter = 0;
 
         this.port.onmessage = (e) => this.handleMessage(e.data);
     }
@@ -52,7 +61,7 @@ class HrtfProcessor extends AudioWorkletProcessor {
     handleMessage(msg) {
         switch (msg.type) {
             case 'init-wasm':
-                this.initWasm(msg.wasm);
+                this.initWasm(msg.wasm, msg.exportMap || {}, msg.importMap || {});
                 break;
             case 'load-sofa':
                 this.loadSofa(msg.data);
@@ -60,11 +69,18 @@ class HrtfProcessor extends AudioWorkletProcessor {
             case 'audio':
                 this.queueAudio(msg.buffer);
                 break;
+            case 'set-hold':
+                this.hold = !!msg.hold;
+                if (!this.hold) this.gainRamp = 0;  // fade back in on resume
+                break;
             case 'flush':
                 this.audioQueue = [];
                 this.accumPos = 0;
                 this.outAvailable = 0;
                 this.outReadPos = 0;
+                this.playbackPts = -1;
+                this.gainRamp = 0;
+                this.wasPlaying = false;
                 break;
             case 'audio-info': {
                 const newCh = msg.info.channels || 2;
@@ -81,11 +97,11 @@ class HrtfProcessor extends AudioWorkletProcessor {
             }
             case 'set-layout':
                 if (this.wasmReady && this.enginePtr)
-                    this.exports.h(this.enginePtr, msg.layout);
+                    this.fn.setLayout(this.enginePtr, msg.layout);
                 break;
             case 'set-room-preset':
                 if (this.wasmReady && this.enginePtr)
-                    this.exports.k(this.enginePtr, msg.preset);
+                    this.fn.setRoomPreset(this.enginePtr, msg.preset);
                 break;
             case 'set-volume':
                 this.volume = msg.volume;
@@ -100,38 +116,69 @@ class HrtfProcessor extends AudioWorkletProcessor {
         }
     }
 
-    async initWasm(wasmBytes) {
+    async initWasm(wasmBytes, exportMap, importMap) {
         try {
             const self = this;
-            const importObject = {
-                a: {
-                    a: (requestedSize) => {
-                        // _emscripten_resize_heap
-                        try {
-                            const pages = Math.ceil((requestedSize - self.memory.buffer.byteLength) / 65536);
-                            if (pages > 0) self.memory.grow(pages);
-                            return 1;
-                        } catch (e) { return 0; }
-                    }
-                }
-            };
+            const module = await WebAssembly.compile(wasmBytes);
 
-            const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
+            // Build the import object dynamically: give every required import
+            // a stub, with real implementations where semantics matter.
+            const impls = {
+                emscripten_resize_heap: (requestedSize) => {
+                    try {
+                        const pages = Math.ceil((requestedSize - self.memory.buffer.byteLength) / 65536);
+                        if (pages > 0) self.memory.grow(pages);
+                        return 1;
+                    } catch (e) { return 0; }
+                },
+                assert_fail: () => { throw new Error('wasm assertion failed'); },
+                abort_js: () => { throw new Error('wasm abort'); },
+                emscripten_date_now: () => Date.now(),
+            };
+            const importObject = {};
+            for (const imp of WebAssembly.Module.imports(module)) {
+                importObject[imp.module] = importObject[imp.module] || {};
+                if (imp.kind !== 'function') continue;
+                const real = (importMap[imp.name] || imp.name).replace(/^_+/, '');
+                importObject[imp.module][imp.name] = impls[real] || (() => 0);
+            }
+
+            const instance = await WebAssembly.instantiate(module, importObject);
             this.exports = instance.exports;
-            this.memory = instance.exports.b;  // b = memory
+
+            // Resolve exports: unminified name first, then glue-derived map
+            const ex = this.exports;
+            const pick = (real) => ex[real] || ex['_' + real] || (exportMap[real] ? ex[exportMap[real]] : undefined);
+            this.memory = ex.memory instanceof WebAssembly.Memory
+                ? ex.memory
+                : Object.values(ex).find(v => v instanceof WebAssembly.Memory);
+            this.fn = {
+                ctors: pick('wasm_call_ctors') || pick('__wasm_call_ctors'),
+                create: pick('halo_create'),
+                destroy: pick('halo_destroy'),
+                loadSofa: pick('halo_load_sofa'),
+                setLayout: pick('halo_set_layout'),
+                setRoomPreset: pick('halo_set_room_preset'),
+                process: pick('halo_process'),
+                malloc: pick('malloc'),
+                free: pick('free'),
+            };
+            for (const name of ['create', 'destroy', 'loadSofa', 'process', 'malloc', 'free']) {
+                if (!this.fn[name]) throw new Error('unresolved wasm export: ' + name);
+            }
+            if (!this.memory) throw new Error('wasm memory export not found');
 
             // Runtime init (__wasm_call_ctors)
-            if (this.exports.c) this.exports.c();
+            if (this.fn.ctors) this.fn.ctors();
 
-            // Create engine (d = halo_create)
-            this.enginePtr = this.exports.d(sampleRate, this.numChannels);
+            this.enginePtr = this.fn.create(sampleRate, this.numChannels);
             if (!this.enginePtr) throw new Error('halo_create returned null');
 
-            // Allocate WASM buffers for 256-sample blocks (n = malloc)
+            // Allocate WASM buffers for 256-sample blocks
             const inputBytes = HRTF_BLOCK * this.numChannels * 4;
             const outputBytes = HRTF_BLOCK * 2 * 4;
-            this.inputPtr = this.exports.n(inputBytes);
-            this.outputPtr = this.exports.n(outputBytes);
+            this.inputPtr = this.fn.malloc(inputBytes);
+            this.outputPtr = this.fn.malloc(outputBytes);
 
             // Init accumulation buffer
             this.accumBuf = new Float32Array(HRTF_BLOCK * this.numChannels);
@@ -145,28 +192,27 @@ class HrtfProcessor extends AudioWorkletProcessor {
     }
 
     rebuildEngine() {
-        if (!this.exports) return;
-        // Free old buffers and engine (f = free, e = halo_destroy)
-        if (this.inputPtr) this.exports.f(this.inputPtr);
-        if (this.outputPtr) this.exports.f(this.outputPtr);
-        if (this.enginePtr) this.exports.e(this.enginePtr);
+        if (!this.fn) return;
+        // Free old buffers and engine
+        if (this.inputPtr) this.fn.free(this.inputPtr);
+        if (this.outputPtr) this.fn.free(this.outputPtr);
+        if (this.enginePtr) this.fn.destroy(this.enginePtr);
 
-        // d = halo_create, n = malloc
-        this.enginePtr = this.exports.d(sampleRate, this.numChannels);
+        this.enginePtr = this.fn.create(sampleRate, this.numChannels);
         const inputBytes = HRTF_BLOCK * this.numChannels * 4;
         const outputBytes = HRTF_BLOCK * 2 * 4;
-        this.inputPtr = this.exports.n(inputBytes);
-        this.outputPtr = this.exports.n(outputBytes);
+        this.inputPtr = this.fn.malloc(inputBytes);
+        this.outputPtr = this.fn.malloc(outputBytes);
     }
 
     loadSofa(sofaData) {
         if (!this.wasmReady || !this.enginePtr) return;
         const size = sofaData.byteLength;
-        const ptr = this.exports.n(size);    // n = malloc
+        const ptr = this.fn.malloc(size);
         if (!ptr) return;
         new Uint8Array(this.memory.buffer).set(new Uint8Array(sofaData), ptr);
-        this.exports.g(this.enginePtr, ptr, size);  // g = halo_load_sofa
-        this.exports.f(ptr);                        // f = free
+        this.fn.loadSofa(this.enginePtr, ptr, size);
+        this.fn.free(ptr);
     }
 
     queueAudio(buffer) {
@@ -174,15 +220,21 @@ class HrtfProcessor extends AudioWorkletProcessor {
         if (pcmBytes <= 0) return;
         const numFloats = pcmBytes / 4;
 
+        // PTS travels in the first 8 bytes (Float64 BE)
+        const pts = new DataView(buffer).getFloat64(0, false);
+
         // Copy data (buffer will be detached)
         const pcmData = new Float32Array(numFloats);
         pcmData.set(new Float32Array(buffer, 8));
 
-        this.audioQueue.push({ data: pcmData, readPos: 0 });
+        this.audioQueue.push({ data: pcmData, readPos: 0, pts });
 
-        // Cap queue (~250ms at 48kHz)
-        while (this.audioQueue.length > 48) {
+        // Cap queue (~550ms at 48kHz). Overflow = server/DAC clock drift;
+        // drop oldest and fade back in so the discontinuity doesn't click.
+        while (this.audioQueue.length > 104) {
             this.audioQueue.shift();
+            this.dropped++;
+            this.gainRamp = 0;
         }
     }
 
@@ -193,6 +245,12 @@ class HrtfProcessor extends AudioWorkletProcessor {
     pullFromQueue(count) {
         const nch = this.numChannels;
         let pulled = 0;
+
+        // Anchor the playback PTS to the queue head before consuming
+        if (this.audioQueue.length > 0) {
+            const head = this.audioQueue[0];
+            this.playbackPts = head.pts + head.readPos / sampleRate;
+        }
 
         while (pulled < count && this.audioQueue.length > 0) {
             const chunk = this.audioQueue[0];
@@ -263,8 +321,9 @@ class HrtfProcessor extends AudioWorkletProcessor {
         const inIdx = this.inputPtr >> 2;
         heapF32.set(this.accumBuf.subarray(0, HRTF_BLOCK * nch), inIdx);
 
-        // Process (l = halo_process)
-        this.exports.l(this.enginePtr, this.inputPtr, this.outputPtr, HRTF_BLOCK);
+        const t0 = Date.now();
+        this.fn.process(this.enginePtr, this.inputPtr, this.outputPtr, HRTF_BLOCK);
+        this.busyMs += Date.now() - t0;
 
         // Read interleaved stereo output → split to L/R
         const outIdx = this.outputPtr >> 2;
@@ -283,6 +342,16 @@ class HrtfProcessor extends AudioWorkletProcessor {
 
         const outL = output[0];
         const outR = output[1];
+
+        // Held (video buffering / paused): silence without consuming queue
+        if (this.hold) {
+            outL.fill(0);
+            outR.fill(0);
+            this.wasPlaying = false;
+            this.maybePostStats();
+            return true;
+        }
+
         let written = 0;
 
         while (written < RENDER_QUANTUM) {
@@ -291,8 +360,11 @@ class HrtfProcessor extends AudioWorkletProcessor {
                 const toDrain = Math.min(this.outAvailable, RENDER_QUANTUM - written);
                 const rp = this.outReadPos;
                 for (let i = 0; i < toDrain; i++) {
-                    outL[written + i] = this.outBufL[rp + i] * this.volume;
-                    outR[written + i] = this.outBufR[rp + i] * this.volume;
+                    // Short fade-in after any discontinuity (underrun/drop/seek)
+                    if (this.gainRamp < 1) this.gainRamp = Math.min(1, this.gainRamp + 1 / 256);
+                    const g = this.volume * this.gainRamp;
+                    outL[written + i] = this.outBufL[rp + i] * g;
+                    outR[written + i] = this.outBufR[rp + i] * g;
                 }
                 this.outReadPos += toDrain;
                 this.outAvailable -= toDrain;
@@ -346,7 +418,33 @@ class HrtfProcessor extends AudioWorkletProcessor {
             outR[i] = 0;
         }
 
+        // Underrun accounting: we were playing but this quantum starved.
+        // Fade back in when data returns so the gap edge doesn't click.
+        if (this.wasPlaying && written < RENDER_QUANTUM) {
+            this.underruns++;
+            this.gainRamp = 0;
+        }
+        this.wasPlaying = written === RENDER_QUANTUM;
+
+        this.maybePostStats();
+
         return true;
+    }
+
+    /* Report sync/diagnostic stats every ~32 quanta (~85ms @48k) */
+    maybePostStats() {
+        if (++this.statCounter < 32) return;
+        this.statCounter = 0;
+        const windowMs = 32 * RENDER_QUANTUM / sampleRate * 1000;
+        this.port.postMessage({
+            type: 'stats',
+            pts: this.playbackPts,
+            queued: this.audioQueue.length,
+            underruns: this.underruns,
+            dropped: this.dropped,
+            busyPct: Math.round(this.busyMs / windowMs * 100),
+        });
+        this.busyMs = 0;
     }
 }
 

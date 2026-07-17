@@ -41,6 +41,9 @@
         document.getElementById('server-ip').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') doConnect();
         });
+        document.getElementById('server-port').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doConnect();
+        });
 
         // Wire up UI controller
         ui.onNavigate = handleNavigate;
@@ -53,10 +56,17 @@
         const origin = detectServerOrigin();
         if (origin) {
             document.getElementById('server-ip').value = origin.ip;
-            document.getElementById('server-port').textContent = ':' + origin.httpPort;
+            document.getElementById('server-port').value = origin.httpPort;
             document.getElementById('connection-status').textContent = 'Auto-detected server, connecting...';
             setTimeout(() => doConnect(), 300);
         } else {
+            // Restore last successful connection
+            try {
+                const savedIp = localStorage.getItem('halosound.serverIp');
+                const savedPort = localStorage.getItem('halosound.serverPort');
+                if (savedIp) document.getElementById('server-ip').value = savedIp;
+                if (savedPort) document.getElementById('server-port').value = savedPort;
+            } catch (e) { /* localStorage unavailable */ }
             document.getElementById('server-ip').focus();
         }
     }
@@ -64,15 +74,22 @@
     async function doConnect() {
         const ip = document.getElementById('server-ip').value.trim();
         const statusEl = document.getElementById('connection-status');
-        statusEl.textContent = 'Connecting to ' + ip + '...';
 
         const origin = detectServerOrigin();
-        const httpPort = origin ? origin.httpPort : 8080;
-        const wsPort = origin ? origin.wsPort : 8081;
+        const fieldPort = parseInt(document.getElementById('server-port').value, 10);
+        const httpPort = origin ? origin.httpPort
+                       : (fieldPort >= 1 && fieldPort <= 65535 ? fieldPort : 8080);
+        const wsPort = origin ? origin.wsPort : httpPort + 1;
+
+        statusEl.textContent = 'Connecting to ' + ip + ':' + httpPort + '...';
 
         const ok = await connection.connect(ip, httpPort, wsPort);
         if (ok) {
             statusEl.textContent = 'Connected!';
+            try {
+                localStorage.setItem('halosound.serverIp', ip);
+                localStorage.setItem('halosound.serverPort', String(httpPort));
+            } catch (e) { /* localStorage unavailable */ }
 
             await audioEngine.init();
 
@@ -185,16 +202,24 @@
                 break;
             case 'tracks':
                 ui.showScreen('browser');
+                refreshFileList();
                 break;
             case 'player':
                 player.stop();
                 visualizer.stop();
                 ui.showScreen('browser');
+                refreshFileList();
                 break;
             case 'settings':
                 ui.showScreen('browser');
+                refreshFileList();
                 break;
         }
+    }
+
+    /* Reload the catalog so files added on the server show up */
+    function refreshFileList() {
+        if (browser) browser.loadFiles().catch(() => {});
     }
 
     function handlePlayPause() {

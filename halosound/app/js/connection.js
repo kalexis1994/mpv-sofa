@@ -62,6 +62,8 @@ class HaloConnection {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'info' && this.onAudioInfo) {
                     this.onAudioInfo(msg);
+                } else if (msg.type === 'error' && this.onAudioError) {
+                    this.onAudioError(msg.message || 'Audio stream error');
                 }
             } else {
                 // Binary audio data
@@ -81,6 +83,18 @@ class HaloConnection {
     seekAudio(timeSeconds) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ type: 'seek', time: timeSeconds }));
+        }
+    }
+
+    pauseAudio() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'pause' }));
+        }
+    }
+
+    resumeAudio() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'resume' }));
         }
     }
 

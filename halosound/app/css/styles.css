@@ -86,30 +86,67 @@ html, body {
 }
 
 .input-group label {
-    font-size: 28px;
+    font-size: 36px;
     color: var(--text-secondary);
 }
 
-.input-group input[type="text"] {
-    font-size: 32px;
-    padding: 16px 24px;
-    border: 2px solid var(--bg-tertiary);
+.input-group input[type="text"],
+.input-group input[type="url"],
+.input-group input[type="number"] {
+    font-size: 44px;
+    padding: 20px 28px;
+    border: 3px solid var(--bg-tertiary);
     border-radius: 8px;
     background: var(--bg-secondary);
     color: var(--text-primary);
     outline: none;
-    min-width: 360px;
+    min-width: 520px;
     transition: border-color 0.2s;
 }
 
-.input-group input[type="text"]:focus {
+.input-group input[type="text"]:focus,
+.input-group input[type="url"]:focus,
+.input-group input[type="number"]:focus {
     border-color: var(--accent);
     box-shadow: 0 0 16px rgba(233, 69, 96, 0.3);
 }
 
 #server-port {
-    font-size: 28px;
-    color: var(--text-muted);
+    min-width: 220px;
+    max-width: 220px;
+}
+
+/* Player loading spinner */
+.player-loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+    z-index: 20;
+    color: var(--text-primary);
+    font-size: 30px;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.player-loading.hidden {
+    display: none;
+}
+
+.spinner {
+    width: 80px;
+    height: 80px;
+    border: 8px solid rgba(255, 255, 255, 0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 /* Buttons */

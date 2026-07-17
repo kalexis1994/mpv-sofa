@@ -16,6 +16,18 @@ class HaloPlayer {
         this.video.addEventListener('timeupdate', () => this.onTimeUpdate());
         this.video.addEventListener('ended', () => this.onEnded());
 
+        // Video stalled: pause the audio pipeline too, so A/V can't drift
+        // apart while the video buffers.
+        this.video.addEventListener('waiting', () => {
+            if (!this.videoStarted) return;
+            this.showLoading('Buffering...');
+            this.holdAudio(true);
+        });
+        this.video.addEventListener('playing', () => {
+            this.hideLoading();
+            if (this.playing) this.holdAudio(false);
+        });
+
         // Click-to-seek on progress bar
         const progressBar = document.getElementById('progress-bar');
         if (progressBar) {
@@ -33,10 +45,41 @@ class HaloPlayer {
         this.currentFile = file;
         this.audioStartPts = -1;
         this.videoStarted = false;
+        this.videoReady = false;
+        this.audioReady = false;
+        this.audioHold = false;
+
+        this.showLoading('Loading video...');
 
         // Set video source (muted - audio comes from WebSocket/WASM)
         this.video.src = this.connection.getVideoUrl(file.id);
         this.video.muted = true;
+
+        // Start once BOTH the video can play and audio is flowing.
+        this.video.addEventListener('canplay', () => {
+            this.videoReady = true;
+            this.maybeStart();
+        }, { once: true });
+
+        // Fallback: if audio never arrives, start video anyway so the
+        // user sees the problem instead of a frozen screen.
+        clearTimeout(this.startTimeout);
+        this.startTimeout = setTimeout(() => {
+            if (!this.videoStarted && this.videoReady) {
+                this.showLoading('Audio stream failed — starting video only');
+                document.getElementById('hrtf-status').textContent = 'HRTF: No audio!';
+                this.videoStarted = true;
+                this.video.play().catch(() => {});
+                setTimeout(() => this.hideLoading(), 3000);
+            }
+        }, 8000);
+
+        // Surface server-side audio errors on screen
+        this.connection.onAudioError = (msg) => {
+            console.error('Audio error:', msg);
+            document.getElementById('audio-info').textContent = 'Audio error: ' + msg;
+            document.getElementById('hrtf-status').textContent = 'HRTF: Error';
+        };
 
         // Add subtitle track if selected
         this.clearSubtitles();
@@ -56,21 +99,17 @@ class HaloPlayer {
         };
 
         this.connection.onAudioData = (data) => {
-            let pts = 0;
-            if (!this.videoStarted && data.byteLength >= 8) {
-                pts = new DataView(data).getFloat64(0, false);
+            if (!this.audioReady && data.byteLength >= 8) {
+                this.audioStartPts = new DataView(data).getFloat64(0, false);
+                this.audioReady = true;
+                // Video not decodable yet: freeze the audio pipeline so the
+                // audio clock doesn't run ahead while the video warms up.
+                if (!this.videoReady) this.holdAudio(true);
             }
 
             this.audioEngine.feedAudio(data);
 
-            if (!this.videoStarted) {
-                this.audioStartPts = pts;
-                this.videoStarted = true;
-                setTimeout(() => {
-                    this.video.currentTime = this.audioStartPts;
-                    this.video.play().catch(e => console.warn('Video play failed:', e));
-                }, 150);
-            }
+            if (!this.videoStarted) this.maybeStart();
         };
 
         this.connection.connectAudio(file.id, selection.audioTrack);
@@ -84,19 +123,98 @@ class HaloPlayer {
         document.getElementById('hrtf-status').textContent =
             'HRTF: ' + (this.audioEngine.wasmReady ? 'Active' : 'Fallback');
 
-        // Start sync monitoring
-        this.syncInterval = setInterval(() => this.checkSync(), 2000);
+        // Track the audio playback clock reported by the worklet
+        this.lastAudioPts = -1;
+        this.lastStatsAt = 0;
+        this.audioEngine.onStats = (s) => {
+            if (s.pts >= 0) {
+                this.lastAudioPts = s.pts;
+                this.lastStatsAt = performance.now();
+            }
+            if (s.underruns !== this.lastUnderruns || s.dropped !== this.lastDropped) {
+                console.log(`[audio] underruns=${s.underruns} dropped=${s.dropped} queued=${s.queued} busy=${s.busyPct}%`);
+                this.lastUnderruns = s.underruns;
+                this.lastDropped = s.dropped;
+            }
+            // On-screen diagnostics (throttled to 1/s)
+            const now = performance.now();
+            if (!this._statsUiAt || now - this._statsUiAt > 1000) {
+                this._statsUiAt = now;
+                const el = document.getElementById('hrtf-status');
+                if (el && this.audioEngine.wasmReady) {
+                    const bufMs = Math.round(s.queued * 256 / 48);
+                    el.textContent = `HRTF: Active · buf ${bufMs}ms · dsp ${s.busyPct}% · under ${s.underruns} · drop ${s.dropped}`;
+                }
+            }
+        };
+
+        // Start sync monitoring (audio is the master clock)
+        this.syncInterval = setInterval(() => this.checkSync(), 500);
     }
 
+    /* Start playback once video is decodable and audio is flowing */
+    maybeStart() {
+        if (this.videoStarted || !this.videoReady || !this.audioReady) return;
+        this.videoStarted = true;
+        clearTimeout(this.startTimeout);
+
+        if (this.audioStartPts > 0.5) {
+            this.video.currentTime = this.audioStartPts;
+        }
+        this.video.play().catch(e => console.warn('Video play failed:', e));
+        this.holdAudio(false);   // release the audio clock in sync with video
+        this.hideLoading();
+    }
+
+    showLoading(text) {
+        const el = document.getElementById('player-loading');
+        if (el) el.classList.remove('hidden');
+        const txt = document.getElementById('player-loading-text');
+        if (txt) txt.textContent = text || 'Loading...';
+    }
+
+    hideLoading() {
+        const el = document.getElementById('player-loading');
+        if (el) el.classList.add('hidden');
+    }
+
+    /**
+     * A/V drift correction, TV-friendly: hardware video pipelines handle
+     * neither playbackRate tweaks nor frequent seeks well, so we only do
+     * a hard video seek on large drift (>1s), rate-limited to one per 5s.
+     * Small drift is left alone — the audio-hold-on-buffering logic keeps
+     * it bounded.
+     */
     checkSync() {
-        // Placeholder for A/V drift correction
-        // In practice, the server pacing keeps audio roughly in sync
-        // Fine-tuning would compare video.currentTime with audio PTS
+        if (!this.playing || !this.videoStarted || this.audioHold) return;
+        if (this.lastAudioPts < 0 || this.video.paused || this.video.seeking) return;
+
+        // Extrapolate the audio clock since the last stats message
+        const audioPts = this.lastAudioPts + (performance.now() - this.lastStatsAt) / 1000;
+        const target = audioPts - this.audioLatencyOffset;
+        const drift = this.video.currentTime - target;
+        const now = performance.now();
+
+        if (Math.abs(drift) > 1.0 && now - (this.lastHardSync || 0) > 5000) {
+            this.lastHardSync = now;
+            console.log(`[sync] drift ${drift.toFixed(2)}s → seeking video to ${target.toFixed(2)}`);
+            this.video.currentTime = target;
+        }
+    }
+
+    /* Hold/release the whole audio path: worklet output + server pacing */
+    holdAudio(on) {
+        if (this.audioHold === on) return;
+        this.audioHold = on;
+        this.audioEngine.setHold(on);
+        if (on) this.connection.pauseAudio();
+        else this.connection.resumeAudio();
     }
 
     pause() {
         if (this.playing) {
             this.video.pause();
+            this.holdAudio(true);
             this.playing = false;
         }
     }
@@ -104,6 +222,7 @@ class HaloPlayer {
     resume() {
         if (!this.playing && this.currentFile) {
             this.video.play();
+            this.holdAudio(false);
             this.playing = true;
         }
     }
@@ -125,6 +244,9 @@ class HaloPlayer {
     }
 
     stop() {
+        clearTimeout(this.startTimeout);
+        this.hideLoading();
+        this.audioHold = false;
         this.video.pause();
         this.clearSubtitles();
         this.video.removeAttribute('src');

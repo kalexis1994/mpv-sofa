@@ -15,6 +15,25 @@ class UIController {
         // webOS remote key codes
         const key = e.keyCode || e.which;
 
+        // While a text field is being edited, let it handle keys natively:
+        // caret movement (left/right), single-char delete (backspace from the
+        // VKB), character input, and Enter (the field's own listener).
+        // Only webOS Back (461) / Escape leave the field.
+        const t = e.target;
+        const isTextField = t && (
+            t.tagName === 'TEXTAREA' ||
+            t.isContentEditable ||
+            (t.tagName === 'INPUT' &&
+             !/^(checkbox|radio|button|range|submit|reset)$/.test(t.type))
+        );
+        if (isTextField) {
+            if (key === 461 || key === 27) {
+                e.preventDefault();
+                t.blur();
+            }
+            return;
+        }
+
         switch (key) {
             case 38: // Up
                 e.preventDefault();
