@@ -41,8 +41,11 @@ function createHttpServer(files, options = {}) {
         res.redirect('/app/');
     });
 
-    /* List available media files */
+    /* List available media files (rescan so new files appear without restart) */
     app.get('/api/files', (req, res) => {
+        if (options.rescan) {
+            try { options.rescan(); } catch (e) { /* keep serving the old list */ }
+        }
         res.json(files.map(f => ({
             id: f.id,
             name: f.name,

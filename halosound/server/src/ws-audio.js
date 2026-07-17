@@ -145,6 +145,16 @@ function createWsServer(port, files, options = {}) {
                     break;
                 }
 
+                case 'pause': {
+                    if (demuxer) demuxer.pause();
+                    break;
+                }
+
+                case 'resume': {
+                    if (demuxer) demuxer.resume();
+                    break;
+                }
+
                 case 'stop': {
                     if (demuxer) {
                         demuxer.stop();

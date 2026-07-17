@@ -88,8 +88,27 @@ if (files.length === 0) {
     console.warn('');
 }
 
+/*
+ * Rescan the media directory, mutating `files` in place so the ws-audio
+ * server (which shares the array) sees updates too. Existing files keep
+ * their id across rescans; new files get fresh monotonic ids.
+ */
+function rescanFiles() {
+    const fresh = scanDirectory(mediaDir);
+    const byPath = new Map(files.map(f => [f.path, f]));
+    let maxId = files.reduce((m, f) => Math.max(m, f.id), 0);
+    const merged = fresh.map(nf => {
+        const old = byPath.get(nf.path);
+        return old ? Object.assign(old, { size: nf.size }) : Object.assign(nf, { id: ++maxId });
+    });
+    files.length = 0;
+    files.push(...merged);
+    if (verbose) console.log(`[Scan] ${files.length} video file(s)`);
+    return files;
+}
+
 /* Start HTTP server */
-const app = createHttpServer(files, { verbose });
+const app = createHttpServer(files, { verbose, rescan: rescanFiles });
 const httpServer = app.listen(httpPort, '0.0.0.0', () => {
     console.log(`HTTP server listening on port ${httpPort}`);
 });

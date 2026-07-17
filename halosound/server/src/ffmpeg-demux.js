@@ -17,6 +17,8 @@ class AudioDemuxer extends EventEmitter {
         this.filePath = filePath;
         this.sampleRate = options.sampleRate || config.AUDIO_SAMPLE_RATE;
         this.requestedStreamIndex = options.audioStreamIndex || -1; // -1 = auto-select
+        /* Opt-in Atmos object extraction (see start() for why it's off by default) */
+        this.extractObjects = options.extractObjects || process.env.HALO_EXTRACT_OBJECTS === '1';
         this.ffmpeg = null;
         this.channels = 0;
         this.duration = 0;
@@ -43,15 +45,19 @@ class AudioDemuxer extends EventEmitter {
     async probe() {
         return new Promise((resolve, reject) => {
             const args = [
-                '-v', 'quiet',
+                '-v', 'error',
                 '-print_format', 'json',
                 '-show_streams',
                 '-show_format',
                 this.filePath
             ];
 
-            execFile(config.FFPROBE_PATH, args, { maxBuffer: 2 * 1024 * 1024 }, (err, stdout) => {
-                if (err) return reject(err);
+            execFile(config.FFPROBE_PATH, args, { maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+                if (err) {
+                    const detail = (stderr || '').trim().slice(0, 400);
+                    return reject(new Error(
+                        `ffprobe failed (code ${err.code}): ${detail || err.message}`));
+                }
 
                 try {
                     const probe = JSON.parse(stdout);
@@ -134,11 +140,22 @@ class AudioDemuxer extends EventEmitter {
         this.sendQueue = [];
         this.paused = false;
 
-        // TrueHD Atmos: enable extract_objects for 16ch (8 bed + 8 objects)
+        /*
+         * TrueHD Atmos handling. The ffmpeg extract_objects path (16ch: bed
+         * + separated objects) produces audible micro-glitches on the object
+         * channels (~600-1600 impulses/s, "rain"), so it is opt-in until the
+         * clean Rust decoder is integrated. Default: normal 7.1 decode —
+         * lossless and clean; objects are simply not separated (they are
+         * already mixed into the 7.1 presentation by the format).
+         */
         const isTrueHD = this.codec === 'truehd';
-        if (isTrueHD) {
+        const extract = isTrueHD && this.extractObjects;
+        if (extract) {
             this.channels = 16;
             this.layout = '7.1.4+objects';
+        } else if (isTrueHD) {
+            this.channels = 8;
+            this.layout = '7.1';
         }
 
         const blockBytes = config.AUDIO_BLOCK_SIZE * this.channels * 4;
@@ -147,7 +164,7 @@ class AudioDemuxer extends EventEmitter {
         if (seekSeconds > 0) {
             args.push('-ss', String(seekSeconds));
         }
-        if (isTrueHD) {
+        if (extract) {
             args.push('-extract_objects', '1');
         }
         args.push(
@@ -190,8 +207,10 @@ class AudioDemuxer extends EventEmitter {
                 const block = Buffer.from(this.residual.subarray(0, blockBytes));
                 this.residual = this.residual.subarray(blockBytes);
 
-                // Declicker: fix discontinuities in BL/BR from extract_objects
-                if (isTrueHD) {
+                // Declicker: only for the extract_objects path (its AU-boundary
+                // glitches). On clean decodes it would mangle loud transients
+                // (real deltas >0.10 happen constantly in action scenes).
+                if (extract) {
                     this.declickBlock(block, config.AUDIO_BLOCK_SIZE, this.channels);
                 }
 
@@ -234,7 +253,9 @@ class AudioDemuxer extends EventEmitter {
         this.startTime = process.hrtime.bigint();
 
         const chunkDurationMs = (config.AUDIO_BLOCK_SIZE / this.sampleRate) * 1000;
-        const leadChunks = Math.ceil(80 / chunkDurationMs); // 80ms lead buffer
+        const leadChunks = Math.ceil(250 / chunkDurationMs); // 250ms lead buffer
+        this.chunkDurationMs = chunkDurationMs;
+        this.leadChunks = leadChunks;
 
         this.pacingTimer = setInterval(() => {
             if (gen !== this.generation || this.stopped) {
@@ -326,7 +347,25 @@ class AudioDemuxer extends EventEmitter {
         Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength).copy(buf);
     }
 
+    /* Freeze emission while the client's video is buffering or paused */
+    pause() {
+        if (this.stopped || this.holdPaused) return;
+        this.holdPaused = true;
+        this.stopPacing();
+    }
+
+    resume() {
+        if (!this.holdPaused || this.stopped) return;
+        this.holdPaused = false;
+        this.startPacing(this.generation);
+        // Rewind the pacing clock so emission continues exactly where it
+        // stopped (without re-injecting the lead buffer as extra latency).
+        const emittedMs = (this.chunksEmitted - (this.leadChunks || 0)) * (this.chunkDurationMs || 5.33);
+        this.startTime = process.hrtime.bigint() - BigInt(Math.max(0, Math.round(emittedMs * 1e6)));
+    }
+
     async seek(seconds) {
+        this.holdPaused = false;
         this.stop();
         await this.start(seconds);
     }
