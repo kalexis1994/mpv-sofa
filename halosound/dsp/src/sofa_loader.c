@@ -37,23 +37,13 @@ SofaData* sofa_load_buffer(const uint8_t *data, int size, int target_sample_rate
      * otherwise use the buffer API if available. */
     struct MYSOFA_EASY *easy = NULL;
 
-    /* Try buffer-based loading (mysofa >= 1.0) */
-    #if defined(MYSOFA_VERSION_MAJOR) && MYSOFA_VERSION_MAJOR >= 1
-    easy = mysofa_open_data((const char *)data, size,
+    /* Buffer-based loading. libmysofa 1.x always provides mysofa_open_data
+     * (memory buffer → EASY handle with resampling + normalization), which
+     * is essential here: the WASM build has no filesystem, so the old
+     * temp-file fallback could never run. mysofa handles resampling to the
+     * target rate and nearest-neighbour lookup internally. */
+    easy = mysofa_open_data((const char *)data, (long)size,
                             (float)target_sample_rate, &filter_length, &err);
-    #else
-    /* Fallback: write buffer to temp file */
-    {
-        const char *tmppath = "/tmp/halosound_temp.sofa";
-        FILE *f = fopen(tmppath, "wb");
-        if (f) {
-            fwrite(data, 1, size, f);
-            fclose(f);
-            easy = mysofa_open(tmppath, (float)target_sample_rate,
-                              &filter_length, &err);
-        }
-    }
-    #endif
 
     if (!easy || err != MYSOFA_OK) {
         sofa->loaded = 0;

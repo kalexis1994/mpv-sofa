@@ -13,8 +13,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 build_wasm() {
-    echo "=== Building WASM DSP Module ==="
-    cd "$SCRIPT_DIR/dsp"
+    echo "=== Building WASM DSP Module (with libmysofa) ==="
 
     if ! command -v emcc &> /dev/null; then
         echo "Error: Emscripten (emcc) not found."
@@ -23,15 +22,17 @@ build_wasm() {
         exit 1
     fi
 
-    mkdir -p build
-    emcmake cmake -B build -DCMAKE_BUILD_TYPE=Release
-    emmake cmake --build build --config Release
+    # libmysofa must be statically linked so real SOFA HRTF filtering happens
+    # on the client (otherwise sofa_loader falls back to a dirac-ITD stub that
+    # ignores the profile entirely).  build-wasm.sh compiles it from source.
+    MYSOFA_ROOT="${MYSOFA_ROOT:-$HOME/libmysofa}"
+    if [ ! -d "$MYSOFA_ROOT/src/hrtf" ]; then
+        echo "Cloning libmysofa into $MYSOFA_ROOT ..."
+        git clone --depth 1 https://github.com/hoene/libmysofa.git "$MYSOFA_ROOT"
+    fi
 
-    # Copy WASM artifacts to app
-    cp build/halosound_dsp.wasm "$SCRIPT_DIR/app/wasm/"
-    cp build/halosound_dsp.js "$SCRIPT_DIR/app/wasm/"
-
-    echo "WASM build complete. Artifacts in dsp/build/ and app/wasm/"
+    bash "$SCRIPT_DIR/build-wasm.sh" "$MYSOFA_ROOT"
+    echo "WASM build complete (SIMD + scalar) in app/wasm/"
 }
 
 build_server() {
