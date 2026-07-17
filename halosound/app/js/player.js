@@ -20,6 +20,7 @@ class HaloPlayer {
         // apart while the video buffers.
         this.video.addEventListener('waiting', () => {
             if (!this.videoStarted) return;
+            this.videoStalls = (this.videoStalls || 0) + 1;
             this.showLoading('Buffering...');
             this.holdAudio(true);
         });
@@ -149,6 +150,7 @@ class HaloPlayer {
                     this.starvedStats = (this.starvedStats || 0) + 1;
                     if (this.starvedStats >= 3 && !this.audioStarved) {
                         this.audioStarved = true;
+                        this.audioStalls = (this.audioStalls || 0) + 1;
                         this.showLoading('Buffering audio...');
                         this.video.pause();
                         // Freeze the worklet too (but NOT the server — it
@@ -158,7 +160,9 @@ class HaloPlayer {
                     }
                 } else {
                     this.starvedStats = 0;
-                    if (this.audioStarved && s.queued >= 24) {   // ~130ms refilled
+                    // Resume only once a solid cushion is back (~2s), so a
+                    // trickling refill can't cause starve/resume ping-pong.
+                    if (this.audioStarved && s.queued >= 375) {
                         this.audioStarved = false;
                         this.hideLoading();
                         // Realign while still paused using the calibrated
@@ -188,7 +192,9 @@ class HaloPlayer {
                 const el = document.getElementById('hrtf-status');
                 if (el && this.audioEngine.wasmReady) {
                     const bufMs = Math.round(s.queued * 256 / 48);
-                    el.textContent = `HRTF: Active · buf ${bufMs}ms · dsp ${s.busyPct}% · under ${s.underruns} · drop ${s.dropped}`;
+                    el.textContent = `HRTF: Active · buf ${(bufMs / 1000).toFixed(1)}s · dsp ${s.busyPct}%` +
+                        ` · vstall ${this.videoStalls || 0} · astall ${this.audioStalls || 0}` +
+                        ` · under ${s.underruns} · drop ${s.dropped}`;
                 }
             }
         };

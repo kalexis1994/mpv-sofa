@@ -220,7 +220,7 @@ class AudioDemuxer extends EventEmitter {
                 this.sendQueue.push({ pts, buffer: block });
             }
 
-            if (this.sendQueue.length > 200 && !this.paused && this.ffmpeg) {
+            if (this.sendQueue.length > 800 && !this.paused && this.ffmpeg) {
                 this.ffmpeg.stdout.pause();
                 this.paused = true;
             }
@@ -253,7 +253,10 @@ class AudioDemuxer extends EventEmitter {
         this.startTime = process.hrtime.bigint();
 
         const chunkDurationMs = (config.AUDIO_BLOCK_SIZE / this.sampleRate) * 1000;
-        const leadChunks = Math.ceil(250 / chunkDurationMs); // 250ms lead buffer
+        // 2s lead: the client keeps a deep (~5s) jitter queue and its video
+        // is slaved to the audio clock, so extra lead costs nothing in
+        // perceived latency and rides through network/event-loop hiccups.
+        const leadChunks = Math.ceil(2000 / chunkDurationMs);
         this.chunkDurationMs = chunkDurationMs;
         this.leadChunks = leadChunks;
 
@@ -287,7 +290,7 @@ class AudioDemuxer extends EventEmitter {
                 this.chunksEmitted++;
             }
 
-            if (this.paused && this.sendQueue.length < 100 && this.ffmpeg) {
+            if (this.paused && this.sendQueue.length < 400 && this.ffmpeg) {
                 this.ffmpeg.stdout.resume();
                 this.paused = false;
             }

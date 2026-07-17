@@ -229,9 +229,12 @@ class HrtfProcessor extends AudioWorkletProcessor {
 
         this.audioQueue.push({ data: pcmData, readPos: 0, pts });
 
-        // Cap queue (~550ms at 48kHz). Overflow = server/DAC clock drift;
-        // drop oldest and fade back in so the discontinuity doesn't click.
-        while (this.audioQueue.length > 104) {
+        // Cap queue (~5s at 48kHz). Latency is irrelevant here — the video
+        // is slaved to the audio clock — so a deep buffer is pure underrun
+        // protection (16ch × 5s ≈ 15 MB, trivial). Overflow only happens on
+        // real server/DAC clock drift; drop oldest and fade back in so the
+        // discontinuity doesn't click.
+        while (this.audioQueue.length > 940) {
             this.audioQueue.shift();
             this.dropped++;
             this.gainRamp = 0;
