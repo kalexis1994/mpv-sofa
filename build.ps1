@@ -104,21 +104,41 @@ CopyIfNewer "$hrtfRoot\rust_hrtf\target\release\losslesshd_ffi.dll" "$distDir\lo
 Get-ChildItem -Path "$hrtfRoot\ffmpeg-build\bin" -Filter "*.dll" -ErrorAction SilentlyContinue |
     ForEach-Object { CopyIfNewer $_.FullName "$distDir\$($_.Name)" }
 
-# MSYS2 UCRT64 transitive deps
-$msys2Dlls = @(
-    "libarchive-13.dll","libass-9.dll","libb2-1.dll","libbluray-3.dll",
-    "libbrotlicommon.dll","libbrotlidec.dll","libbz2-1.dll","libcaca-0.dll",
-    "libcrypto-3-x64.dll","libdovi.dll","libexpat-1.dll","libfontconfig-1.dll",
-    "libfreetype-6.dll","libfribidi-0.dll","libgcc_s_seh-1.dll",
-    "libglib-2.0-0.dll","libgraphite2.dll","libharfbuzz-0.dll","libiconv-2.dll",
-    "libintl-8.dll","libjpeg-8.dll","liblcms2-2.dll","liblz4.dll","liblzma-5.dll",
-    "libmysofa.dll","libpcre2-8-0.dll","libplacebo-351.dll","libpng16-16.dll",
-    "libshaderc_shared.dll","libspirv-cross-c-shared.dll","libstdc++-6.dll",
-    "libunibreak-6.dll","libva.dll","libva_win32.dll","libwinpthread-1.dll",
-    "libxml2-16.dll","libzimg-2.dll","libzstd.dll","zlib1.dll"
-)
-foreach ($dll in $msys2Dlls) {
-    CopyIfNewer "C:\msys64\ucrt64\bin\$dll" "$distDir\$dll"
+# MSYS2 UCRT64 transitive deps — resolved RECURSIVELY from the actual
+# binaries with objdump, not a hardcoded list.  A hardcoded list rots the
+# moment an MSYS2 package bumps its soname (e.g. libplacebo-351 -> -360,
+# libunibreak-6 -> -7), silently shipping a broken dist that only fails
+# when launched outside an MSYS2 PATH.  Walking the import tables can't
+# drift.  Any import not found under ucrt64/bin is a Windows system DLL
+# and is skipped.
+$ucrtBin = "C:\msys64\ucrt64\bin"
+$objdump = "$ucrtBin\objdump.exe"
+if (Test-Path $objdump) {
+    $resolved = @{}
+    $queue = [System.Collections.Queue]::new()
+    # Seed with everything already staged in dist (exe + our DLLs).
+    # NOTE: -Include needs a wildcard in -Path (or -Recurse) to match.
+    Get-ChildItem -Path "$distDir\*" -Include "*.exe","*.dll" -File |
+        ForEach-Object { $queue.Enqueue($_.FullName) }
+
+    while ($queue.Count -gt 0) {
+        $bin = $queue.Dequeue()
+        $imports = & $objdump -p $bin 2>$null |
+            Select-String -Pattern '^\s*DLL Name:\s*(.+)$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+        foreach ($dll in $imports) {
+            if ($resolved.ContainsKey($dll)) { continue }
+            $src = Join-Path $ucrtBin $dll
+            if (Test-Path $src) {
+                $resolved[$dll] = $true
+                CopyIfNewer $src "$distDir\$dll"
+                $queue.Enqueue($src)   # walk its deps too
+            }
+        }
+    }
+    Write-Host "  bundled $($resolved.Count) UCRT64 dependency DLLs"
+} else {
+    Write-Warning "objdump not found at $objdump - cannot resolve runtime DLLs"
 }
 
 # (Assets are copied by the POST_BUILD step in CMakeLists.txt.)
