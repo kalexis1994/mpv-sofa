@@ -1,9 +1,9 @@
-// HaloSound File Browser
+// File browser — renders the media list. D-pad navigation and OK activation
+// are handled generically by the FocusEngine (items are `.focusable`).
 class FileBrowser {
     constructor(connection) {
         this.connection = connection;
         this.files = [];
-        this.selectedIndex = 0;
         this.listElement = document.getElementById('file-list');
         this.onFileSelected = null;
     }
@@ -15,9 +15,16 @@ class FileBrowser {
 
     render() {
         this.listElement.innerHTML = '';
+        if (!this.files.length) {
+            const empty = document.createElement('div');
+            empty.className = 'file-empty';
+            empty.textContent = 'No media found in the server folder.';
+            this.listElement.appendChild(empty);
+            return;
+        }
         this.files.forEach((file, i) => {
             const item = document.createElement('div');
-            item.className = 'file-item' + (i === this.selectedIndex ? ' focused' : '');
+            item.className = 'file-item focusable';
             item.dataset.index = i;
 
             const name = document.createElement('span');
@@ -35,27 +42,9 @@ class FileBrowser {
         });
     }
 
-    navigate(direction) {
-        const newIndex = this.selectedIndex + direction;
-        if (newIndex >= 0 && newIndex < this.files.length) {
-            this.selectedIndex = newIndex;
-            this.render();
-            // Scroll into view
-            const items = this.listElement.querySelectorAll('.file-item');
-            if (items[newIndex]) items[newIndex].scrollIntoView({ block: 'nearest' });
-        }
-    }
-
-    selectCurrent() {
-        if (this.files.length > 0) {
-            this.selectAndPlay(this.selectedIndex);
-        }
-    }
-
     selectAndPlay(index) {
-        this.selectedIndex = index;
         const file = this.files[index];
-        if (this.onFileSelected) this.onFileSelected(file);
+        if (file && this.onFileSelected) this.onFileSelected(file);
     }
 
     formatSize(bytes) {

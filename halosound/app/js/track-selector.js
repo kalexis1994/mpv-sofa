@@ -54,7 +54,7 @@ class TrackSelector {
 
         for (const t of this.audioTracks) {
             const el = document.createElement('div');
-            el.className = 'track-item';
+            el.className = 'track-item focusable';
             el.dataset.index = t.index;
 
             // Badge class
@@ -83,14 +83,14 @@ class TrackSelector {
 
         // "None" option
         const noneEl = document.createElement('div');
-        noneEl.className = 'track-item-none selected';
+        noneEl.className = 'track-item-none focusable selected';
         noneEl.textContent = 'None';
         noneEl.addEventListener('click', () => this.selectSubtitle(-1));
         this.subsListEl.appendChild(noneEl);
 
         for (const t of this.subtitleTracks) {
             const el = document.createElement('div');
-            el.className = 'track-item';
+            el.className = 'track-item focusable';
             el.dataset.index = t.index;
 
             let badges = `<span class="track-badge">${t.codecLabel}</span>`;
@@ -115,6 +115,7 @@ class TrackSelector {
             });
 
             if (!t.isTextBased) {
+                el.classList.add('disabled');  // FocusEngine skips these
                 el.style.opacity = '0.4';
                 el.style.cursor = 'not-allowed';
             }

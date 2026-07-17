@@ -14,11 +14,11 @@
         <div id="connection-status">Enter server IP address</div>
         <div class="input-group">
             <label>Server IP:</label>
-            <input type="url" id="server-ip" value="192.168.1.100" />
+            <input type="url" id="server-ip" class="focusable" value="192.168.1.100" />
             <label for="server-port">Port:</label>
-            <input type="number" id="server-port" value="8080" min="1" max="65535" />
+            <input type="number" id="server-port" class="focusable" value="8080" min="1" max="65535" />
         </div>
-        <button id="btn-connect" class="btn focused">Connect</button>
+        <button id="btn-connect" class="btn focusable">Connect</button>
     </div>
 
     <!-- File browser screen -->
@@ -26,7 +26,7 @@
         <div class="header">
             <span class="title">mpv-sofa client</span>
             <span id="server-info"></span>
-            <button id="btn-settings" class="btn-icon">Settings</button>
+            <button id="btn-settings" class="btn-icon focusable">Settings</button>
         </div>
         <div id="file-list" class="file-list"></div>
     </div>
@@ -35,7 +35,7 @@
     <div id="screen-tracks" class="screen">
         <div class="header">
             <span class="title">Select Tracks</span>
-            <button id="btn-back-tracks" class="btn-icon">Back</button>
+            <button id="btn-back-tracks" class="btn-icon focusable">Back</button>
         </div>
         <div class="tracks-container">
             <div class="tracks-column">
@@ -48,7 +48,7 @@
             </div>
         </div>
         <div class="tracks-footer">
-            <button id="btn-play-tracks" class="btn">Play</button>
+            <button id="btn-play-tracks" class="btn focusable">Play</button>
         </div>
     </div>
 
@@ -72,10 +72,7 @@
                 <span id="audio-info"></span>
                 <span id="hrtf-status">HRTF: Loading...</span>
             </div>
-        </div>
-        <div id="debug-mutes" class="debug-mutes">
-            <label><input type="checkbox" id="mute-bed"> Mute Bed (ch 0-7: FL FR FC LFE BL BR SL SR)</label>
-            <label><input type="checkbox" id="mute-height"> Mute Objects (ch 8-15: Atmos spatial objects)</label>
+            <div class="player-hint">◀ ▶ seek · OK play/pause · Back menu</div>
         </div>
         <canvas id="visualizer" width="300" height="150"></canvas>
     </div>
@@ -83,15 +80,15 @@
     <!-- Settings screen -->
     <div id="screen-settings" class="screen">
         <div class="header">
-            <span class="title">Settings</span>
-            <button id="btn-back-settings" class="btn-icon">Back</button>
+            <span class="title">Audio &amp; HRTF</span>
+            <button id="btn-back-settings" class="btn-icon focusable">Back</button>
         </div>
         <div class="settings-panel">
             <div class="setting-group">
                 <h3>Output Mode</h3>
                 <div class="toggle-group" id="setting-output-mode">
-                    <button class="toggle-btn active" data-value="headphones">Headphones</button>
-                    <button class="toggle-btn" data-value="speakers">Speakers</button>
+                    <button class="toggle-btn active focusable" data-value="headphones">Headphones</button>
+                    <button class="toggle-btn focusable" data-value="speakers">Speakers</button>
                 </div>
                 <div class="setting-hint" id="hint-output-mode">HRTF binaural virtualization active</div>
             </div>
@@ -102,7 +99,7 @@
             </div>
             <div class="setting-group" id="group-room">
                 <h3>Room Simulation</h3>
-                <select id="setting-room">
+                <select id="setting-room" class="focusable">
                     <option value="0">Studio</option>
                     <option value="1" selected>Home Theater</option>
                     <option value="2">Cinema</option>
@@ -116,23 +113,39 @@
             </div>
             <div class="setting-group" id="group-reverb">
                 <h3>Reverb</h3>
-                <label>Wet Mix: <input type="range" id="setting-reverb-wet" min="0" max="100" value="7"></label>
-                <label>Decay: <input type="range" id="setting-reverb-decay" min="0" max="100" value="45"></label>
+                <label>Wet Mix: <input type="range" id="setting-reverb-wet" class="focusable" min="0" max="100" value="7"></label>
+                <label>Decay: <input type="range" id="setting-reverb-decay" class="focusable" min="0" max="100" value="45"></label>
             </div>
             <div class="setting-group">
                 <h3>Master Volume</h3>
-                <input type="range" id="setting-volume" min="0" max="100" value="80">
+                <input type="range" id="setting-volume" class="focusable" min="0" max="100" value="80">
+            </div>
+            <div class="setting-group">
+                <h3>Debug</h3>
+                <label class="check-row"><input type="checkbox" id="mute-bed" class="focusable"> Mute Bed (ch 0-7)</label>
+                <label class="check-row"><input type="checkbox" id="mute-height" class="focusable"> Mute Objects (ch 8-15)</label>
             </div>
         </div>
     </div>
 
+    <!-- Main menu overlay (opened with Back) -->
+    <div id="main-menu" class="main-menu">
+        <div class="main-menu-panel">
+            <div class="main-menu-title">Menu</div>
+            <div id="main-menu-list" class="main-menu-list"></div>
+            <div id="main-menu-footer" class="main-menu-footer"></div>
+        </div>
+    </div>
+
     <!-- Scripts -->
+    <script src="js/focus.js"></script>
     <script src="js/connection.js"></script>
     <script src="js/audio-engine.js"></script>
     <!-- hrtf-worklet.js is loaded as AudioWorklet module, not a main-thread script -->
     <script src="js/player.js"></script>
     <script src="js/file-browser.js"></script>
     <script src="js/ui-controller.js"></script>
+    <script src="js/main-menu.js"></script>
     <script src="js/track-selector.js"></script>
     <script src="js/settings.js"></script>
     <script src="js/visualizer.js"></script>

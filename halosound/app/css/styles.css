@@ -723,3 +723,138 @@ input[type="range"]::-moz-range-thumb {
     outline: 3px solid var(--focus-outline);
     outline-offset: 4px;
 }
+
+/* ===================================================================== */
+/* Robust TV navigation — spatial focus ring, edit mode, main menu       */
+/* ===================================================================== */
+
+/* Universal focus ring driven by the FocusEngine (.nav-focused). Applies
+   to any focusable: buttons, list rows, inputs, menu items. Bright, high
+   contrast, and animated so it reads clearly across a room. */
+.nav-focused {
+    outline: none !important;
+    box-shadow: 0 0 0 4px var(--accent), 0 0 24px 4px rgba(233, 69, 96, 0.55) !important;
+    border-color: var(--accent) !important;
+    z-index: 5;
+    position: relative;
+}
+
+/* List rows and cards lift slightly when focused. */
+.file-item.nav-focused,
+.track-item.nav-focused,
+.track-item-none.nav-focused,
+.menu-item.nav-focused {
+    background: var(--bg-tertiary) !important;
+    transform: scale(1.02);
+    transition: transform 0.08s ease-out;
+}
+
+/* A control being edited (slider/select/text) pulses to show it's live. */
+.editing {
+    box-shadow: 0 0 0 4px var(--success), 0 0 24px 4px rgba(0, 255, 136, 0.5) !important;
+    border-color: var(--success) !important;
+}
+
+/* Empty-library placeholder. */
+.file-empty {
+    padding: 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 32px;
+}
+
+/* Settings debug checkbox rows. */
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 26px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    color: var(--text-secondary);
+}
+.check-row input[type="checkbox"] {
+    width: 28px;
+    height: 28px;
+    accent-color: var(--accent);
+}
+
+/* Player hint line inside the overlay. */
+.player-hint {
+    margin-top: 18px;
+    font-size: 22px;
+    color: var(--text-muted);
+    letter-spacing: 1px;
+}
+
+/* --- Main menu overlay ------------------------------------------------- */
+.main-menu {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: none;
+    background: rgba(6, 8, 20, 0.72);
+    backdrop-filter: blur(6px);
+}
+.main-menu.visible {
+    display: block;
+    animation: menuFade 0.16s ease-out;
+}
+@keyframes menuFade { from { opacity: 0; } to { opacity: 1; } }
+
+.main-menu-panel {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 620px;
+    height: 100%;
+    background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    border-right: 3px solid var(--bg-tertiary);
+    padding: 72px 56px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 8px 0 40px rgba(0, 0, 0, 0.5);
+    animation: menuSlide 0.18s ease-out;
+}
+@keyframes menuSlide { from { transform: translateX(-40px); } to { transform: translateX(0); } }
+
+.main-menu-title {
+    font-size: 40px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-bottom: 40px;
+}
+.main-menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+}
+.menu-item {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 22px 28px;
+    font-size: 34px;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 2px solid transparent;
+    border-radius: 12px;
+    cursor: pointer;
+}
+.menu-icon {
+    width: 44px;
+    text-align: center;
+    color: var(--accent);
+    font-size: 32px;
+}
+.main-menu-footer {
+    margin-top: 32px;
+    font-size: 22px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--bg-tertiary);
+    padding-top: 24px;
+}

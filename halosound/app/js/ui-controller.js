@@ -1,106 +1,91 @@
-// HaloSound UI Controller - D-pad and Remote Control Handler
+// ui-controller.js — webOS remote key router.
+//
+// Maps remote/D-pad key codes onto the focus engine and a few app-level
+// hooks.  Navigation and OK default to the FocusEngine; screens that need
+// custom behaviour (the player: arrows seek, OK toggles play/pause) install
+// onNav / onOk overrides.  Back always routes to onBack (the app decides:
+// exit edit, close menu, cancel a sub-screen, or open the main menu).
+const KEYS = {
+    UP: 38, DOWN: 40, LEFT: 37, RIGHT: 39,
+    OK: 13, ENTER2: 29443,          // 29443 = some webOS OK variants
+    BACK: 461, ESC: 27, BKSP: 8,
+    PLAY: 415, PAUSE: 19, PLAYPAUSE: 402, STOP: 413,
+    FF: 417, RW: 412, SPACE: 32,
+};
+
 class UIController {
-    constructor() {
+    constructor(focus) {
+        this.focus = focus;
         this.currentScreen = 'connect';
+
+        // App-level hooks (set by app.js).
+        this.onBack = null;         // () => void
+        this.onPlayPause = null;    // () => void
+        this.onNav = null;          // (dir) => bool  (return true if handled)
+        this.onOk = null;           // () => bool     (return true if handled)
+        this.onAnyKey = null;       // () => void     (e.g. wake the overlay)
+
         this.overlayTimeout = null;
-        this.onNavigate = null;
-        this.onSelect = null;
-        this.onBack = null;
-        this.onPlayPause = null;
 
         document.addEventListener('keydown', (e) => this.handleKey(e));
     }
 
     handleKey(e) {
-        // webOS remote key codes
-        const key = e.keyCode || e.which;
+        const k = e.keyCode || e.which;
 
-        // While a text field is being edited, let it handle keys natively:
-        // caret movement (left/right), single-char delete (backspace from the
-        // VKB), character input, and Enter (the field's own listener).
-        // Only webOS Back (461) / Escape leave the field.
-        const t = e.target;
-        const isTextField = t && (
-            t.tagName === 'TEXTAREA' ||
-            t.isContentEditable ||
-            (t.tagName === 'INPUT' &&
-             !/^(checkbox|radio|button|range|submit|reset)$/.test(t.type))
-        );
-        if (isTextField) {
-            if (key === 461 || key === 27) {
+        // --- Edit mode: native control owns the keys; only Back/OK exit. ---
+        if (this.focus.editing) {
+            if (k === KEYS.BACK || k === KEYS.ESC || k === KEYS.OK || k === KEYS.ENTER2) {
                 e.preventDefault();
-                t.blur();
+                this.focus.exitEdit();
             }
+            // Everything else (arrows for sliders/selects, typing) falls
+            // through to the focused native element.
             return;
         }
 
-        switch (key) {
-            case 38: // Up
-                e.preventDefault();
-                if (this.onNavigate) this.onNavigate('up');
-                break;
-            case 40: // Down
-                e.preventDefault();
-                if (this.onNavigate) this.onNavigate('down');
-                break;
-            case 37: // Left
-                e.preventDefault();
-                if (this.onNavigate) this.onNavigate('left');
-                break;
-            case 39: // Right
-                e.preventDefault();
-                if (this.onNavigate) this.onNavigate('right');
-                break;
-            case 13: // Enter/OK
-                e.preventDefault();
-                if (this.onSelect) this.onSelect();
-                break;
-            case 461: // webOS Back button
-            case 8:   // Backspace (for testing)
-            case 27:  // Escape
+        switch (k) {
+            case KEYS.UP:    e.preventDefault(); this._nav('up');    break;
+            case KEYS.DOWN:  e.preventDefault(); this._nav('down');  break;
+            case KEYS.LEFT:  e.preventDefault(); this._nav('left');  break;
+            case KEYS.RIGHT: e.preventDefault(); this._nav('right'); break;
+
+            case KEYS.OK:
+            case KEYS.ENTER2:
+                e.preventDefault(); this._ok(); break;
+
+            case KEYS.BACK:
+            case KEYS.ESC:
+            case KEYS.BKSP:
                 e.preventDefault();
                 if (this.onBack) this.onBack();
                 break;
-            case 415: // Play
-            case 19:  // Pause
-            case 32:  // Space (for testing)
+
+            case KEYS.PLAY:
+            case KEYS.PAUSE:
+            case KEYS.PLAYPAUSE:
+            case KEYS.SPACE:
                 e.preventDefault();
                 if (this.onPlayPause) this.onPlayPause();
                 break;
-            case 412: // Rewind
-                if (this.onNavigate) this.onNavigate('rewind');
-                break;
-            case 417: // Fast Forward
-                if (this.onNavigate) this.onNavigate('fastforward');
-                break;
+
+            case KEYS.FF:    e.preventDefault(); this._nav('right'); break;
+            case KEYS.RW:    e.preventDefault(); this._nav('left');  break;
+
+            default:
+                return; // don't wake overlay on unknown keys
         }
 
-        // Show overlay on any key press during playback
-        if (this.currentScreen === 'player') {
-            this.showOverlay();
-        }
+        if (this.onAnyKey) this.onAnyKey();
     }
 
-    showScreen(name) {
-        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-        const screen = document.getElementById('screen-' + name);
-        if (screen) screen.classList.add('active');
-        this.currentScreen = name;
+    _nav(dir) {
+        if (this.onNav && this.onNav(dir)) return;
+        this.focus.move(dir);
     }
 
-    showOverlay() {
-        const overlay = document.getElementById('player-overlay');
-        if (overlay) {
-            overlay.classList.add('visible');
-            clearTimeout(this.overlayTimeout);
-            this.overlayTimeout = setTimeout(() => {
-                overlay.classList.remove('visible');
-            }, 5000);
-        }
-    }
-
-    hideOverlay() {
-        const overlay = document.getElementById('player-overlay');
-        if (overlay) overlay.classList.remove('visible');
+    _ok() {
+        if (this.onOk && this.onOk()) return;
+        this.focus.activate();
     }
 }
