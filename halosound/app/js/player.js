@@ -370,6 +370,23 @@ class HaloPlayer {
             // NEVER seek the video to correct drift — webOS snaps it to the
             // previous keyframe (up to ~10s back).  Re-seek the audio.
             this.alignAudioToVideo();
+            return;
+        }
+
+        // Fine trim: small persistent offsets (e.g. the video's play-ramp
+        // after a release leaves a constant ~0.25s bias that sits below the
+        // hard threshold forever).  Nudge the AUDIO queue — drop or pad a
+        // few hundred ms, faded, no seeks, no rebuffering.
+        if (Math.abs(residual) > 0.12) {
+            this.trimStrikes = (this.trimStrikes || 0) + 1;
+        } else {
+            this.trimStrikes = 0;
+        }
+        if (this.trimStrikes >= 3 && now - (this.lastTrim || 0) > 4000) {
+            this.lastTrim = now;
+            this.trimStrikes = 0;
+            console.log(`[sync] trim ${residual.toFixed(2)}s (audio nudge)`);
+            this.audioEngine.nudge(residual);
         }
     }
 

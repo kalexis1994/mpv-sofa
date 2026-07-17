@@ -121,6 +121,11 @@ class HaloAudioEngine {
         this.workletNode.port.postMessage({ type: 'set-hold', hold: !!on });
     }
 
+    /* Micro-trim the audio clock: +sec drops queued audio, -sec pads silence */
+    nudge(seconds) {
+        this.workletNode.port.postMessage({ type: 'nudge', seconds });
+    }
+
     setLayout(layoutId) {
         this.workletNode.port.postMessage({ type: 'set-layout', layout: layoutId });
     }

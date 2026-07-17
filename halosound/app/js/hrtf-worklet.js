@@ -73,6 +73,9 @@ class HrtfProcessor extends AudioWorkletProcessor {
                 this.hold = !!msg.hold;
                 if (!this.hold) this.gainRamp = 0;  // fade back in on resume
                 break;
+            case 'nudge':
+                this.nudgeQueue(msg.seconds || 0);
+                break;
             case 'flush':
                 this.audioQueue = [];
                 this.accumPos = 0;
@@ -432,6 +435,38 @@ class HrtfProcessor extends AudioWorkletProcessor {
         this.maybePostStats();
 
         return true;
+    }
+
+    /*
+     * Micro-trim the audio clock without a server round-trip: positive
+     * seconds DROP queued samples (audio advances), negative PAD silence at
+     * the head (audio waits).  Used for small persistent A/V offsets — a
+     * short fade masks the splice.
+     */
+    nudgeQueue(sec) {
+        const nch = this.numChannels;
+        let n = Math.round(sec * sampleRate);
+        if (n > 0) {
+            while (n > 0 && this.audioQueue.length) {
+                const c = this.audioQueue[0];
+                const total = Math.floor(c.data.length / nch);
+                const avail = total - c.readPos;
+                const take = Math.min(avail, n);
+                c.readPos += take;
+                n -= take;
+                if (c.readPos >= total) this.audioQueue.shift();
+            }
+            this.gainRamp = 0;
+        } else if (n < 0) {
+            const pad = -n;
+            const headPts = this.audioQueue[0] ? this.audioQueue[0].pts : this.playbackPts;
+            this.audioQueue.unshift({
+                data: new Float32Array(pad * nch),
+                readPos: 0,
+                pts: headPts - pad / sampleRate,
+            });
+            this.gainRamp = 0;
+        }
     }
 
     /* Report sync/diagnostic stats every ~32 quanta (~85ms @48k) */
