@@ -48,6 +48,10 @@ class HaloPlayer {
         this.videoReady = false;
         this.audioReady = false;
         this.audioHold = false;
+        this.audioStarved = false;
+        this.starvedStats = 0;
+        this.syncBaseline = null;    // recalibrated per playback session
+        this.driftSamples = [];
 
         this.showLoading('Loading video...');
 
@@ -131,6 +135,47 @@ class HaloPlayer {
                 this.lastAudioPts = s.pts;
                 this.lastStatsAt = performance.now();
             }
+
+            // Audio starvation: the worklet queue ran dry while playing.
+            // If we let the video keep going, its clock runs ahead of the
+            // frozen audio clock and checkSync() ends up yanking it
+            // backward, then forward again when data returns in a burst.
+            // Audio is the master clock — so make the VIDEO wait instead:
+            // pause it, and once the queue has refilled realign it to the
+            // audio position and resume.  ~3 stats messages ≈ 250ms dry
+            // before we react, so seek flushes don't false-trigger.
+            if (this.videoStarted && this.playing && !this.audioHold) {
+                if (s.queued === 0) {
+                    this.starvedStats = (this.starvedStats || 0) + 1;
+                    if (this.starvedStats >= 3 && !this.audioStarved) {
+                        this.audioStarved = true;
+                        this.showLoading('Buffering audio...');
+                        this.video.pause();
+                        // Freeze the worklet too (but NOT the server — it
+                        // must keep sending to refill) so trickling data
+                        // accumulates silently instead of stuttering out.
+                        this.audioEngine.setHold(true);
+                    }
+                } else {
+                    this.starvedStats = 0;
+                    if (this.audioStarved && s.queued >= 24) {   // ~130ms refilled
+                        this.audioStarved = false;
+                        this.hideLoading();
+                        // Realign while still paused using the calibrated
+                        // pipeline offset — this lands exactly where the
+                        // video stopped, so resume is seamless.
+                        if (s.pts >= 0 && this.syncBaseline !== null) {
+                            const target = s.pts + this.syncBaseline;
+                            if (Math.abs(this.video.currentTime - target) > 0.15) {
+                                this.video.currentTime = target;
+                            }
+                        }
+                        this.audioEngine.setHold(false);
+                        this.suppressSync();
+                        this.video.play().catch(() => {});
+                    }
+                }
+            }
             if (s.underruns !== this.lastUnderruns || s.dropped !== this.lastDropped) {
                 console.log(`[audio] underruns=${s.underruns} dropped=${s.dropped} queued=${s.queued} busy=${s.busyPct}%`);
                 this.lastUnderruns = s.underruns;
@@ -179,26 +224,49 @@ class HaloPlayer {
     }
 
     /**
-     * A/V drift correction, TV-friendly: hardware video pipelines handle
-     * neither playbackRate tweaks nor frequent seeks well, so we only do
-     * a hard video seek on large drift (>1s), rate-limited to one per 5s.
-     * Small drift is left alone — the audio-hold-on-buffering logic keeps
-     * it bounded.
+     * A/V drift correction, TV-friendly.
+     *
+     * The audio clock (worklet PTS) runs a CONSTANT distance ahead of the
+     * video clock: the TV's internal audio pipeline adds latency the Web
+     * Audio API can't see (~0.4s on an LG B5 beyond the reported
+     * baseLatency+outputLatency).  So instead of assuming offset 0, we
+     * CALIBRATE it: median drift over the first ~6s of playback becomes
+     * the baseline, and only deviations from that baseline are real
+     * desync.  Corrections are hard seeks (no playbackRate — hardware
+     * pipelines stutter on it), rate-limited to one per 5s.
      */
     checkSync() {
-        if (!this.playing || !this.videoStarted || this.audioHold) return;
+        if (!this.playing || !this.videoStarted || this.audioHold || this.audioStarved) return;
         if (this.lastAudioPts < 0 || this.video.paused || this.video.seeking) return;
+        // Stale stats (e.g. right after a seek flush) → don't extrapolate.
+        if (performance.now() - this.lastStatsAt > 1000) return;
+        // Settling window after disruptive events (seek, buffering recovery,
+        // starvation resume): both clocks are re-synchronizing — measuring
+        // drift now yields garbage and mid-play corrections cause visible
+        // jumps. Wait for steady state.
+        if (performance.now() < (this.syncSuppressUntil || 0)) return;
 
         // Extrapolate the audio clock since the last stats message
         const audioPts = this.lastAudioPts + (performance.now() - this.lastStatsAt) / 1000;
-        const target = audioPts - this.audioLatencyOffset;
-        const drift = this.video.currentTime - target;
-        const now = performance.now();
+        const drift = this.video.currentTime - audioPts;
 
-        if (Math.abs(drift) > 1.0 && now - (this.lastHardSync || 0) > 5000) {
+        // Calibration phase: collect samples, adopt the median as baseline.
+        if (this.syncBaseline === null) {
+            this.driftSamples.push(drift);
+            if (this.driftSamples.length >= 12) {
+                const sorted = [...this.driftSamples].sort((a, b) => a - b);
+                this.syncBaseline = sorted[Math.floor(sorted.length / 2)];
+                console.log(`[sync] baseline calibrated: ${this.syncBaseline.toFixed(3)}s`);
+            }
+            return;
+        }
+
+        const residual = drift - this.syncBaseline;
+        const now = performance.now();
+        if (Math.abs(residual) > 0.4 && now - (this.lastHardSync || 0) > 5000) {
             this.lastHardSync = now;
-            console.log(`[sync] drift ${drift.toFixed(2)}s → seeking video to ${target.toFixed(2)}`);
-            this.video.currentTime = target;
+            console.log(`[sync] residual ${residual.toFixed(2)}s → correcting video`);
+            this.video.currentTime = audioPts + this.syncBaseline;
         }
     }
 
@@ -208,7 +276,15 @@ class HaloPlayer {
         this.audioHold = on;
         this.audioEngine.setHold(on);
         if (on) this.connection.pauseAudio();
-        else this.connection.resumeAudio();
+        else {
+            this.connection.resumeAudio();
+            this.suppressSync();
+        }
+    }
+
+    /* Pause drift corrections while the pipeline re-stabilizes. */
+    suppressSync(ms = 4000) {
+        this.syncSuppressUntil = performance.now() + ms;
     }
 
     pause() {
@@ -235,6 +311,7 @@ class HaloPlayer {
     seek(seconds) {
         // Flush old audio from worklet queue before seeking
         this.audioEngine.flush();
+        this.suppressSync();
         this.video.currentTime = seconds;
         this.connection.seekAudio(seconds);
     }
@@ -247,6 +324,8 @@ class HaloPlayer {
         clearTimeout(this.startTimeout);
         this.hideLoading();
         this.audioHold = false;
+        this.audioStarved = false;
+        this.starvedStats = 0;
         this.video.pause();
         this.clearSubtitles();
         this.video.removeAttribute('src');

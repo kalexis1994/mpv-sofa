@@ -264,7 +264,22 @@ class AudioDemuxer extends EventEmitter {
             }
 
             const elapsed = Number(process.hrtime.bigint() - this.startTime) / 1e6;
-            const targetChunks = Math.floor(elapsed / chunkDurationMs) + leadChunks;
+            let targetChunks = Math.floor(elapsed / chunkDurationMs) + leadChunks;
+
+            /*
+             * Never burst-catch-up after a stall (slow decoder, event-loop
+             * hiccup, network backpressure).  Pacing against wall clock
+             * means a stall would otherwise be followed by a flood of
+             * chunks; the client's bounded queue then drops its oldest
+             * entries and its audio clock jumps FORWARD, which the video
+             * chases with a visible seek.  Instead, slide our clock so
+             * delivery resumes at 1x with just the normal lead re-primed.
+             */
+            if (targetChunks > this.chunksEmitted + 2 * leadChunks) {
+                this.startTime = process.hrtime.bigint() -
+                    BigInt(Math.max(0, Math.round(this.chunksEmitted * chunkDurationMs * 1e6)));
+                targetChunks = this.chunksEmitted + leadChunks;
+            }
 
             while (this.chunksEmitted < targetChunks && this.sendQueue.length > 0) {
                 const chunk = this.sendQueue.shift();

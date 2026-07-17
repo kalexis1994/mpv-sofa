@@ -289,6 +289,13 @@
         if (browser) browser.loadFiles().then(() => focus.refresh('.file-item')).catch(() => {});
     }
 
+    // Debug handle for remote inspection (ares-inspect / CDP).
+    window.__dbg = {
+        focus, connection, audioEngine, menu,
+        get player() { return player; },
+        get overlayLevel() { return overlayLevel; },
+    };
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
