@@ -180,7 +180,13 @@ function createHlsManager(options = {}) {
     } catch (e) { /* none */ }
 
     async function startSession(file, opts) {
-        stopAll();
+        // Keep the previous session alive until the new one is READY: the
+        // TV may still be fetching the old playlist, and webOS's media
+        // daemon reacts badly to streams dying under it (wedged pipelines
+        // that survive app restarts).  Brief overlap of two transcodes is
+        // the lesser evil.
+        const previous = active;
+        active = null;
 
         const t = Math.max(0, parseFloat(opts.t) || 0);
         const base = await new Promise(res => findKeyframeBefore(file.path, t, res));
@@ -196,8 +202,15 @@ function createHlsManager(options = {}) {
         });
         session.start();
         active = session;
-        await session.waitReady();
-        if (active !== session) throw new Error('superseded');
+        try {
+            await session.waitReady();
+        } catch (e) {
+            session.stop();
+            if (active === session) active = previous;   // keep serving the old one
+            throw e;
+        }
+        if (active !== session) { session.stop(); throw new Error('superseded'); }
+        if (previous) previous.stop();
         return session;
     }
 

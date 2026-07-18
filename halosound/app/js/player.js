@@ -21,6 +21,30 @@ class HaloPlayer {
         this.audioStartPts = -1;
         this.videoStarted = false;
 
+        this.bindVideoEvents();
+
+        // Click-to-seek on progress bar
+        const progressBar = document.getElementById('progress-bar');
+        if (progressBar) {
+            progressBar.addEventListener('click', (e) => {
+                if (!this.playing && !this.currentFile) return;
+                const rect = progressBar.getBoundingClientRect();
+                const pct = (e.clientX - rect.left) / rect.width;
+                const total = (this.engineMode === 'hls' && this.movieDuration)
+                    ? this.movieDuration : (this.video.duration || 0);
+                const time = pct * total;
+                if (time >= 0) this.seek(time);
+            });
+        }
+    }
+
+    /* All persistent listeners for the video element, re-bound whenever the
+     * element is recreated (see recreateVideoElement). */
+    bindVideoEvents() {
+        const alignTimer = (self) => {
+            if (self.videoStarted && self.playing) self.alignAudioToVideo();
+        };
+
         this.video.addEventListener('timeupdate', () => this.onTimeUpdate());
         this.video.addEventListener('ended', () => this.onEnded());
 
@@ -29,8 +53,11 @@ class HaloPlayer {
         // (which lands the user on the connect screen with no explanation).
         this.video.addEventListener('error', () => {
             if (!this.videoStarted && !this.currentFile) return;
+            // Detached element (src removed) reports no error object —
+            // those events are teardown noise, not failures.
+            if (!this.video.error) return;
             const err = this.video.error;
-            const msg = err ? `media error ${err.code}: ${(err.message || '').slice(0, 80)}` : 'media error';
+            const msg = `media error ${err.code}: ${(err.message || '').slice(0, 80)}`;
             console.error('[video]', msg);
             this.setDiag(msg);
             this.showLoading('Playback failed — returning to library');
@@ -64,23 +91,27 @@ class HaloPlayer {
             this.hideLoading();
             if (this.playing) this.holdAudio(false);
         });
-        function alignTimer(self) {
-            if (self.videoStarted && self.playing) self.alignAudioToVideo();
-        }
+    }
 
-        // Click-to-seek on progress bar
-        const progressBar = document.getElementById('progress-bar');
-        if (progressBar) {
-            progressBar.addEventListener('click', (e) => {
-                if (!this.playing && !this.currentFile) return;
-                const rect = progressBar.getBoundingClientRect();
-                const pct = (e.clientX - rect.left) / rect.width;
-                const total = (this.engineMode === 'hls' && this.movieDuration)
-                    ? this.movieDuration : (this.video.duration || 0);
-                const time = pct * total;
-                if (time >= 0) this.seek(time);
-            });
-        }
+    /*
+     * webOS's media pipeline gets irreversibly stuck when an HLS source is
+     * swapped on a reused <video> element (readyState freezes at 2, no
+     * error, forever) — verified live: the same stalled session plays
+     * instantly on a freshly-created element.  So every new HLS session
+     * gets a brand-new element.
+     */
+    recreateVideoElement() {
+        const old = this.video;
+        const parent = old.parentElement;
+        try { old.removeAttribute('src'); old.load(); } catch (e) {}
+        const v = document.createElement('video');
+        v.id = 'video-player';
+        v.muted = true;
+        v.setAttribute('preload', 'auto');
+        parent.insertBefore(v, old);
+        old.remove();
+        this.video = v;
+        this.bindVideoEvents();
     }
 
     async play(file, selection = {}) {
@@ -125,6 +156,10 @@ class HaloPlayer {
     }
 
     async startHlsSession(t) {
+        // Fresh element per session: detaches the dying playlist (whose
+        // session the server kills the moment we request a new one) AND
+        // dodges the webOS pipeline-reuse freeze.
+        this.recreateVideoElement();
         try {
             // Hard timeout: a dead/stale server must produce a clear error,
             // not an endless "Buffering..." hang.
@@ -145,11 +180,17 @@ class HaloPlayer {
             this.sessionBase = j.base || 0;
             this.video.muted = false;              // audio rides IN the stream
             this.video.src = this.connection.httpBase + j.url;
-            // Some HLS players jump to the "live edge" of a growing EVENT
-            // playlist instead of starting at 0 — snap back once.
-            const snapBack = () => { if (this.video.currentTime > 1.5) this.video.currentTime = 0; };
-            this.video.addEventListener('loadedmetadata', snapBack, { once: true });
-            this.video.addEventListener('playing', snapBack, { once: true });
+            // The HLS player may jump to the "live edge" of the growing
+            // EVENT playlist instead of starting at 0.  Snap back ONLY once
+            // playback is actually rolling (playing + readyState>=3): seeking
+            // the element any earlier re-triggers the webOS pipeline freeze.
+            const v = this.video;
+            const snap = () => {
+                if (this.video === v && v.currentTime > 4 && v.readyState >= 3) {
+                    v.currentTime = 0;
+                }
+            };
+            v.addEventListener('playing', () => { snap(); setTimeout(snap, 1500); }, { once: true });
             this.video.play().catch(() => {});
             this.videoStarted = true;
             this.attachSubsForSession();
