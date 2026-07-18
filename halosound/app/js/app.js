@@ -285,6 +285,13 @@
         browser.onDirChanged = () => { if (ui.currentScreen === 'browser') focus.refresh('.file-item'); };
         trackSelector.onPlay = (selection) => startPlayback(pendingFile, selection);
 
+        // Measure the real TV↔server link in the background (~3.5s); any
+        // session started afterwards uses it to pick copy-vs-reencode and
+        // the NVENC bitrate. Until it lands the server assumes 100 Mbps.
+        connection.measureBandwidth().then(bps => {
+            if (bps) console.log('Link: ' + (bps / 1e6).toFixed(1) + ' Mbps');
+        });
+
         await browser.loadFiles();
         showScreen('browser');
     }

@@ -152,6 +152,10 @@ class HaloPlayer {
         } catch (e) {}
         const roomSel = document.getElementById('setting-room');
         if (roomSel) params.set('room', roomSel.value);
+        // Measured link throughput → server picks copy-vs-reencode + bitrate.
+        if (this.connection.bandwidthBps > 0) {
+            params.set('bw', Math.round(this.connection.bandwidthBps));
+        }
         return params;
     }
 

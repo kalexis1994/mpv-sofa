@@ -5,6 +5,7 @@ class HaloConnection {
         this.ws = null;        // WebSocket for audio
         this.wsBase = null;    // 'ws://ip:wsport'
         this.connected = false;
+        this.bandwidthBps = 0; // measured LAN throughput (bits/s), 0 = unknown
         this.onConnected = null;
         this.onDisconnected = null;
         this.onAudioData = null;
@@ -27,6 +28,40 @@ class HaloConnection {
             if (this.onError) this.onError(e.message);
             return false;
         }
+    }
+
+    /*
+     * Measure real download throughput from the server (~3.5s, XHR for wide
+     * webOS support). The first 500ms are discarded (TCP ramp-up), so the
+     * result reflects the steady state the video stream will actually get.
+     * Stores bits/s in this.bandwidthBps; resolves with it (0 on failure).
+     */
+    measureBandwidth() {
+        return new Promise((resolve) => {
+            const xhr = new XMLHttpRequest();
+            const t0 = performance.now();
+            let startT = 0, startB = 0, lastT = 0, lastB = 0;
+            const finish = () => {
+                let bps = 0;
+                if (startT && lastT - startT > 800) {
+                    bps = ((lastB - startB) * 8) / ((lastT - startT) / 1000);
+                }
+                if (bps > 0) this.bandwidthBps = bps;
+                resolve(bps);
+            };
+            xhr.open('GET', `${this.httpBase}/api/speedtest`);
+            xhr.responseType = 'arraybuffer';
+            xhr.onprogress = (e) => {
+                const t = performance.now();
+                if (!startT && t - t0 > 500) { startT = t; startB = e.loaded; }
+                lastT = t; lastB = e.loaded;
+                if (t - t0 > 3500) xhr.abort();
+            };
+            xhr.onabort = finish;
+            xhr.onload = finish;
+            xhr.onerror = () => resolve(0);
+            xhr.send();
+        });
     }
 
     async getFiles() {

@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const crypto = require('crypto');
 const config = require('./config');
 const { createHlsManager } = require('./hls-session');
 
@@ -325,6 +326,29 @@ function createHttpServer(files, options = {}) {
      *   → { url, base } — url is the playlist, base the keyframe-aligned
      *     session start in movie time (the client maps its UI timeline).
      */
+    /*
+     * Bandwidth probe: stream incompressible bytes until the client aborts
+     * (100 MB safety cap). The TV measures its own download rate and reports
+     * it as `bw` when starting HLS sessions, so the server can pick the
+     * copy-vs-reencode threshold and the NVENC bitrate from the real link.
+     */
+    const speedBuf = crypto.randomBytes(256 * 1024);
+    app.get('/api/speedtest', (req, res) => {
+        res.set('Content-Type', 'application/octet-stream');
+        res.set('Cache-Control', 'no-store');
+        const MAX = 100 * 1024 * 1024;
+        let sent = 0, done = false;
+        const write = () => {
+            if (done) return;
+            let ok = true;
+            while (ok && sent < MAX) { ok = res.write(speedBuf); sent += speedBuf.length; }
+            if (sent >= MAX) { done = true; res.end(); }
+        };
+        res.on('drain', write);
+        req.on('close', () => { done = true; });
+        write();
+    });
+
     const hls = createHlsManager(options);
 
     app.get('/api/files/:id/hls', async (req, res) => {
@@ -346,6 +370,7 @@ function createHttpServer(files, options = {}) {
                 sofaPath,
                 room: Number.isFinite(room) ? room : 1,
                 t: req.query.t,
+                bw: req.query.bw,
             });
             res.json({ url: `/hls/${session.id}/out.m3u8`, base: session.base });
         } catch (e) {

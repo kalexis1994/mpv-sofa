@@ -33,18 +33,38 @@ const RENDER_EXE = (() => {
 })();
 const DEFAULT_SOFA = path.resolve(__dirname, '../../app/assets/hrtf/default.sofa');
 
-/* The LG's ethernet port is 100 Mbps (~94 effective after overhead). Files
- * whose average video bitrate exceeds this can never stream with -c:v copy
- * (VBR peaks starve the TV forever), so they get re-encoded with NVENC. */
-const MAX_COPY_BPS = 80e6;
-const NVENC_ARGS = [
-    '-c:v', 'hevc_nvenc', '-preset', 'p4', '-tune', 'hq',
-    '-rc', 'vbr', '-b:v', '40M', '-maxrate', '55M', '-bufsize', '110M',
-    '-spatial-aq', '1',
-    '-profile:v', 'main10', '-pix_fmt', 'p010le',
-    '-g', '48', '-forced-idr', '1',   // ~2s GOP at 24fps so hls_time 2 can cut
-                                      // (force_key_frames is ignored by nvenc)
-];
+/* Files whose average bitrate exceeds what the LAN link to the TV can carry
+ * can never stream with -c:v copy (VBR peaks starve the TV forever), so they
+ * get re-encoded with NVENC. The client measures its real throughput on
+ * connect (/api/speedtest) and reports it per session as `bw`; without a
+ * measurement we assume the LG's 100 Mbps port (~94 effective). */
+const FALLBACK_BW = 94e6;
+
+/* Copy is safe while the average leaves ~15% headroom for VBR peaks,
+ * audio and HTTP overhead. */
+function copyCap(bw) { return (bw || FALLBACK_BW) * 0.85; }
+
+/* NVENC target scaled to the link: ~55% of throughput as average, ~70% as
+ * ceiling. Clamped — below 20M 4K quality collapses; above 60M the gains
+ * are invisible while GPU/disk cost keeps growing. */
+function nvencArgs(bw) {
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const link = bw || FALLBACK_BW;
+    const target = Math.round(clamp(link * 0.55, 20e6, 60e6));
+    const maxr = Math.round(clamp(link * 0.70, 25e6, 75e6));
+    return {
+        target,
+        args: [
+            '-c:v', 'hevc_nvenc', '-preset', 'p4', '-tune', 'hq',
+            '-rc', 'vbr', '-b:v', String(target),
+            '-maxrate', String(maxr), '-bufsize', String(maxr * 2),
+            '-spatial-aq', '1',
+            '-profile:v', 'main10', '-pix_fmt', 'p010le',
+            '-g', '48', '-forced-idr', '1',   // ~2s GOP at 24fps so hls_time 2 can cut
+                                              // (force_key_frames is ignored by nvenc)
+        ],
+    };
+}
 
 /* Average container bitrate (bps), cached on the file entry. */
 function probeBitrate(file, cb) {
@@ -98,6 +118,7 @@ class HlsSession {
         this.room = opts.room;
         this.base = opts.base;                            // keyframe-aligned start (s)
         this.transcode = !!opts.transcode;                // re-encode video (NVENC)
+        this.bw = opts.bw || 0;                           // client-measured link (bps)
         this.dir = path.join(os.tmpdir(), 'halosound-hls', this.id);
         this.procs = [];
         this.stopped = false;
@@ -141,7 +162,7 @@ class HlsSession {
             '-i', this.file.path,
             '-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
             '-map', '0:v:0',
-            ...(this.transcode ? NVENC_ARGS : ['-c:v', 'copy']),
+            ...(this.transcode ? nvencArgs(this.bw).args : ['-c:v', 'copy']),
             '-map', '1:a', '-c:a', 'aac', '-b:a', '256k',
             '-f', 'hls',
             '-hls_time', '2',
@@ -167,7 +188,8 @@ class HlsSession {
         if (this.verbose) {
             console.log(`[hls] session ${this.id}: ${path.basename(this.file.path)} ` +
                         `a=#${this.audioStreamIndex} ${this.channels}ch room=${this.room} base=${this.base.toFixed(2)}s ` +
-                        `v=${this.transcode ? 'nvenc' : 'copy'}`);
+                        `v=${this.transcode ? 'nvenc@' + (nvencArgs(this.bw).target / 1e6).toFixed(0) + 'M' : 'copy'}` +
+                        (this.bw ? ` link=${(this.bw / 1e6).toFixed(0)}Mbps` : ''));
         }
     }
 
@@ -224,11 +246,12 @@ function createHlsManager(options = {}) {
         active = null;
 
         const t = Math.max(0, parseFloat(opts.t) || 0);
+        const bw = Math.max(0, parseFloat(opts.bw) || 0);
         const bitrate = await new Promise(res => probeBitrate(file, res));
-        const transcode = bitrate > MAX_COPY_BPS;
+        const transcode = bitrate > copyCap(bw);
         if (transcode && options.verbose) {
             console.log(`[hls] ${path.basename(file.path)}: ${(bitrate / 1e6).toFixed(1)} Mbps ` +
-                        `> ${(MAX_COPY_BPS / 1e6).toFixed(0)} Mbps cap → NVENC re-encode`);
+                        `> ${(copyCap(bw) / 1e6).toFixed(0)} Mbps cap → NVENC re-encode`);
         }
         // Even when re-encoding, both pipelines start at a source keyframe so
         // audio (exact seek) and video (keyframe-snapped -ss) stay aligned.
@@ -242,6 +265,7 @@ function createHlsManager(options = {}) {
             room: Number.isFinite(opts.room) ? opts.room : 1,
             base,
             transcode,
+            bw,
             verbose: options.verbose,
         });
         session.start();
