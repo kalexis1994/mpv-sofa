@@ -66,6 +66,27 @@ function nvencArgs(bw) {
     };
 }
 
+/* Codec + channel count of one audio stream (absolute index). */
+function probeAudioStream(file, absIndex, cb) {
+    execFile(config.FFPROBE_PATH, [
+        '-v', 'quiet',
+        '-select_streams', String(absIndex),
+        '-show_entries', 'stream=codec_name,channels',
+        '-print_format', 'json',
+        file.path
+    ], (err, stdout) => {
+        let codec = '', channels = 6;
+        if (!err) {
+            try {
+                const s = (JSON.parse(stdout).streams || [])[0] || {};
+                codec = s.codec_name || '';
+                channels = s.channels || 6;
+            } catch (e) {}
+        }
+        cb({ codec, channels });
+    });
+}
+
 /* Average container bitrate (bps), cached on the file entry. */
 function probeBitrate(file, cb) {
     if (file._bitrate !== undefined) return cb(file._bitrate);
@@ -119,6 +140,9 @@ class HlsSession {
         this.base = opts.base;                            // keyframe-aligned start (s)
         this.transcode = !!opts.transcode;                // re-encode video (NVENC)
         this.bw = opts.bw || 0;                           // client-measured link (bps)
+        this.passthrough = !!opts.passthrough;            // original audio, TV decodes
+        this.audioCodec = opts.audioCodec || '';          // source codec (passthrough)
+        this.audioChannels = opts.audioChannels || 6;
         this.dir = path.join(os.tmpdir(), 'halosound-hls', this.id);
         this.procs = [];
         this.stopped = false;
@@ -131,6 +155,54 @@ class HlsSession {
         fs.mkdirSync(this.dir, { recursive: true });
 
         const ssArgs = this.base > 0 ? ['-ss', String(this.base)] : [];
+        const videoArgs = [
+            '-map', '0:v:0',
+            ...(this.transcode ? nvencArgs(this.bw).args : ['-c:v', 'copy']),
+        ];
+        const hlsArgs = [
+            '-f', 'hls',
+            '-hls_time', '2',
+            '-hls_segment_type', 'fmp4',
+            '-hls_playlist_type', 'event',
+            '-hls_list_size', '0',
+            '-hls_fmp4_init_filename', 'init.mp4',
+            this.playlistPath()
+        ];
+        const tag = (p, name) => {
+            p.stderr.on('data', d => { if (this.verbose) console.error(`[hls:${name}]`, d.toString().trim().slice(0, 300)); });
+            p.on('error', e => console.error(`[hls:${name}] spawn error`, e.message));
+            // Broken-pipe errors are expected when the chain tears down.
+            for (const s of [p.stdin, p.stdout]) if (s) s.on('error', () => {});
+        };
+
+        if (this.passthrough) {
+            // Original audio, single process — the TV decodes it itself.
+            // E-AC-3/AC-3 ride fMP4 untouched (Atmos JOC metadata survives);
+            // TrueHD/DTS can't be carried in fMP4, so they become DD+ 5.1.
+            const copyOk = this.audioCodec === 'eac3' || this.audioCodec === 'ac3';
+            const ffM = spawn(config.FFMPEG_PATH, [
+                '-v', 'error', '-y',
+                ...(this.transcode ? ['-hwaccel', 'cuda'] : []),
+                ...ssArgs,
+                '-i', this.file.path,
+                ...videoArgs,
+                '-map', `0:${this.audioStreamIndex}`,
+                ...(copyOk ? ['-c:a', 'copy']
+                           : ['-c:a', 'eac3', '-b:a', '640k',
+                              ...(this.audioChannels > 6 ? ['-ac', '6'] : [])]),
+                ...hlsArgs
+            ], { stdio: ['ignore', 'ignore', 'pipe'], cwd: this.dir });
+            tag(ffM, 'mux');
+            this.procs = [ffM];
+            if (this.verbose) {
+                console.log(`[hls] session ${this.id}: ${path.basename(this.file.path)} ` +
+                            `a=#${this.audioStreamIndex} passthrough(${copyOk ? 'copy ' + this.audioCodec : this.audioCodec + '→eac3'}) ` +
+                            `base=${this.base.toFixed(2)}s ` +
+                            `v=${this.transcode ? 'nvenc@' + (nvencArgs(this.bw).target / 1e6).toFixed(0) + 'M' : 'copy'}` +
+                            (this.bw ? ` link=${(this.bw / 1e6).toFixed(0)}Mbps` : ''));
+            }
+            return;
+        }
 
         // 1) audio: decode selected track to multichannel f32
         const ffA = spawn(config.FFMPEG_PATH, [
@@ -161,27 +233,14 @@ class HlsSession {
             ...ssArgs,
             '-i', this.file.path,
             '-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
-            '-map', '0:v:0',
-            ...(this.transcode ? nvencArgs(this.bw).args : ['-c:v', 'copy']),
+            ...videoArgs,
             '-map', '1:a', '-c:a', 'aac', '-b:a', '256k',
-            '-f', 'hls',
-            '-hls_time', '2',
-            '-hls_segment_type', 'fmp4',
-            '-hls_playlist_type', 'event',
-            '-hls_list_size', '0',
-            '-hls_fmp4_init_filename', 'init.mp4',
-            this.playlistPath()
+            ...hlsArgs
         ], { stdio: ['pipe', 'ignore', 'pipe'], cwd: this.dir });
 
         ffA.stdout.pipe(render.stdin);
         render.stdout.pipe(ffM.stdin);
 
-        const tag = (p, name) => {
-            p.stderr.on('data', d => { if (this.verbose) console.error(`[hls:${name}]`, d.toString().trim().slice(0, 300)); });
-            p.on('error', e => console.error(`[hls:${name}] spawn error`, e.message));
-            // Broken-pipe errors are expected when the chain tears down.
-            for (const s of [p.stdin, p.stdout]) if (s) s.on('error', () => {});
-        };
         tag(ffA, 'audio'); tag(render, 'render'); tag(ffM, 'mux');
 
         this.procs = [ffA, render, ffM];
@@ -247,6 +306,10 @@ function createHlsManager(options = {}) {
 
         const t = Math.max(0, parseFloat(opts.t) || 0);
         const bw = Math.max(0, parseFloat(opts.bw) || 0);
+        const passthrough = opts.audioMode === 'original';
+        const audioInfo = passthrough
+            ? await new Promise(res => probeAudioStream(file, opts.audioStreamIndex, res))
+            : null;
         const bitrate = await new Promise(res => probeBitrate(file, res));
         const transcode = bitrate > copyCap(bw);
         if (transcode && options.verbose) {
@@ -266,6 +329,9 @@ function createHlsManager(options = {}) {
             base,
             transcode,
             bw,
+            passthrough,
+            audioCodec: audioInfo ? audioInfo.codec : '',
+            audioChannels: audioInfo ? audioInfo.channels : 6,
             verbose: options.verbose,
         });
         session.start();

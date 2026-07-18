@@ -150,6 +150,11 @@ class HaloPlayer {
             const sofa = localStorage.getItem('mpvsofa.hrtfProfile');
             if (sofa) params.set('sofa', sofa);
         } catch (e) {}
+        try {
+            if (localStorage.getItem('mpvsofa.audioMode') === 'original') {
+                params.set('audioMode', 'original');
+            }
+        } catch (e) {}
         const roomSel = document.getElementById('setting-room');
         if (roomSel) params.set('room', roomSel.value);
         // Measured link throughput → server picks copy-vs-reencode + bitrate.

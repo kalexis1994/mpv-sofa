@@ -371,6 +371,7 @@ function createHttpServer(files, options = {}) {
                 room: Number.isFinite(room) ? room : 1,
                 t: req.query.t,
                 bw: req.query.bw,
+                audioMode: req.query.audioMode,
             });
             res.json({ url: `/hls/${session.id}/out.m3u8`, base: session.base });
         } catch (e) {

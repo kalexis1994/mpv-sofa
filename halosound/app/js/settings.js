@@ -64,6 +64,31 @@ class HaloSettings {
             });
         }
 
+        // Audio output: binaural render vs original passthrough (TV decodes,
+        // Atmos lights up on E-AC-3/JOC tracks). TV-native mode only.
+        const amGroup = document.getElementById('setting-audio-mode');
+        if (amGroup) {
+            let mode = 'binaural';
+            try { mode = localStorage.getItem('mpvsofa.audioMode') || 'binaural'; } catch (e) {}
+            const amHint = (m) => {
+                const hint = document.getElementById('hint-audio-mode');
+                if (hint) hint.textContent = m === 'original'
+                    ? 'Original: untouched track, the TV decodes it (Atmos on Dolby Digital Plus tracks; TrueHD/DTS become DD+ 5.1)'
+                    : 'Binaural: HRTF spatialization rendered by the server';
+            };
+            amHint(mode);
+            amGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.value === mode);
+                btn.addEventListener('click', () => {
+                    amGroup.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    try { localStorage.setItem('mpvsofa.audioMode', btn.dataset.value); } catch (e) {}
+                    amHint(btn.dataset.value);
+                    if (this.onEngineParamsChanged) this.onEngineParamsChanged();
+                });
+            });
+        }
+
         // Room preset
         const roomSel = document.getElementById('setting-room');
         if (roomSel) roomSel.addEventListener('change', (e) => {
