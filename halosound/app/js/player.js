@@ -24,6 +24,23 @@ class HaloPlayer {
         this.video.addEventListener('timeupdate', () => this.onTimeUpdate());
         this.video.addEventListener('ended', () => this.onEnded());
 
+        // Hard media errors (broken stream, pipeline failure): fail cleanly
+        // back to the library instead of letting webOS kill+reload the app
+        // (which lands the user on the connect screen with no explanation).
+        this.video.addEventListener('error', () => {
+            if (!this.videoStarted && !this.currentFile) return;
+            const err = this.video.error;
+            const msg = err ? `media error ${err.code}: ${(err.message || '').slice(0, 80)}` : 'media error';
+            console.error('[video]', msg);
+            this.setDiag(msg);
+            this.showLoading('Playback failed — returning to library');
+            setTimeout(() => {
+                this.hideLoading();
+                this.stop();
+                if (this.onPlaybackEnded) this.onPlaybackEnded();
+            }, 2500);
+        });
+
         // Video stalled: pause the audio pipeline too, so A/V can't drift
         // apart while the video buffers.  During a seek/starvation reacquire
         // the resume path owns the whole show — stay out of its way (its
@@ -109,9 +126,21 @@ class HaloPlayer {
 
     async startHlsSession(t) {
         try {
-            const resp = await fetch(
-                `${this.connection.httpBase}/api/files/${this.currentFile.id}/hls?${this.hlsParams(t)}`);
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            // Hard timeout: a dead/stale server must produce a clear error,
+            // not an endless "Buffering..." hang.
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 40000);
+            let resp;
+            try {
+                resp = await fetch(
+                    `${this.connection.httpBase}/api/files/${this.currentFile.id}/hls?${this.hlsParams(t)}`,
+                    { signal: ctrl.signal });
+            } finally { clearTimeout(timer); }
+            if (!resp.ok) {
+                let detail = 'HTTP ' + resp.status;
+                try { detail = (await resp.json()).error || detail; } catch (e) {}
+                throw new Error(detail);
+            }
             const j = await resp.json();
             this.sessionBase = j.base || 0;
             this.video.muted = false;              // audio rides IN the stream
@@ -126,9 +155,15 @@ class HaloPlayer {
             this.attachSubsForSession();
         } catch (e) {
             console.error('HLS session failed:', e);
-            this.setDiag('HLS session failed: ' + e.message);
-            this.showLoading('Stream failed — see Settings > Diagnostics');
-            setTimeout(() => this.hideLoading(), 4000);
+            const msg = e.name === 'AbortError' ? 'server not responding' : e.message;
+            this.setDiag('HLS session failed: ' + msg);
+            this.showLoading('Stream failed: ' + msg);
+            setTimeout(() => this.hideLoading(), 5000);
+            // Server unreachable → surface it as a designed reconnect flow
+            // instead of a mystery hang.
+            if (e.name === 'AbortError' || /Failed to fetch|NetworkError/i.test(e.message)) {
+                if (this.onServerLost) this.onServerLost();
+            }
         }
     }
 

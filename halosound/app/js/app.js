@@ -266,6 +266,15 @@
 
         player.onPlaybackEnded = () => { if (visualizer) visualizer.stop(); showScreen('browser'); refreshFileList(); };
         player.onAudioInfo = (info) => settings.updateAudioInfo(info);
+        // Server became unreachable: return to the connect screen with a
+        // clear message (a deliberate flow, not a mystery reload).
+        player.onServerLost = () => {
+            if (player) player.stop();
+            connection.disconnect();
+            showScreen('connect');
+            document.getElementById('connection-status').textContent =
+                'Lost contact with the server — check it is running, then reconnect.';
+        };
         // HRTF profile / room changes restart the server-side render session
         settings.onEngineParamsChanged = () => { if (player) player.restartHls(); };
 
