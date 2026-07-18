@@ -893,3 +893,28 @@ input[type="range"]::-moz-range-thumb {
     background: rgba(233, 69, 96, 0.22);
 }
 .pc-btn:hover { border-color: var(--accent); }
+
+/* --- Folder-tree browser ---------------------------------------------- */
+.browser-path {
+    flex: 1;
+    margin-left: 24px;
+    font-size: 24px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-item .file-icon {
+    width: 44px;
+    flex-shrink: 0;
+    font-size: 26px;
+    text-align: center;
+    margin-right: 12px;
+}
+
+.folder-item .file-name { font-weight: 600; }
+.folder-item .file-size { color: var(--accent); font-size: 30px; }
+
+.up-item .file-icon { color: var(--accent); }
+.up-item .file-name { color: var(--text-secondary); letter-spacing: 3px; }

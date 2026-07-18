@@ -119,6 +119,11 @@
             case 'tracks':   showScreen('browser'); refreshFileList(); break;
             case 'settings': showScreen('browser'); break;
             case 'browser':
+                // Inside a subfolder, Back goes up a level; at root it opens
+                // the menu.
+                if (browser && !browser.atRoot()) browser.up();
+                else openMenu();
+                break;
             case 'player':   openMenu(); break;
             default:         openMenu(); break;
         }
@@ -268,6 +273,7 @@
         document.getElementById('mute-height').addEventListener('change', (e) => audioEngine.setChannelMute('height', e.target.checked));
 
         browser.onFileSelected = (file) => showTrackSelector(file);
+        browser.onDirChanged = () => { if (ui.currentScreen === 'browser') focus.refresh('.file-item'); };
         trackSelector.onPlay = (selection) => startPlayback(pendingFile, selection);
 
         await browser.loadFiles();

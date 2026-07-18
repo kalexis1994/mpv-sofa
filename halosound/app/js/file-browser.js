@@ -1,50 +1,99 @@
-// File browser — renders the media list. D-pad navigation and OK activation
-// are handled generically by the FocusEngine (items are `.focusable`).
+// File browser — folder-tree navigation. Descends into subfolders and back
+// up; D-pad navigation and OK activation come from the FocusEngine (every
+// row is `.focusable`).
 class FileBrowser {
     constructor(connection) {
         this.connection = connection;
+        this.currentDir = '';       // relative path, '' = library root
+        this.folders = [];
         this.files = [];
         this.listElement = document.getElementById('file-list');
+        this.pathElement = document.getElementById('browser-path');
         this.onFileSelected = null;
+        this.onDirChanged = null;   // () => void, so the app can refocus
     }
 
+    atRoot() { return this.currentDir === ''; }
+
+    /* Load/refresh the current directory (used on open and on refresh). */
     async loadFiles() {
-        this.files = await this.connection.getFiles();
+        return this.loadDir(this.currentDir);
+    }
+
+    async loadDir(dir) {
+        const data = await this.connection.browse(dir);
+        this.currentDir = data.dir || '';
+        this.folders = data.folders || [];
+        this.files = data.files || [];
         this.render();
     }
 
-    render() {
-        this.listElement.innerHTML = '';
-        if (!this.files.length) {
-            const empty = document.createElement('div');
-            empty.className = 'file-empty';
-            empty.textContent = 'No media found in the server folder.';
-            this.listElement.appendChild(empty);
-            return;
-        }
-        this.files.forEach((file, i) => {
-            const item = document.createElement('div');
-            item.className = 'file-item focusable';
-            item.dataset.index = i;
-
-            const name = document.createElement('span');
-            name.className = 'file-name';
-            name.textContent = file.name;
-
-            const size = document.createElement('span');
-            size.className = 'file-size';
-            size.textContent = this.formatSize(file.size);
-
-            item.appendChild(name);
-            item.appendChild(size);
-            item.addEventListener('click', () => this.selectAndPlay(i));
-            this.listElement.appendChild(item);
-        });
+    descend(folder) {
+        const next = this.currentDir ? `${this.currentDir}/${folder}` : folder;
+        this.loadDir(next).then(() => this.onDirChanged && this.onDirChanged());
     }
 
-    selectAndPlay(index) {
-        const file = this.files[index];
-        if (file && this.onFileSelected) this.onFileSelected(file);
+    up() {
+        if (this.atRoot()) return;
+        const parts = this.currentDir.split('/');
+        parts.pop();
+        this.loadDir(parts.join('/')).then(() => this.onDirChanged && this.onDirChanged());
+    }
+
+    render() {
+        const el = this.listElement;
+        el.innerHTML = '';
+
+        if (this.pathElement) {
+            this.pathElement.textContent = this.currentDir ? '/' + this.currentDir : '';
+        }
+
+        // "Up" row when inside a subfolder.
+        if (!this.atRoot()) {
+            const up = document.createElement('div');
+            up.className = 'file-item folder-item up-item focusable';
+            up.innerHTML = `<span class="file-icon">↰</span><span class="file-name">..</span>`;
+            up.addEventListener('click', () => this.up());
+            el.appendChild(up);
+        }
+
+        // Folders first.
+        for (const folder of this.folders) {
+            const item = document.createElement('div');
+            item.className = 'file-item folder-item focusable';
+            item.innerHTML =
+                `<span class="file-icon">📁</span>` +
+                `<span class="file-name"></span>` +
+                `<span class="file-size">›</span>`;
+            item.querySelector('.file-name').textContent = folder;
+            item.addEventListener('click', () => this.descend(folder));
+            el.appendChild(item);
+        }
+
+        // Then files.
+        this.files.forEach((file) => {
+            const item = document.createElement('div');
+            item.className = 'file-item focusable';
+            item.innerHTML =
+                `<span class="file-icon">🎬</span>` +
+                `<span class="file-name"></span>` +
+                `<span class="file-size"></span>`;
+            item.querySelector('.file-name').textContent = file.name;
+            item.querySelector('.file-size').textContent = this.formatSize(file.size);
+            item.addEventListener('click', () => {
+                if (this.onFileSelected) this.onFileSelected(file);
+            });
+            el.appendChild(item);
+        });
+
+        if (!this.folders.length && !this.files.length) {
+            const empty = document.createElement('div');
+            empty.className = 'file-empty';
+            empty.textContent = this.atRoot()
+                ? 'No media found in the server folder.'
+                : 'This folder is empty.';
+            el.appendChild(empty);
+        }
     }
 
     formatSize(bytes) {

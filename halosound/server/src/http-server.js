@@ -56,6 +56,49 @@ function createHttpServer(files, options = {}) {
         })));
     });
 
+    /*
+     * Browse the library as a folder tree.  ?dir=<relative path> lists the
+     * immediate sub-folders (only those that contain a video somewhere below,
+     * so dead-end folders never show) and the video files directly inside.
+     * The tree is derived from the already-scanned flat file list — no extra
+     * filesystem walk, and a bad `dir` simply matches nothing (no traversal).
+     */
+    app.get('/api/browse', (req, res) => {
+        if (options.rescan) {
+            try { options.rescan(); } catch (e) { /* keep serving the old list */ }
+        }
+        const mediaDir = options.mediaDir || '';
+        const relParts = String(req.query.dir || '')
+            .split(/[\\/]/).filter(p => p && p !== '.' && p !== '..');
+
+        const folders = new Set();
+        const filesOut = [];
+        for (const f of files) {
+            const rel = mediaDir ? path.relative(mediaDir, f.path) : f.name;
+            if (rel.startsWith('..')) continue;
+            const parts = rel.split(/[\\/]/);
+            // must sit under the requested dir
+            let under = parts.length > relParts.length;
+            for (let i = 0; under && i < relParts.length; i++) {
+                if (parts[i] !== relParts[i]) under = false;
+            }
+            if (!under) continue;
+            const rest = parts.slice(relParts.length);
+            if (rest.length === 1) {
+                filesOut.push({ id: f.id, name: rest[0], size: f.size, ext: f.ext });
+            } else {
+                folders.add(rest[0]);
+            }
+        }
+
+        const coll = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+        res.json({
+            dir: relParts.join('/'),
+            folders: [...folders].sort(coll),
+            files: filesOut.sort((a, b) => coll(a.name, b.name)),
+        });
+    });
+
     /* Get file info via ffprobe */
     app.get('/api/files/:id/info', (req, res) => {
         const file = files.find(f => f.id === parseInt(req.params.id));

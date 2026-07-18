@@ -34,6 +34,11 @@ class HaloConnection {
         return resp.json();
     }
 
+    async browse(dir) {
+        const resp = await fetch(`${this.httpBase}/api/browse?dir=${encodeURIComponent(dir || '')}`);
+        return resp.json();
+    }
+
     async getFileInfo(fileId) {
         const resp = await fetch(`${this.httpBase}/api/files/${fileId}/info`);
         return resp.json();
