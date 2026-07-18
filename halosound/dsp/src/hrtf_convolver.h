@@ -38,6 +38,7 @@ typedef struct {
     HrtfConvolver right[2];
     int active_idx;
     int crossfade_remaining;
+    int pending_reload;   /* position changed while a crossfade was running */
     float crossfade_prev_l[HRTF_BLOCK_SIZE];
     float crossfade_prev_r[HRTF_BLOCK_SIZE];
 } HrtfChannelPair;

@@ -143,8 +143,14 @@ static void load_channel_hrir(HaloEngine *e, int ch, int crossfade) {
 
     HrtfChannelPair *pair = &e->channels[ch];
 
-    if (crossfade && pair->crossfade_remaining > 0)
-        return; /* Rate-limit: skip if crossfade in progress */
+    if (crossfade && pair->crossfade_remaining > 0) {
+        /* Rate-limit: a crossfade is in flight. Remember that the position
+         * moved so the freshest HRIR is loaded as soon as it finishes —
+         * otherwise fast update bursts would silently drop their last
+         * (= current) position. */
+        pair->pending_reload = 1;
+        return;
+    }
 
     float *hrir_l = calloc(e->hrir_length, sizeof(float));
     float *hrir_r = calloc(e->hrir_length, sizeof(float));
@@ -457,6 +463,12 @@ void halo_process(HaloEngine *e, const float *input, float *output_lr,
             } else {
                 pair->crossfade_remaining = 0;
             }
+        }
+
+        /* Crossfade done and the position moved meanwhile → chase it */
+        if (pair->crossfade_remaining == 0 && pair->pending_reload) {
+            pair->pending_reload = 0;
+            load_channel_hrir(e, ch, 1);
         }
 
         /* Accumulate into output */

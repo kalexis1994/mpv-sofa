@@ -33,6 +33,19 @@ const RENDER_EXE = (() => {
 })();
 const DEFAULT_SOFA = path.resolve(__dirname, '../../app/assets/hrtf/default.sofa');
 
+/* truehdd (TrueHD/Atmos decoder) enables object-based binaural rendering:
+ * instead of the 7.1 bed, the real Atmos objects + 3D trajectories are
+ * decoded (DAMF) and spatialized individually by halosound-render. */
+const TRUEHDD_EXE = (() => {
+    const candidates = [
+        process.env.HALO_TRUEHDD_PATH,
+        path.resolve(__dirname, '../../../dist/truehdd.exe'),
+        path.join(os.homedir(), 'hrtf-build', 'truehdd-bin', 'truehdd.exe'),
+    ].filter(Boolean);
+    for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch (e) {} }
+    return null;
+})();
+
 /* Files whose average bitrate exceeds what the LAN link to the TV can carry
  * can never stream with -c:v copy (VBR peaks starve the TV forever), so they
  * get re-encoded with NVENC. The client measures its real throughput on
@@ -66,24 +79,52 @@ function nvencArgs(bw) {
     };
 }
 
-/* Codec + channel count of one audio stream (absolute index). */
+/* Codec + channel count (+Atmos flag) of one audio stream (absolute index). */
 function probeAudioStream(file, absIndex, cb) {
     execFile(config.FFPROBE_PATH, [
         '-v', 'quiet',
         '-select_streams', String(absIndex),
-        '-show_entries', 'stream=codec_name,channels',
+        '-show_entries', 'stream=codec_name,channels,profile',
         '-print_format', 'json',
         file.path
     ], (err, stdout) => {
-        let codec = '', channels = 6;
+        let codec = '', channels = 6, atmos = false;
         if (!err) {
             try {
                 const s = (JSON.parse(stdout).streams || [])[0] || {};
                 codec = s.codec_name || '';
                 channels = s.channels || 6;
+                atmos = /atmos/i.test(s.profile || '');
             } catch (e) {}
         }
-        cb({ codec, channels });
+        cb({ codec, channels, atmos });
+    });
+}
+
+/* Last TrueHD major sync (ffprobe marks them as keyframes, one every
+ * ~106.7ms) at or before `t`. truehdd can only start decoding there, so
+ * the extraction starts exactly on one and the renderer trims the
+ * difference to `t` — sample-exact A/V alignment. */
+function findAudioSyncBefore(filePath, absIndex, t, cb) {
+    if (t <= 0.2) return cb(0);
+    execFile(config.FFPROBE_PATH, [
+        '-v', 'quiet',
+        '-select_streams', String(absIndex),
+        '-show_packets',
+        '-show_entries', 'packet=pts_time,flags',
+        '-read_intervals', `${Math.max(0, t - 1)}%${t + 0.05}`,
+        '-print_format', 'json',
+        filePath
+    ], { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return cb(Math.max(0, t - 0.25));
+        try {
+            const pkts = (JSON.parse(stdout).packets || [])
+                .filter(p => (p.flags || '').includes('K') && parseFloat(p.pts_time) <= t)
+                .map(p => parseFloat(p.pts_time));
+            cb(pkts.length ? Math.max(...pkts) : Math.max(0, t - 0.25));
+        } catch (e) {
+            cb(Math.max(0, t - 0.25));
+        }
     });
 }
 
@@ -143,6 +184,8 @@ class HlsSession {
         this.passthrough = !!opts.passthrough;            // original audio, TV decodes
         this.audioCodec = opts.audioCodec || '';          // source codec (passthrough)
         this.audioChannels = opts.audioChannels || 6;
+        this.objectAudio = !!opts.objectAudio;            // Atmos objects via truehdd
+        this.audioSync = opts.audioSync || 0;             // TrueHD major sync <= base
         this.dir = path.join(os.tmpdir(), 'halosound-hls', this.id);
         this.procs = [];
         this.stopped = false;
@@ -204,25 +247,68 @@ class HlsSession {
             return;
         }
 
-        // 1) audio: decode selected track to multichannel f32
-        const ffA = spawn(config.FFMPEG_PATH, [
-            '-v', 'error',
-            ...ssArgs,
-            '-i', this.file.path,
-            '-map', `0:${this.audioStreamIndex}`,
-            '-vn',
-            '-acodec', 'pcm_f32le',
-            '-ar', '48000',
-            '-ac', String(this.channels),
-            '-f', 'f32le', '-'
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let audioProcs, render;
+        if (this.objectAudio) {
+            // 1) Object-based Atmos: raw TrueHD (cut exactly on a major
+            //    sync) → truehdd → DAMF (beds+objects+3D metadata) → render
+            //    spatializes each object; --skip trims sync→base for
+            //    sample-exact alignment with the video.
+            const sync = this.audioSync;
+            const pre = Math.max(0, sync - 3);
+            const damfPrefix = path.join(this.dir, 'damf');
+            const ffX = spawn(config.FFMPEG_PATH, [
+                '-v', 'fatal',
+                ...(pre > 0 ? ['-ss', String(pre)] : []),
+                '-i', this.file.path,
+                '-ss', String(sync - pre),
+                '-map', `0:${this.audioStreamIndex}`,
+                '-c:a', 'copy',
+                '-f', 'truehd', '-'
+            ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-        // 2) binaural render (same DSP as the TV client)
-        const render = spawn(RENDER_EXE, [
-            '--sofa', this.sofaPath,
-            '--channels', String(this.channels),
-            '--room', String(this.room),
-        ], { stdio: ['pipe', 'pipe', 'pipe'] });
+            const thd = spawn(TRUEHDD_EXE, [
+                'decode', '-',
+                '--output-path', damfPrefix,
+                '--loglevel', 'error',
+            ], { stdio: ['pipe', 'ignore', 'pipe'] });
+            ffX.stdout.pipe(thd.stdin);
+            thd.on('close', () => {
+                // Signals the renderer that the DAMF files stop growing.
+                try { if (!this.stopped) fs.writeFileSync(damfPrefix + '.done', ''); } catch (e) {}
+            });
+
+            const skip = Math.max(0, Math.round((this.base - sync) * 48000));
+            render = spawn(RENDER_EXE, [
+                '--sofa', this.sofaPath,
+                '--room', String(this.room),
+                '--damf', damfPrefix,
+                '--follow',
+                '--skip', String(skip),
+            ], { stdio: ['ignore', 'pipe', 'pipe'] });
+            audioProcs = [[ffX, 'extract'], [thd, 'truehdd'], [render, 'render']];
+        } else {
+            // 1) audio: decode selected track to multichannel f32
+            const ffA = spawn(config.FFMPEG_PATH, [
+                '-v', 'error',
+                ...ssArgs,
+                '-i', this.file.path,
+                '-map', `0:${this.audioStreamIndex}`,
+                '-vn',
+                '-acodec', 'pcm_f32le',
+                '-ar', '48000',
+                '-ac', String(this.channels),
+                '-f', 'f32le', '-'
+            ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+            // 2) binaural render (same DSP as the TV client)
+            render = spawn(RENDER_EXE, [
+                '--sofa', this.sofaPath,
+                '--channels', String(this.channels),
+                '--room', String(this.room),
+            ], { stdio: ['pipe', 'pipe', 'pipe'] });
+            ffA.stdout.pipe(render.stdin);
+            audioProcs = [[ffA, 'audio'], [render, 'render']];
+        }
 
         // 3) mux: video (copied, or NVENC re-encode when the source bitrate
         //    exceeds what the TV's 100 Mbps port can carry) + AAC binaural
@@ -238,15 +324,18 @@ class HlsSession {
             ...hlsArgs
         ], { stdio: ['pipe', 'ignore', 'pipe'], cwd: this.dir });
 
-        ffA.stdout.pipe(render.stdin);
         render.stdout.pipe(ffM.stdin);
 
-        tag(ffA, 'audio'); tag(render, 'render'); tag(ffM, 'mux');
+        for (const [p, name] of audioProcs) tag(p, name);
+        tag(ffM, 'mux');
 
-        this.procs = [ffA, render, ffM];
+        this.procs = [...audioProcs.map(([p]) => p), ffM];
         if (this.verbose) {
+            const aDesc = this.objectAudio
+                ? `objects(damf, skip=${((this.base - this.audioSync) * 1000).toFixed(0)}ms)`
+                : `${this.channels}ch`;
             console.log(`[hls] session ${this.id}: ${path.basename(this.file.path)} ` +
-                        `a=#${this.audioStreamIndex} ${this.channels}ch room=${this.room} base=${this.base.toFixed(2)}s ` +
+                        `a=#${this.audioStreamIndex} ${aDesc} room=${this.room} base=${this.base.toFixed(2)}s ` +
                         `v=${this.transcode ? 'nvenc@' + (nvencArgs(this.bw).target / 1e6).toFixed(0) + 'M' : 'copy'}` +
                         (this.bw ? ` link=${(this.bw / 1e6).toFixed(0)}Mbps` : ''));
         }
@@ -307,9 +396,10 @@ function createHlsManager(options = {}) {
         const t = Math.max(0, parseFloat(opts.t) || 0);
         const bw = Math.max(0, parseFloat(opts.bw) || 0);
         const passthrough = opts.audioMode === 'original';
-        const audioInfo = passthrough
-            ? await new Promise(res => probeAudioStream(file, opts.audioStreamIndex, res))
-            : null;
+        const audioInfo = await new Promise(res => probeAudioStream(file, opts.audioStreamIndex, res));
+        // TrueHD Atmos + truehdd available → object-based binaural render
+        const objectAudio = !passthrough && !!TRUEHDD_EXE &&
+            audioInfo.codec === 'truehd' && audioInfo.atmos;
         const bitrate = await new Promise(res => probeBitrate(file, res));
         const transcode = bitrate > copyCap(bw);
         if (transcode && options.verbose) {
@@ -319,6 +409,11 @@ function createHlsManager(options = {}) {
         // Even when re-encoding, both pipelines start at a source keyframe so
         // audio (exact seek) and video (keyframe-snapped -ss) stay aligned.
         const base = await new Promise(res => findKeyframeBefore(file.path, t, res));
+        // Object audio starts on a TrueHD major sync <= base; render trims
+        // (base - sync) samples for exact alignment.
+        const audioSync = objectAudio
+            ? await new Promise(res => findAudioSyncBefore(file.path, opts.audioStreamIndex, base, res))
+            : 0;
 
         const session = new HlsSession({
             file,
@@ -330,8 +425,10 @@ function createHlsManager(options = {}) {
             transcode,
             bw,
             passthrough,
-            audioCodec: audioInfo ? audioInfo.codec : '',
-            audioChannels: audioInfo ? audioInfo.channels : 6,
+            audioCodec: audioInfo.codec,
+            audioChannels: audioInfo.channels,
+            objectAudio,
+            audioSync,
             verbose: options.verbose,
         });
         session.start();
