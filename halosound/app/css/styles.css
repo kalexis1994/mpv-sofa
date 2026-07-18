@@ -360,6 +360,64 @@ html, body {
     position: relative;
 }
 
+/* ---- Subtitle style (user-configurable, Settings > Subtitle Style) ---- */
+:root {
+    --sub-fill: #FFFFFF;
+    --sub-bg: transparent;
+    --sub-size: 36px;
+    --sub-font: sans-serif;
+    --sub-bright: 1;
+    --sub-shadow: -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.5);
+}
+
+.subtitle-overlay {
+    position: absolute;
+    left: 0; right: 0; bottom: 6%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    pointer-events: none;
+    filter: brightness(var(--sub-bright));
+    z-index: 5;
+}
+
+.subtitle-line {
+    font-size: var(--sub-size);
+    font-family: var(--sub-font);
+    color: var(--sub-fill);
+    background: var(--sub-bg);
+    text-shadow: var(--sub-shadow);
+    padding: 2px 16px;
+    border-radius: 6px;
+    text-align: center;
+    line-height: 1.35;
+    max-width: 86%;
+    white-space: pre-wrap;
+    font-weight: 600;
+}
+
+/* PGS (bitmap) subtitles can only follow the brightness setting */
+#screen-player canvas:not(#visualizer) { filter: brightness(var(--sub-bright)); }
+
+.sub-style-row { display: flex; align-items: center; gap: 16px; margin: 10px 0; }
+.sub-style-label { width: 160px; color: var(--text-secondary); font-size: 24px; flex-shrink: 0; }
+.swatch-group { display: flex; gap: 12px; }
+.swatch {
+    width: 48px; height: 48px;
+    border-radius: 8px;
+    border: 3px solid rgba(255,255,255,0.25);
+    color: #999; font-size: 22px; line-height: 1;
+}
+.swatch.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.sub-preview {
+    margin-top: 14px;
+    padding: 20px;
+    background: #2a2a3a;
+    border-radius: 8px;
+    text-align: center;
+}
+
 /* Chapter boundaries on the timeline */
 .chapter-tick {
     position: absolute;

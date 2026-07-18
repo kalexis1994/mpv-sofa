@@ -892,17 +892,41 @@ class HaloPlayer {
         track.src = url;
         track.default = true;
         this.video.appendChild(track);
-        // Enable the track after adding
-        this.video.addEventListener('loadedmetadata', () => {
-            if (this.video.textTracks.length > 0) {
-                this.video.textTracks[0].mode = 'showing';
-            }
-        }, { once: true });
+        // 'hidden' (not 'showing'): cues fire but the TV doesn't draw them —
+        // we render into #subtitle-overlay ourselves so the user's style
+        // settings (color, border, background, size, font) actually apply.
+        const activate = () => {
+            const tt = this.video.textTracks[0];
+            if (!tt) return;
+            tt.mode = 'hidden';
+            tt.oncuechange = () => this.renderCues(tt);
+        };
+        track.addEventListener('load', activate);
+        this.video.addEventListener('loadedmetadata', activate, { once: true });
+    }
+
+    renderCues(tt) {
+        const ov = document.getElementById('subtitle-overlay');
+        if (!ov) return;
+        ov.innerHTML = '';
+        const cues = tt.activeCues || [];
+        for (let i = 0; i < cues.length; i++) {
+            const line = document.createElement('div');
+            line.className = 'subtitle-line';
+            // Keep simple inline markup (<i>, <b>, <u>), escape the rest.
+            line.innerHTML = cues[i].text
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/&lt;(\/?)(i|b|u)&gt;/gi, '<$1$2>')
+                .replace(/\n/g, '<br>');
+            ov.appendChild(line);
+        }
     }
 
     clearSubtitles() {
         const tracks = this.video.querySelectorAll('track');
         tracks.forEach(t => t.remove());
+        const ov = document.getElementById('subtitle-overlay');
+        if (ov) ov.innerHTML = '';
         this.disposePgs();
     }
 

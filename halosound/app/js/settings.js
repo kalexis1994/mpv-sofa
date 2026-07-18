@@ -89,6 +89,10 @@ class HaloSettings {
             });
         }
 
+        // Subtitle style: persisted, applied live via CSS variables (the
+        // overlay renderer and the PGS canvas both read them).
+        this.initSubtitleStyle();
+
         // Room preset
         const roomSel = document.getElementById('setting-room');
         if (roomSel) roomSel.addEventListener('change', (e) => {
@@ -233,6 +237,61 @@ class HaloSettings {
         } catch (e) {
             console.warn('HRTF profile load failed, keeping current:', e);
         }
+    }
+
+    initSubtitleStyle() {
+        const DEFAULTS = { fill: '#FFFFFF', border: '#000000', bg: 'transparent',
+                           size: 36, font: 'sans-serif', bright: 100 };
+        let style = { ...DEFAULTS };
+        try { style = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('mpvsofa.subStyle') || '{}') }; }
+        catch (e) {}
+
+        const apply = () => {
+            const r = document.documentElement.style;
+            r.setProperty('--sub-fill', style.fill);
+            r.setProperty('--sub-bg', style.bg);
+            r.setProperty('--sub-size', style.size + 'px');
+            r.setProperty('--sub-font', style.font);
+            r.setProperty('--sub-bright', String(style.bright / 100));
+            // Outline via 4-direction text-shadow (webOS-safe); thickness
+            // scales with the font size, plus a soft drop shadow.
+            const w = Math.max(2, Math.round(style.size / 16));
+            r.setProperty('--sub-shadow', style.border === 'none'
+                ? `0 ${w}px ${w * 2}px rgba(0,0,0,0.6)`
+                : `-${w}px -${w}px 0 ${style.border}, ${w}px -${w}px 0 ${style.border}, ` +
+                  `-${w}px ${w}px 0 ${style.border}, ${w}px ${w}px 0 ${style.border}, ` +
+                  `0 ${w + 1}px ${w * 2}px rgba(0,0,0,0.5)`);
+            try { localStorage.setItem('mpvsofa.subStyle', JSON.stringify(style)); } catch (e) {}
+        };
+
+        const wire = (id, key, numeric) => {
+            const group = document.getElementById(id);
+            if (!group) return;
+            group.querySelectorAll('.swatch, .toggle-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.value == style[key]);
+                btn.addEventListener('click', () => {
+                    group.querySelectorAll('.swatch, .toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    style[key] = numeric ? parseInt(btn.dataset.value) : btn.dataset.value;
+                    apply();
+                });
+            });
+        };
+        wire('sub-fill', 'fill');
+        wire('sub-border', 'border');
+        wire('sub-bg', 'bg');
+        wire('sub-size', 'size', true);
+        wire('sub-font', 'font');
+
+        const bright = document.getElementById('sub-bright');
+        if (bright) {
+            bright.value = style.bright;
+            bright.addEventListener('input', (e) => {
+                style.bright = parseInt(e.target.value);
+                apply();
+            });
+        }
+        apply();
     }
 
     /**

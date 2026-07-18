@@ -57,6 +57,7 @@
     <!-- Player screen -->
     <div id="screen-player" class="screen">
         <video id="video-player" muted preload="auto"></video>
+        <div id="subtitle-overlay" class="subtitle-overlay"></div>
         <div id="player-loading" class="player-loading hidden">
             <div class="spinner"></div>
             <div id="player-loading-text">Loading...</div>
@@ -144,6 +145,49 @@
                 <h3>Audio Delay (BT headphones)</h3>
                 <label>Delay: <input type="range" id="setting-audio-delay" class="focusable" min="0" max="1000" step="25" value="0"></label>
                 <div class="setting-hint" id="hint-audio-delay">0 ms — increase until lips match what you hear</div>
+            </div>
+            <div class="setting-group">
+                <h3>Subtitle Style</h3>
+                <div class="sub-style-row"><span class="sub-style-label">Text</span>
+                    <div class="swatch-group" id="sub-fill">
+                        <button class="swatch focusable" data-value="#FFFFFF" style="background:#FFFFFF" aria-label="White"></button>
+                        <button class="swatch focusable" data-value="#E8E8E8" style="background:#E8E8E8" aria-label="Soft white"></button>
+                        <button class="swatch focusable" data-value="#FFFF00" style="background:#FFFF00" aria-label="Yellow"></button>
+                        <button class="swatch focusable" data-value="#00FFFF" style="background:#00FFFF" aria-label="Cyan"></button>
+                        <button class="swatch focusable" data-value="#00FF00" style="background:#00FF00" aria-label="Green"></button>
+                        <button class="swatch focusable" data-value="#000000" style="background:#000000" aria-label="Black"></button>
+                    </div></div>
+                <div class="sub-style-row"><span class="sub-style-label">Border</span>
+                    <div class="swatch-group" id="sub-border">
+                        <button class="swatch focusable" data-value="#000000" style="background:#000000" aria-label="Black"></button>
+                        <button class="swatch focusable" data-value="#FFFFFF" style="background:#FFFFFF" aria-label="White"></button>
+                        <button class="swatch focusable" data-value="#666666" style="background:#666666" aria-label="Gray"></button>
+                        <button class="swatch swatch-none focusable" data-value="none" aria-label="No border">∅</button>
+                    </div></div>
+                <div class="sub-style-row"><span class="sub-style-label">Background</span>
+                    <div class="swatch-group" id="sub-bg">
+                        <button class="swatch swatch-none focusable" data-value="transparent" aria-label="No background">∅</button>
+                        <button class="swatch focusable" data-value="rgba(0,0,0,0.55)" style="background:rgba(0,0,0,0.55)" aria-label="Dark translucent"></button>
+                        <button class="swatch focusable" data-value="#000000" style="background:#000000" aria-label="Black"></button>
+                        <button class="swatch focusable" data-value="rgba(90,90,90,0.5)" style="background:rgba(90,90,90,0.5)" aria-label="Gray translucent"></button>
+                    </div></div>
+                <div class="sub-style-row"><span class="sub-style-label">Size</span>
+                    <div class="toggle-group" id="sub-size">
+                        <button class="toggle-btn focusable" data-value="28">S</button>
+                        <button class="toggle-btn focusable" data-value="36">M</button>
+                        <button class="toggle-btn focusable" data-value="46">L</button>
+                        <button class="toggle-btn focusable" data-value="58">XL</button>
+                    </div></div>
+                <div class="sub-style-row"><span class="sub-style-label">Font</span>
+                    <div class="toggle-group" id="sub-font">
+                        <button class="toggle-btn focusable" data-value="sans-serif">Sans</button>
+                        <button class="toggle-btn focusable" data-value="serif">Serif</button>
+                        <button class="toggle-btn focusable" data-value="monospace">Mono</button>
+                    </div></div>
+                <div class="sub-style-row"><span class="sub-style-label">Brightness</span>
+                    <input type="range" id="sub-bright" class="focusable" min="40" max="100" value="100">
+                </div>
+                <div id="sub-preview" class="sub-preview"><span class="subtitle-line">Sample subtitle — Aa Bb 123</span></div>
             </div>
             <div class="setting-group">
                 <h3>HRTF Profile</h3>
