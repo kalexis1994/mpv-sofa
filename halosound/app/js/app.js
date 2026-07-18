@@ -261,6 +261,8 @@
 
         player.onPlaybackEnded = () => { if (visualizer) visualizer.stop(); showScreen('browser'); refreshFileList(); };
         player.onAudioInfo = (info) => settings.updateAudioInfo(info);
+        // HRTF profile / room changes restart the server-side render session
+        settings.onEngineParamsChanged = () => { if (player) player.restartHls(); };
 
         document.getElementById('mute-bed').addEventListener('change', (e) => audioEngine.setChannelMute('bed', e.target.checked));
         document.getElementById('mute-height').addEventListener('change', (e) => audioEngine.setChannelMute('height', e.target.checked));

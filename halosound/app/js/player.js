@@ -58,13 +58,107 @@ class HaloPlayer {
                 if (!this.playing && !this.currentFile) return;
                 const rect = progressBar.getBoundingClientRect();
                 const pct = (e.clientX - rect.left) / rect.width;
-                const time = pct * (this.video.duration || 0);
+                const total = (this.engineMode === 'hls' && this.movieDuration)
+                    ? this.movieDuration : (this.video.duration || 0);
+                const time = pct * total;
                 if (time >= 0) this.seek(time);
             });
         }
     }
 
     async play(file, selection = {}) {
+        this.engineMode = (() => {
+            try { return localStorage.getItem('mpvsofa.engine') || 'hls'; }
+            catch (e) { return 'hls'; }
+        })();
+        if (this.engineMode === 'hls') return this.playHls(file, selection);
+        return this.playWs(file, selection);
+    }
+
+    /*
+     * TV-NATIVE MODE: one HLS stream with server-side binaural rendering.
+     * The TV's own player handles A/V sync (including its internal audio
+     * pipeline and Bluetooth latency) — the whole two-clock problem class
+     * from the low-latency mode simply doesn't exist here.
+     */
+    async playHls(file, selection = {}) {
+        this.currentFile = file;
+        this.selection = selection;
+        this.movieDuration = selection.duration || 0;
+        this.playing = true;
+        this.videoStarted = false;
+        this.sessionBase = 0;
+        this.showLoading('Preparing stream...');
+        await this.startHlsSession(0);
+    }
+
+    hlsParams(t) {
+        const s = this.selection || {};
+        const params = new URLSearchParams();
+        params.set('audioTrack', s.audioTrack != null && s.audioTrack >= 0 ? s.audioTrack : 1);
+        params.set('channels', Math.min(8, s.audioChannels || 6));   // clean decode (no object extraction)
+        params.set('t', Math.max(0, t).toFixed(3));
+        try {
+            const sofa = localStorage.getItem('mpvsofa.hrtfProfile');
+            if (sofa) params.set('sofa', sofa);
+        } catch (e) {}
+        const roomSel = document.getElementById('setting-room');
+        if (roomSel) params.set('room', roomSel.value);
+        return params;
+    }
+
+    async startHlsSession(t) {
+        try {
+            const resp = await fetch(
+                `${this.connection.httpBase}/api/files/${this.currentFile.id}/hls?${this.hlsParams(t)}`);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const j = await resp.json();
+            this.sessionBase = j.base || 0;
+            this.video.muted = false;              // audio rides IN the stream
+            this.video.src = this.connection.httpBase + j.url;
+            // Some HLS players jump to the "live edge" of a growing EVENT
+            // playlist instead of starting at 0 — snap back once.
+            const snapBack = () => { if (this.video.currentTime > 1.5) this.video.currentTime = 0; };
+            this.video.addEventListener('loadedmetadata', snapBack, { once: true });
+            this.video.addEventListener('playing', snapBack, { once: true });
+            this.video.play().catch(() => {});
+            this.videoStarted = true;
+            this.attachSubsForSession();
+        } catch (e) {
+            console.error('HLS session failed:', e);
+            this.setDiag('HLS session failed: ' + e.message);
+            this.showLoading('Stream failed — see Settings > Diagnostics');
+            setTimeout(() => this.hideLoading(), 4000);
+        }
+    }
+
+    /* (Re)attach the selected subtitles shifted to the session timeline. */
+    attachSubsForSession() {
+        const sel = this.selection || {};
+        this.clearSubtitles();
+        if (sel.subtitlePgs != null) {
+            this.attachPgs(this.currentFile.id, sel.subtitlePgs);
+            if (this.pgsRenderer) this.pgsRenderer.timeOffset = this.sessionBase;
+        } else if (sel.subtitleExt) {
+            const url = sel.subtitleExt +
+                (sel.subtitleExt.includes('?') ? '&' : '?') + 'offset=' + this.sessionBase.toFixed(3);
+            this.addSubtitleUrl(url);
+        } else if (sel.subtitleTrack >= 0) {
+            this.addSubtitleUrl(
+                `${this.connection.httpBase}/api/files/${this.currentFile.id}` +
+                `/subtitles/${sel.subtitleTrack}?offset=${this.sessionBase.toFixed(3)}`);
+        }
+    }
+
+    /* Restart the session at the current position (profile/room changed). */
+    restartHls() {
+        if (this.engineMode !== 'hls' || !this.videoStarted) return;
+        const abs = this.sessionBase + this.video.currentTime;
+        this.showLoading('Applying audio settings...');
+        this.startHlsSession(abs);
+    }
+
+    async playWs(file, selection = {}) {
         this.currentFile = file;
         this.audioStartPts = -1;
         this.videoStarted = false;
@@ -462,6 +556,7 @@ class HaloPlayer {
      */
     seek(seconds) {
         if (!this.videoStarted) return;
+        if (this.engineMode === 'hls') return this.seekHls(seconds);
         this.suppressSync();
         this.showLoading('Buffering...');
         // Phase A: reposition the video and let it start playing (silently,
@@ -497,13 +592,43 @@ class HaloPlayer {
         this.connection.seekAudio(target);
     }
 
+    /* Seek within the HLS session natively when the target region is
+     * already transcoded; otherwise spin up a fresh session there. */
+    seekHls(absSeconds) {
+        const rel = absSeconds - this.sessionBase;
+        let within = false;
+        try {
+            const sk = this.video.seekable;
+            for (let i = 0; i < sk.length; i++) {
+                if (rel >= sk.start(i) && rel <= sk.end(i) - 0.5) { within = true; break; }
+            }
+        } catch (e) {}
+        if (rel >= 0 && within) {
+            this.video.currentTime = rel;          // native, TV keeps sync
+            return;
+        }
+        this.showLoading('Buffering...');
+        this.startHlsSession(Math.max(0, absSeconds));
+    }
+
+    /* Current position on the MOVIE timeline (abs), regardless of mode. */
+    absPosition() {
+        return (this.engineMode === 'hls' ? this.sessionBase : 0) + this.video.currentTime;
+    }
+
     seekRelative(delta) {
-        this.seek(Math.max(0, this.video.currentTime + delta));
+        this.seek(Math.max(0, this.absPosition() + delta));
     }
 
     stop() {
         clearTimeout(this.startTimeout);
         this.hideLoading();
+        if (this.engineMode === 'hls') {
+            // Tear down the server-side transcode session.
+            try { fetch(`${this.connection.httpBase}/api/hls/stop`); } catch (e) {}
+            this.video.muted = true;   // ws mode expects a muted element
+            this.sessionBase = 0;
+        }
         this.audioHold = false;
         this.audioStarved = false;
         this.starvedStats = 0;
@@ -585,8 +710,12 @@ class HaloPlayer {
     }
 
     onTimeUpdate() {
-        const current = this.video.currentTime;
-        const total = this.video.duration || 0;
+        // In HLS mode the element's timeline is session-relative and its
+        // duration only reflects what's been transcoded — display the
+        // MOVIE timeline instead.
+        const current = this.absPosition();
+        const total = (this.engineMode === 'hls' && this.movieDuration)
+            ? this.movieDuration : (this.video.duration || 0);
         document.getElementById('time-current').textContent = this.formatTime(current);
         document.getElementById('time-total').textContent = this.formatTime(total);
         if (total > 0) {

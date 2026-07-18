@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 const config = require('./config');
+const { createHlsManager } = require('./hls-session');
 
 /**
  * Create and configure the HTTP server.
@@ -255,11 +256,13 @@ function createHttpServer(files, options = {}) {
                 n === wanted && subExts.has(path.extname(n).toLowerCase()));
         } catch (e) { /* fallthrough */ }
         if (!match) return res.status(404).send('Subtitle not found');
+        const extOffset = Math.max(0, parseFloat(req.query.offset) || 0);
 
         res.set('Content-Type', 'text/vtt; charset=utf-8');
         res.set('Access-Control-Allow-Origin', '*');
 
         const ffmpeg = spawn(config.FFMPEG_PATH, [
+            ...(extOffset > 0 ? ['-ss', String(extOffset)] : []),
             '-i', path.join(dir, match),
             '-f', 'webvtt',
             '-'
@@ -271,6 +274,60 @@ function createHttpServer(files, options = {}) {
             if (!res.headersSent) res.status(500).send('Subtitle conversion failed');
         });
         req.on('close', () => { try { ffmpeg.kill('SIGTERM'); } catch (e) {} });
+    });
+
+    /*
+     * TV-native mode: HLS sessions with server-side binaural rendering.
+     * GET /api/files/:id/hls?audioTrack=N&channels=C&sofa=name&room=R&t=T
+     *   → { url, base } — url is the playlist, base the keyframe-aligned
+     *     session start in movie time (the client maps its UI timeline).
+     */
+    const hls = createHlsManager(options);
+
+    app.get('/api/files/:id/hls', async (req, res) => {
+        const file = files.find(f => f.id === parseInt(req.params.id));
+        if (!file) return res.status(404).json({ error: 'File not found' });
+
+        const audioStreamIndex = parseInt(req.query.audioTrack);
+        const channels = Math.min(16, Math.max(1, parseInt(req.query.channels) || 6));
+        const room = parseInt(req.query.room);
+        let sofaPath = null;
+        if (req.query.sofa) {
+            sofaPath = listHrtfProfiles().get(String(req.query.sofa)) || null;
+        }
+
+        try {
+            const session = await hls.startSession(file, {
+                audioStreamIndex: Number.isFinite(audioStreamIndex) ? audioStreamIndex : 1,
+                channels,
+                sofaPath,
+                room: Number.isFinite(room) ? room : 1,
+                t: req.query.t,
+            });
+            res.json({ url: `/hls/${session.id}/out.m3u8`, base: session.base });
+        } catch (e) {
+            res.status(500).json({ error: 'HLS session failed: ' + e.message });
+        }
+    });
+
+    app.get('/api/hls/stop', (req, res) => {
+        hls.stopAll();
+        res.json({ ok: true });
+    });
+
+    /* Serve session playlists/segments from the temp dir. */
+    app.get('/hls/:sid/:name', (req, res) => {
+        const sid = req.params.sid, name = req.params.name;
+        if (!/^[a-z0-9-]+$/.test(sid) || !/^[\w.-]+$/.test(name)) {
+            return res.status(400).send('bad path');
+        }
+        const p = path.join(os.tmpdir(), 'halosound-hls', sid, name);
+        if (!fs.existsSync(p)) return res.status(404).send('not found');
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Cache-Control', 'no-cache');
+        if (name.endsWith('.m3u8')) res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        else if (name.endsWith('.mp4') || name.endsWith('.m4s')) res.set('Content-Type', 'video/mp4');
+        res.sendFile(p);
     });
 
     /*
@@ -387,11 +444,15 @@ function createHttpServer(files, options = {}) {
         if (!file) return res.status(404).send('File not found');
 
         const streamIndex = parseInt(req.params.streamIndex);
+        /* offset: shift subtitle times so they match an HLS session whose
+         * timeline starts at `offset` seconds into the movie. */
+        const offset = Math.max(0, parseFloat(req.query.offset) || 0);
 
         res.set('Content-Type', 'text/vtt; charset=utf-8');
         res.set('Access-Control-Allow-Origin', '*');
 
         const ffmpeg = spawn(config.FFMPEG_PATH, [
+            ...(offset > 0 ? ['-ss', String(offset)] : []),
             '-i', file.path,
             '-map', `0:${streamIndex}`,
             '-f', 'webvtt',

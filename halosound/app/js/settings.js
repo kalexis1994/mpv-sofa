@@ -45,11 +45,31 @@ class HaloSettings {
             });
         }
 
+        // Playback engine (TV-native HLS vs low-latency WS+worklet)
+        const engGroup = document.getElementById('setting-engine');
+        if (engGroup) {
+            let engine = 'hls';
+            try { engine = localStorage.getItem('mpvsofa.engine') || 'hls'; } catch (e) {}
+            engGroup.querySelectorAll('.toggle-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.value === engine);
+                btn.addEventListener('click', () => {
+                    engGroup.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    try { localStorage.setItem('mpvsofa.engine', btn.dataset.value); } catch (e) {}
+                    const hint = document.getElementById('hint-engine');
+                    if (hint) hint.textContent = btn.dataset.value === 'hls'
+                        ? 'TV-native: server renders binaural audio into the stream — applies on next playback'
+                        : 'Low-latency: client-side rendering, instant profile switching — applies on next playback';
+                });
+            });
+        }
+
         // Room preset
         const roomSel = document.getElementById('setting-room');
         if (roomSel) roomSel.addEventListener('change', (e) => {
             this.roomPreset = parseInt(e.target.value);
             this.audioEngine.setRoomPreset(this.roomPreset);
+            if (this.onEngineParamsChanged) this.onEngineParamsChanged();
         });
 
         // Reverb sliders
@@ -183,6 +203,7 @@ class HaloSettings {
             console.log('HRTF profile loaded:', name || 'built-in');
             if (!skipPersist) {
                 try { localStorage.setItem('mpvsofa.hrtfProfile', name || ''); } catch (e) {}
+                if (this.onEngineParamsChanged) this.onEngineParamsChanged();
             }
         } catch (e) {
             console.warn('HRTF profile load failed, keeping current:', e);

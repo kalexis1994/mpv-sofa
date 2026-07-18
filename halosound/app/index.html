@@ -86,6 +86,14 @@
         </div>
         <div class="settings-panel">
             <div class="setting-group">
+                <h3>Playback Engine</h3>
+                <div class="toggle-group" id="setting-engine">
+                    <button class="toggle-btn focusable" data-value="hls">TV-native</button>
+                    <button class="toggle-btn focusable" data-value="ws">Low-latency</button>
+                </div>
+                <div class="setting-hint" id="hint-engine">TV-native: server renders binaural audio into the stream — perfect sync, BT-friendly</div>
+            </div>
+            <div class="setting-group">
                 <h3>Output Mode</h3>
                 <div class="toggle-group" id="setting-output-mode">
                     <button class="toggle-btn active focusable" data-value="headphones">Headphones</button>

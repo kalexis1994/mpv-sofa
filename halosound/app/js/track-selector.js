@@ -29,6 +29,7 @@ class TrackSelector {
         this.audioTracks = data.audioTracks || [];
         this.subtitleTracks = data.subtitleTracks || [];
         this.externalSubs = data.externalSubs || [];
+        this.duration = data.duration || 0;
         this.selectedSubtitleExt = null;
         this.selectedSubtitlePgs = -1;
 
@@ -184,9 +185,12 @@ class TrackSelector {
             this.selectedAudio = this.audioTracks[0].index;
         }
 
+        const selTrack = this.audioTracks.find(t => t.index === this.selectedAudio);
         if (this.onPlay) {
             this.onPlay({
                 audioTrack: this.selectedAudio,
+                audioChannels: selTrack ? selTrack.channels : 6,
+                duration: this.duration,
                 subtitleTrack: this.selectedSubtitle,
                 subtitleExt: this.selectedSubtitleExt
                     ? `${this.connection.httpBase}/api/files/${this.fileId}/extsub?name=${encodeURIComponent(this.selectedSubtitleExt)}`
