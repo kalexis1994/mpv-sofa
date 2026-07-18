@@ -360,6 +360,23 @@ html, body {
     position: relative;
 }
 
+/* Chapter boundaries on the timeline */
+.chapter-tick {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.55);
+    pointer-events: none;
+}
+
+.chapter-label {
+    font-size: 20px;
+    color: rgba(255, 255, 255, 0.75);
+    margin: 4px 0 8px;
+    min-height: 24px;
+}
+
 .progress-fill::after {
     content: '';
     position: absolute;
@@ -868,6 +885,7 @@ input[type="range"]::-moz-range-thumb {
     margin-top: 24px;
 }
 .player-controls.hidden { display: none; }
+.btn.hidden { display: none; }
 
 .pc-btn {
     width: 84px;

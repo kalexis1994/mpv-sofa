@@ -16,6 +16,11 @@ class TrackSelector {
         document.getElementById('btn-play-tracks').addEventListener('click', () => {
             this.confirmPlay();
         });
+        // "Resume": same selection, but playback starts at the saved
+        // position (this.resumeAt, set by app.js when a position exists).
+        this.resumeAt = 0;
+        const rbtn = document.getElementById('btn-resume-tracks');
+        if (rbtn) rbtn.addEventListener('click', () => this.confirmPlay(this.resumeAt));
     }
 
     async loadTracks(fileId) {
@@ -180,7 +185,7 @@ class TrackSelector {
         });
     }
 
-    confirmPlay() {
+    confirmPlay(startAt = 0) {
         if (this.selectedAudio === -1 && this.audioTracks.length > 0) {
             this.selectedAudio = this.audioTracks[0].index;
         }
@@ -188,6 +193,7 @@ class TrackSelector {
         const selTrack = this.audioTracks.find(t => t.index === this.selectedAudio);
         if (this.onPlay) {
             this.onPlay({
+                startAt,
                 audioTrack: this.selectedAudio,
                 audioChannels: selTrack ? selTrack.channels : 6,
                 duration: this.duration,

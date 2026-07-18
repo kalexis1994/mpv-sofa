@@ -128,19 +128,54 @@ function findAudioSyncBefore(filePath, absIndex, t, cb) {
     });
 }
 
-/* Average container bitrate (bps), cached on the file entry. */
-function probeBitrate(file, cb) {
-    if (file._bitrate !== undefined) return cb(file._bitrate);
+/* Average container bitrate (bps) + duration (s), cached on the file entry. */
+function probeFormat(file, cb) {
+    if (file._fmt) return cb(file._fmt);
     execFile(config.FFPROBE_PATH, [
         '-v', 'quiet',
-        '-show_entries', 'format=bit_rate',
+        '-show_entries', 'format=bit_rate,duration',
         '-print_format', 'json',
         file.path
     ], (err, stdout) => {
-        let b = 0;
-        if (!err) { try { b = parseInt(JSON.parse(stdout).format.bit_rate) || 0; } catch (e) {} }
-        file._bitrate = b;
-        cb(b);
+        let fmt = { bitrate: 0, duration: 0 };
+        if (!err) {
+            try {
+                const f = JSON.parse(stdout).format || {};
+                fmt.bitrate = parseInt(f.bit_rate) || 0;
+                fmt.duration = parseFloat(f.duration) || 0;
+            } catch (e) {}
+        }
+        file._fmt = fmt;
+        cb(fmt);
+    });
+}
+
+/* Average video keyframe interval (s) around `t` — determines the segment
+ * duration hls_time produces with -c:v copy (cuts on the first keyframe at
+ * or after each 2s boundary). Cached on the file entry. */
+function probeGopInterval(file, t, cb) {
+    if (file._gop) return cb(file._gop);
+    execFile(config.FFPROBE_PATH, [
+        '-v', 'quiet',
+        '-select_streams', 'v:0',
+        '-show_packets',
+        '-show_entries', 'packet=pts_time,flags',
+        '-read_intervals', `${Math.max(0, t)}%${Math.max(0, t) + 60}`,
+        '-print_format', 'json',
+        file.path
+    ], { maxBuffer: 64 * 1024 * 1024 }, (err, stdout) => {
+        let gop = 2.0;
+        if (!err) {
+            try {
+                const keys = (JSON.parse(stdout).packets || [])
+                    .filter(p => (p.flags || '').includes('K'))
+                    .map(p => parseFloat(p.pts_time))
+                    .sort((a, b) => a - b);
+                if (keys.length >= 3) gop = (keys[keys.length - 1] - keys[0]) / (keys.length - 1);
+            } catch (e) {}
+        }
+        file._gop = gop;
+        cb(gop);
     });
 }
 
@@ -186,6 +221,8 @@ class HlsSession {
         this.audioChannels = opts.audioChannels || 6;
         this.objectAudio = !!opts.objectAudio;            // Atmos objects via truehdd
         this.audioSync = opts.audioSync || 0;             // TrueHD major sync <= base
+        this.totalDuration = opts.totalDuration || 0;     // movie length (s)
+        this.segEstimate = opts.segEstimate || 0;         // projected segment dur (s)
         this.dir = path.join(os.tmpdir(), 'halosound-hls', this.id);
         this.procs = [];
         this.stopped = false;
@@ -400,15 +437,20 @@ function createHlsManager(options = {}) {
         // TrueHD Atmos + truehdd available → object-based binaural render
         const objectAudio = !passthrough && !!TRUEHDD_EXE &&
             audioInfo.codec === 'truehd' && audioInfo.atmos;
-        const bitrate = await new Promise(res => probeBitrate(file, res));
+        const fmt = await new Promise(res => probeFormat(file, res));
+        const bitrate = fmt.bitrate;
         const transcode = bitrate > copyCap(bw);
         if (transcode && options.verbose) {
             console.log(`[hls] ${path.basename(file.path)}: ${(bitrate / 1e6).toFixed(1)} Mbps ` +
                         `> ${(copyCap(bw) / 1e6).toFixed(0)} Mbps cap → NVENC re-encode`);
         }
-        // Even when re-encoding, both pipelines start at a source keyframe so
-        // audio (exact seek) and video (keyframe-snapped -ss) stay aligned.
-        const base = await new Promise(res => findKeyframeBefore(file.path, t, res));
+        // With -c:v copy the session can only start on a source keyframe
+        // (audio decodes exactly, video snaps — both start together at the
+        // keyframe). A re-encode decodes the video first, so it starts at
+        // the exact requested time: seeks land where the user asked.
+        const base = transcode
+            ? t
+            : await new Promise(res => findKeyframeBefore(file.path, t, res));
         // Object audio starts on a TrueHD major sync <= base; render trims
         // (base - sync) samples for exact alignment.
         const audioSync = objectAudio
@@ -429,6 +471,13 @@ function createHlsManager(options = {}) {
             audioChannels: audioInfo.channels,
             objectAudio,
             audioSync,
+            totalDuration: fmt.duration,
+            // Segment duration the muxer will actually produce: exact 2s
+            // GOPs when re-encoding, first-keyframe-after-2s with copy.
+            segEstimate: transcode ? 2.002 : await new Promise(res =>
+                probeGopInterval(file, t, gop => {
+                    res(Math.max(1, Math.ceil(2.002 / gop - 1e-6)) * gop);
+                })),
             verbose: options.verbose,
         });
         session.start();

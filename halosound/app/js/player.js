@@ -57,6 +57,14 @@ class HaloPlayer {
             // those events are teardown noise, not failures.
             if (!this.video.error) return;
             const err = this.video.error;
+            // The synthesized VOD playlist projects the segment tail, so the
+            // last projected segment can 404 — an "error" within the final
+            // seconds of the movie is just the end.
+            if (this.engineMode === 'hls' && this.movieDuration > 0 &&
+                this.absPosition() > this.movieDuration - 30) {
+                this.onEnded();
+                return;
+            }
             const msg = `media error ${err.code}: ${(err.message || '').slice(0, 80)}`;
             console.error('[video]', msg);
             this.setDiag(msg);
@@ -136,8 +144,76 @@ class HaloPlayer {
         this.playing = true;
         this.videoStarted = false;
         this.sessionBase = 0;
+        this.chapters = [];
+        this.loadChapters();   // async, ticks appear when it lands
         this.showLoading('Preparing stream...');
-        await this.startHlsSession(0);
+        await this.startHlsSession(Math.max(0, selection.startAt || 0));
+    }
+
+    /* ---- Chapters: ticks on the timeline + current chapter label ------- */
+
+    async loadChapters() {
+        try {
+            const r = await fetch(`${this.connection.httpBase}/api/files/${this.currentFile.id}/chapters`);
+            this.chapters = (await r.json()) || [];
+        } catch (e) { this.chapters = []; }
+        this.renderChapterTicks();
+    }
+
+    renderChapterTicks() {
+        const bar = document.getElementById('progress-bar');
+        if (!bar) return;
+        bar.querySelectorAll('.chapter-tick').forEach(el => el.remove());
+        const dur = this.movieDuration || 0;
+        if (!dur || !this.chapters || this.chapters.length < 2) return;
+        for (const ch of this.chapters) {
+            if (ch.start <= 0 || ch.start >= dur) continue;
+            const tick = document.createElement('div');
+            tick.className = 'chapter-tick';
+            tick.style.left = (ch.start / dur * 100) + '%';
+            bar.appendChild(tick);
+        }
+    }
+
+    currentChapter(t) {
+        if (!this.chapters || !this.chapters.length) return null;
+        let cur = null;
+        for (const ch of this.chapters) { if (ch.start <= t) cur = ch; else break; }
+        return cur;
+    }
+
+    /* ---- Resume: remember position per file (mpv's watch-later) -------- */
+
+    static RESUME_KEY = 'mpvsofa.resume';
+
+    getResumeFor(name) {
+        try {
+            const all = JSON.parse(localStorage.getItem(HaloPlayer.RESUME_KEY) || '{}');
+            return all[name] || null;
+        } catch (e) { return null; }
+    }
+
+    saveResume() {
+        if (!this.currentFile) return;
+        const t = this.absPosition();
+        const dur = this.movieDuration || this.video.duration || 0;
+        try {
+            const all = JSON.parse(localStorage.getItem(HaloPlayer.RESUME_KEY) || '{}');
+            const name = this.currentFile.name;
+            if (dur > 300 && t > 60 && t < dur * 0.95) {
+                all[name] = { t: Math.floor(t), ts: Date.now() };
+            } else if (dur > 0 && t >= dur * 0.95) {
+                delete all[name];   // finished — no stale resume offer
+            } else {
+                return;             // too early / unknown duration: keep as-is
+            }
+            const names = Object.keys(all);
+            if (names.length > 40) {
+                names.sort((a, b) => (all[a].ts || 0) - (all[b].ts || 0));
+                for (const n of names.slice(0, names.length - 40)) delete all[n];
+            }
+            localStorage.setItem(HaloPlayer.RESUME_KEY, JSON.stringify(all));
+        } catch (e) {}
     }
 
     hlsParams(t) {
@@ -187,22 +263,7 @@ class HaloPlayer {
             }
             const j = await resp.json();
             this.sessionBase = j.base || 0;
-            this.video.muted = false;              // audio rides IN the stream
-            this.video.src = this.connection.httpBase + j.url;
-            // The HLS player may jump to the "live edge" of the growing
-            // EVENT playlist instead of starting at 0.  Snap back ONLY once
-            // playback is actually rolling (playing + readyState>=3): seeking
-            // the element any earlier re-triggers the webOS pipeline freeze.
-            const v = this.video;
-            const snap = () => {
-                if (this.video === v && v.currentTime > 4 && v.readyState >= 3) {
-                    v.currentTime = 0;
-                }
-            };
-            v.addEventListener('playing', () => { snap(); setTimeout(snap, 1500); }, { once: true });
-            this.video.play().catch(() => {});
-            this.videoStarted = true;
-            this.attachSubsForSession();
+            this.attachHls(this.connection.httpBase + j.url);
         } catch (e) {
             console.error('HLS session failed:', e);
             const msg = e.name === 'AbortError' ? 'server not responding' : e.message;
@@ -215,6 +276,55 @@ class HaloPlayer {
                 if (this.onServerLost) this.onServerLost();
             }
         }
+    }
+
+    /*
+     * Attach a session playlist to a fresh element and start playback.
+     * Self-heals the webOS pipeline wedge: occasionally even a fresh
+     * pipeline freezes (readyState pinned below 3 with seconds of data
+     * buffered, currentTime stuck, no error). The same session plays fine
+     * on another fresh element, so detect the signature and retry.
+     */
+    attachHls(url, attempt = 0) {
+        this.recreateVideoElement();
+        this.video.muted = false;              // audio rides IN the stream
+        this.video.src = url;
+        // The HLS player may jump to the "live edge" of the growing
+        // EVENT playlist instead of starting at 0.  Snap back ONLY once
+        // playback is actually rolling (playing + readyState>=3): seeking
+        // the element any earlier re-triggers the webOS pipeline freeze.
+        const v = this.video;
+        const snap = () => {
+            if (this.video === v && v.currentTime > 4 && v.readyState >= 3) {
+                v.currentTime = 0;
+            }
+        };
+        v.addEventListener('playing', () => { snap(); setTimeout(snap, 1500); }, { once: true });
+        v.play().catch(() => {});
+        this.videoStarted = true;
+        this.attachSubsForSession();
+
+        clearInterval(this.wedgeTimer);
+        let stuck = 0, lastVt = -1;
+        this.wedgeTimer = setInterval(() => {
+            if (this.video !== v || !this.playing) { clearInterval(this.wedgeTimer); return; }
+            const vt = v.currentTime;
+            if (vt > 0 && vt !== lastVt) { clearInterval(this.wedgeTimer); return; }  // rolling
+            lastVt = vt;
+            const buf = v.buffered.length ? v.buffered.end(v.buffered.length - 1) - v.buffered.start(0) : 0;
+            if (v.readyState < 3 && buf > 4) stuck++; else stuck = 0;
+            if (stuck >= 3) {                  // ~6s frozen with data available
+                clearInterval(this.wedgeTimer);
+                if (attempt < 2) {
+                    console.warn('[player] webOS pipeline wedge — retrying on a fresh element (' + (attempt + 1) + ')');
+                    this.setDiag('pipeline wedge, retry ' + (attempt + 1));
+                    this.attachHls(url, attempt + 1);
+                } else {
+                    this.setDiag('pipeline wedge: retries exhausted');
+                    this.showLoading('TV media pipeline is stuck — if this repeats, restart the TV');
+                }
+            }
+        }, 2000);
     }
 
     /* (Re)attach the selected subtitles shifted to the session timeline. */
@@ -707,6 +817,8 @@ class HaloPlayer {
 
     stop() {
         clearTimeout(this.startTimeout);
+        clearInterval(this.wedgeTimer);
+        this.saveResume();
         this.hideLoading();
         if (this.engineMode === 'hls') {
             // Tear down the server-side transcode session.
@@ -806,6 +918,19 @@ class HaloPlayer {
         if (total > 0) {
             const pct = (current / total) * 100;
             document.getElementById('progress-fill').style.width = pct + '%';
+        }
+
+        const chEl = document.getElementById('chapter-label');
+        if (chEl) {
+            const ch = this.currentChapter(current);
+            chEl.textContent = ch ? (ch.title || '') : '';
+        }
+
+        // Persist position every ~5s so "Resume" works after closing.
+        const now = Date.now();
+        if (!this._lastResumeSave || now - this._lastResumeSave > 5000) {
+            this._lastResumeSave = now;
+            this.saveResume();
         }
     }
 

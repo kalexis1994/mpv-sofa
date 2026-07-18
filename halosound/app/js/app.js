@@ -300,7 +300,21 @@
         pendingFile = file;
         showScreen('tracks');
         await trackSelector.loadTracks(file.id);
-        focus.refresh('#btn-play-tracks');
+
+        // Offer "Resume" when we have a saved position for this file.
+        const saved = player ? player.getResumeFor(file.name) : null;
+        const rbtn = document.getElementById('btn-resume-tracks');
+        if (rbtn) {
+            if (saved) {
+                trackSelector.resumeAt = saved.t;
+                rbtn.textContent = '⏵ Resume ' + player.formatTime(saved.t);
+                rbtn.classList.remove('hidden');
+            } else {
+                trackSelector.resumeAt = 0;
+                rbtn.classList.add('hidden');
+            }
+        }
+        focus.refresh(saved ? '#btn-resume-tracks' : '#btn-play-tracks');
     }
 
     async function startPlayback(file, selection) {

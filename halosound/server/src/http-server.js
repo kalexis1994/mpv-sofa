@@ -379,23 +379,113 @@ function createHttpServer(files, options = {}) {
         }
     });
 
+    /* Container chapters (mkv): [{start, end, title}], cached per file. */
+    app.get('/api/files/:id/chapters', (req, res) => {
+        const file = files.find(f => f.id === parseInt(req.params.id));
+        if (!file) return res.status(404).json({ error: 'File not found' });
+        if (file._chapters) return res.json(file._chapters);
+        execFile(config.FFPROBE_PATH, [
+            '-v', 'quiet',
+            '-show_chapters',
+            '-print_format', 'json',
+            file.path
+        ], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+            let chapters = [];
+            if (!err) {
+                try {
+                    chapters = (JSON.parse(stdout).chapters || []).map(c => ({
+                        start: parseFloat(c.start_time) || 0,
+                        end: parseFloat(c.end_time) || 0,
+                        title: (c.tags && c.tags.title) || '',
+                    }));
+                } catch (e) {}
+            }
+            file._chapters = chapters;
+            res.json(chapters);
+        });
+    });
+
     app.get('/api/hls/stop', (req, res) => {
         hls.stopAll();
         res.json({ ok: true });
     });
 
-    /* Serve session playlists/segments from the temp dir. */
-    app.get('/hls/:sid/:name', (req, res) => {
+    /*
+     * Serve session playlists/segments from the temp dir.
+     *
+     * webOS treats any playlist without EXT-X-ENDLIST as LIVE and starts
+     * near the growing edge (it ignores both EXT-X-PLAYLIST-TYPE:EVENT and
+     * EXT-X-START — verified on the B5). So the TV never sees the growing
+     * playlist: while the transcode runs we synthesize a COMPLETE VOD view
+     * (real segments so far + projected tail + ENDLIST) and the segment
+     * endpoint blocks until the transcode commits each requested segment.
+     */
+    const sessionPlaylist = (sid) => {
+        try {
+            return fs.readFileSync(path.join(os.tmpdir(), 'halosound-hls', sid, 'out.m3u8'), 'utf8');
+        } catch (e) { return null; }
+    };
+
+    app.get('/hls/:sid/:name', async (req, res) => {
         const sid = req.params.sid, name = req.params.name;
         if (!/^[a-z0-9-]+$/.test(sid) || !/^[\w.-]+$/.test(name)) {
             return res.status(400).send('bad path');
         }
         const p = path.join(os.tmpdir(), 'halosound-hls', sid, name);
-        if (!fs.existsSync(p)) return res.status(404).send('not found');
         res.set('Access-Control-Allow-Origin', '*');
         res.set('Cache-Control', 'no-cache');
-        if (name.endsWith('.m3u8')) res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        else if (name.endsWith('.mp4') || name.endsWith('.m4s')) res.set('Content-Type', 'video/mp4');
+
+        if (name.endsWith('.m3u8')) {
+            let text = sessionPlaylist(sid);
+            if (text == null) return res.status(404).send('not found');
+            res.set('Content-Type', 'application/vnd.apple.mpegurl');
+            const active = hls.getActive();
+            if (!text.includes('#EXT-X-ENDLIST') && active && active.id === sid && active.totalDuration > 0) {
+                const durs = [];
+                let lastIdx = -1;
+                for (const line of text.split('\n')) {
+                    const d = line.match(/^#EXTINF:([\d.]+)/);
+                    if (d) durs.push(parseFloat(d[1]));
+                    const s = line.match(/^out(\d+)\.m4s/);
+                    if (s) lastIdx = Math.max(lastIdx, parseInt(s[1]));
+                }
+                const done = durs.reduce((a, b) => a + b, 0);
+                const avg = active.segEstimate ||
+                            (durs.length ? done / durs.length : 2.0);
+                const remaining = Math.max(0, active.totalDuration - active.base - done);
+                // Undershoot by one segment: ending a hair early beats the
+                // TV requesting a segment that will never exist.
+                const extra = Math.max(0, Math.floor(remaining / avg) - 1);
+                let tail = '';
+                for (let k = 1; k <= extra; k++) {
+                    tail += `#EXTINF:${avg.toFixed(6)},\nout${lastIdx + k}.m4s\n`;
+                }
+                text = text.trimEnd() + '\n' + tail + '\n#EXT-X-ENDLIST\n';
+            }
+            return res.send(text);
+        }
+
+        if (/^out\d+\.m4s$/.test(name)) {
+            // Committed = listed in the real playlist (ffmpeg appends the
+            // entry only after the segment file is complete on disk).
+            const segRe = new RegExp('^' + name.replace(/\./g, '\\.') + '\\r?$', 'm');
+            const committed = (t) => t != null && segRe.test(t);
+            if (!committed(sessionPlaylist(sid))) {
+                const deadline = Date.now() + 90000;
+                for (;;) {
+                    const active = hls.getActive();
+                    if (!active || active.id !== sid) return res.status(404).send('gone');
+                    const t = sessionPlaylist(sid);
+                    if (t == null) return res.status(404).send('gone');
+                    if (committed(t)) break;
+                    if (t.includes('#EXT-X-ENDLIST')) return res.status(404).send('past end');
+                    if (Date.now() > deadline) return res.status(404).send('timeout');
+                    await new Promise(r => setTimeout(r, 250));
+                }
+            }
+        }
+        if (!fs.existsSync(p)) return res.status(404).send('not found');
+        if (name.endsWith('.mp4') || name.endsWith('.m4s')) res.set('Content-Type', 'video/mp4');
         res.sendFile(p);
     });
 
