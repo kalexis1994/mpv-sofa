@@ -418,6 +418,39 @@ html, body {
     text-align: center;
 }
 
+/* ---- In-player track picker (audio / subtitles) ---- */
+.track-picker {
+    position: absolute;
+    inset: 0;
+    display: none;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.35);
+}
+.track-picker.visible { display: flex; justify-content: flex-end; }
+.track-picker-panel {
+    width: 460px;
+    max-height: 100%;
+    overflow-y: auto;
+    background: rgba(16, 16, 28, 0.97);
+    padding: 28px 24px;
+}
+.track-picker-title {
+    font-size: 30px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+}
+.picker-item {
+    padding: 14px 18px;
+    border-radius: 8px;
+    font-size: 26px;
+    color: #fff;
+    margin-bottom: 6px;
+    cursor: pointer;
+}
+.picker-item.selected { color: var(--accent); font-weight: 700; }
+.picker-item.selected::after { content: ' ✓'; }
+.pc-btn.pc-text { font-size: 22px; font-weight: 800; letter-spacing: 1px; }
+
 /* Chapter boundaries on the timeline */
 .chapter-tick {
     position: absolute;

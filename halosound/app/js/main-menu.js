@@ -36,7 +36,7 @@ class MainMenu {
         const items = [
             ctx.playing ? { id: 'resume',   label: 'Resume playback', icon: '▶' } : null,
             { id: 'library',  label: 'Library',          icon: '▤' },
-            { id: 'settings', label: 'Audio & HRTF',     icon: '♪' },
+            { id: 'settings', label: 'Settings',         icon: '⚙' },
             { id: 'server',   label: 'Change server',    icon: '⇄' },
             { id: 'exit',     label: 'Exit app',         icon: '⏻' },
         ].filter(Boolean);

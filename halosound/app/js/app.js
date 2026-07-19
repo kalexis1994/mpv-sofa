@@ -17,6 +17,7 @@
     let overlayTimer = null;
     let overlayLevel = 0;        // 0 hidden · 1 timeline · 2 controls
     let pausedByMenu = false;    // playback frozen because the menu is up
+    let trackPickerOpen = false; // in-player audio/subtitle picker
 
     // ---- Screen / focus management ---------------------------------------
 
@@ -83,7 +84,79 @@
         if (b && player) b.textContent = player.playing ? '⏸' : '▶';
     }
 
+    // ---- In-player track picker: change audio/subs without leaving -------
+
+    function openTrackPicker(kind) {
+        if (!player || !player.currentFile || !trackSelector) return;
+        const list = document.getElementById('track-picker-list');
+        document.getElementById('track-picker-title').textContent =
+            kind === 'audio' ? 'Audio track' : 'Subtitles';
+        list.innerHTML = '';
+        const sel = player.selection || {};
+        const addItem = (label, selected, fn) => {
+            const el = document.createElement('div');
+            el.className = 'picker-item focusable' + (selected ? ' selected' : '');
+            el.textContent = label;
+            el.addEventListener('click', () => { closeTrackPicker(); fn(); });
+            list.appendChild(el);
+        };
+
+        if (kind === 'audio') {
+            for (const t of trackSelector.audioTracks) {
+                const label = `${t.codecLabel} ${t.channels}ch ${t.languageName || ''}`.trim();
+                addItem(label, t.index === sel.audioTrack, () => {
+                    if (t.index === sel.audioTrack) return;
+                    sel.audioTrack = t.index;
+                    sel.audioChannels = t.channels;
+                    player.restartHls();   // new render session, same position
+                });
+            }
+        } else {
+            const noSub = sel.subtitleTrack < 0 && !sel.subtitleExt && sel.subtitlePgs == null;
+            addItem('None', noSub, () => {
+                sel.subtitleTrack = -1; sel.subtitleExt = null; sel.subtitlePgs = null;
+                player.attachSubsForSession();
+            });
+            for (const t of trackSelector.subtitleTracks) {
+                const label = `${t.languageName || t.codecLabel}` +
+                              `${t.isForced ? ' · Forced' : ''}${t.isTextBased ? '' : ' · Image'}` +
+                              (t.title ? ` · ${t.title}` : '');
+                const isSel = t.isTextBased ? sel.subtitleTrack === t.index
+                                            : sel.subtitlePgs === t.index;
+                addItem(label, isSel, () => {
+                    sel.subtitleExt = null;
+                    if (t.isTextBased) { sel.subtitleTrack = t.index; sel.subtitlePgs = null; }
+                    else               { sel.subtitleTrack = -1; sel.subtitlePgs = t.index; }
+                    player.attachSubsForSession();
+                });
+            }
+            for (const s of trackSelector.externalSubs) {
+                const url = `${connection.httpBase}/api/files/${player.currentFile.id}` +
+                            `/extsub?name=${encodeURIComponent(s.name)}`;
+                addItem(`External · ${s.name}`, sel.subtitleExt === url, () => {
+                    sel.subtitleTrack = -1; sel.subtitlePgs = null;
+                    sel.subtitleExt = url;
+                    player.attachSubsForSession();
+                });
+            }
+        }
+
+        document.getElementById('track-picker').classList.add('visible');
+        trackPickerOpen = true;
+        clearTimeout(overlayTimer);   // keep the control bar up underneath
+        focus.pushScope(document.getElementById('track-picker'), '.picker-item.selected');
+    }
+
+    function closeTrackPicker() {
+        if (!trackPickerOpen) return;
+        document.getElementById('track-picker').classList.remove('visible');
+        trackPickerOpen = false;
+        focus.popScope();
+        resetOverlayTimer();
+    }
+
     function playerNav(dir) {
+        if (trackPickerOpen) return false;   // focus engine drives the picker
         if (menu.isOpen() || !player) return false;
         if (dir === 'down') { setOverlay(overlayLevel + 1); return true; }
         if (dir === 'up')   { setOverlay(overlayLevel - 1); return true; }
@@ -94,6 +167,7 @@
     }
 
     function playerOk() {
+        if (trackPickerOpen) return false;   // engine activates picker item
         if (menu.isOpen() || !player) return false;
         if (overlayLevel >= 2) return false;   // engine activates focused button
         player.togglePlayPause();
@@ -106,6 +180,7 @@
 
     function handleBack() {
         if (focus.editing) { focus.exitEdit(); return; }
+        if (trackPickerOpen) { closeTrackPicker(); return; }
         if (menu.isOpen()) {
             menu.hide();
             // Closing the menu back onto a paused video resumes it.
@@ -209,6 +284,8 @@
         document.getElementById('pc-rew').addEventListener('click', () => { if (player) { player.seekRelative(-10); bumpOverlay(); } });
         document.getElementById('pc-fwd').addEventListener('click', () => { if (player) { player.seekRelative(10); bumpOverlay(); } });
         document.getElementById('pc-playpause').addEventListener('click', () => { if (player) { player.togglePlayPause(); updatePlayPauseIcon(); bumpOverlay(); } });
+        document.getElementById('pc-audio').addEventListener('click', () => openTrackPicker('audio'));
+        document.getElementById('pc-subs').addEventListener('click', () => openTrackPicker('subs'));
 
         const origin = detectServerOrigin();
         if (origin) {

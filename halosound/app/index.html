@@ -77,15 +77,23 @@
                 <button id="pc-rew" class="pc-btn focusable" aria-label="Back 10 seconds">⏪</button>
                 <button id="pc-playpause" class="pc-btn pc-primary focusable" aria-label="Play or pause">⏸</button>
                 <button id="pc-fwd" class="pc-btn focusable" aria-label="Forward 10 seconds">⏩</button>
+                <button id="pc-audio" class="pc-btn focusable" aria-label="Audio track">♪</button>
+                <button id="pc-subs" class="pc-btn pc-text focusable" aria-label="Subtitles">CC</button>
             </div>
             <div class="player-hint">▼ controls · ◀ ▶ seek · OK play/pause · Back menu</div>
+        </div>
+        <div id="track-picker" class="track-picker">
+            <div class="track-picker-panel">
+                <div id="track-picker-title" class="track-picker-title">Audio</div>
+                <div id="track-picker-list" class="track-picker-list"></div>
+            </div>
         </div>
     </div>
 
     <!-- Settings screen -->
     <div id="screen-settings" class="screen">
         <div class="header">
-            <span class="title">Audio &amp; HRTF</span>
+            <span class="title">Settings</span>
             <button id="btn-back-settings" class="btn-icon focusable">Back</button>
         </div>
         <div class="settings-panel">
