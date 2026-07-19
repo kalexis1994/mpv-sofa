@@ -84,10 +84,24 @@ class HaloPlayer {
         this.video.addEventListener('waiting', () => {
             if (!this.videoStarted || this.audioStarved || this.pendingVideoSeek) return;
             this.videoStalls = (this.videoStalls || 0) + 1;
+            if (this.engineMode === 'hls') {
+                // Heavy streams fire sub-500ms 'waiting' blips at segment
+                // boundaries; flashing the buffering overlay for those makes
+                // smooth playback FEEL stuttery. Only surface it if the
+                // stall actually persists.
+                clearTimeout(this._bufTimer);
+                this._bufTimer = setTimeout(() => {
+                    if (this.playing && this.video.readyState < 3) {
+                        this.showLoading('Buffering...');
+                    }
+                }, 700);
+                return;
+            }
             this.showLoading('Buffering...');
             this.holdAudio(true);
         });
         this.video.addEventListener('playing', () => {
+            clearTimeout(this._bufTimer);
             // Phase A of a seek just revealed real playback: give the
             // pipeline a moment to settle on its true (keyframe-snapped)
             // position, then chase it with the audio (phase B).
@@ -841,6 +855,7 @@ class HaloPlayer {
 
     stop() {
         clearTimeout(this.startTimeout);
+        clearTimeout(this._bufTimer);
         clearInterval(this.wedgeTimer);
         this.saveResume();
         this.hideLoading();
