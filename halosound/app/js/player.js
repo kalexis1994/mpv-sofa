@@ -246,6 +246,9 @@ class HaloPlayer {
     }
 
     async startHlsSession(t) {
+        // Rapid seek bursts fire several session requests; only the newest
+        // may attach (the server also supersedes older ones).
+        const seq = (this._seekSeq = (this._seekSeq || 0) + 1);
         // Fresh element per session: detaches the dying playlist (whose
         // session the server kills the moment we request a new one) AND
         // dodges the webOS pipeline-reuse freeze.
@@ -267,9 +270,11 @@ class HaloPlayer {
                 throw new Error(detail);
             }
             const j = await resp.json();
+            if (seq !== this._seekSeq) return;      // a newer seek superseded us
             this.sessionBase = j.base || 0;
             this.attachHls(this.connection.httpBase + j.url);
         } catch (e) {
+            if (seq !== this._seekSeq) return;
             console.error('HLS session failed:', e);
             const msg = e.name === 'AbortError' ? 'server not responding' : e.message;
             this.setDiag('HLS session failed: ' + msg);
@@ -803,30 +808,23 @@ class HaloPlayer {
 
     /* Seek within the HLS session natively when the target region is
      * already transcoded; otherwise spin up a fresh session there. */
-    async seekHls(absSeconds) {
+    seekHls(absSeconds) {
         const rel = absSeconds - this.sessionBase;
+        // Native seeks only within what the element has BUFFERED: webOS's
+        // HLS pipeline can freeze mid-playback when told to jump to a far
+        // unbuffered position (readyState pins at 2, no error, forever —
+        // reproduced live). A fresh session takes ~3s and always works, so
+        // everything outside the buffer goes that way.
         let within = false;
         try {
-            const sk = this.video.seekable;
-            for (let i = 0; i < sk.length; i++) {
-                if (rel >= sk.start(i) && rel <= sk.end(i) - 0.5) { within = true; break; }
+            const b = this.video.buffered;
+            for (let i = 0; i < b.length; i++) {
+                if (rel >= b.start(i) && rel <= b.end(i) - 1.5) { within = true; break; }
             }
         } catch (e) {}
         if (rel >= 0 && within) {
-            // The synthetic VOD playlist makes the WHOLE movie seekable, but
-            // only content the transcode has produced plays now — seeking
-            // past the head would hang on the blocking segment endpoint for
-            // however long the transcode takes to get there. Ask the server.
-            let head = 0;
-            try {
-                const r = await fetch(`${this.connection.httpBase}/api/hls/status`);
-                const j = await r.json();
-                if (j && j.id) head = (j.base || 0) + (j.produced || 0);
-            } catch (e) {}
-            if (absSeconds <= head - 4) {
-                this.video.currentTime = rel;      // native, TV keeps sync
-                return;
-            }
+            this.video.currentTime = rel;          // instant, TV keeps sync
+            return;
         }
         this.showLoading('Buffering...');
         this.startHlsSession(Math.max(0, absSeconds));
