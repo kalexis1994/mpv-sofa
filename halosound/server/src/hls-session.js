@@ -179,29 +179,44 @@ function probeGopInterval(file, t, cb) {
     });
 }
 
-/* Find the last video keyframe at or before `t` (seconds). Reads only the
- * ~30s packet window before t, so it's fast even on 60GB files. */
-function findKeyframeBefore(filePath, t, cb) {
+/*
+ * Where ffmpeg's `-ss t` + video copy ACTUALLY starts. mkv seeking resolves
+ * by DTS with slack, so seeking to a keyframe's own pts usually lands one
+ * keyframe EARLY — computing the start from keyframe timestamps desyncs
+ * A/V (the muxer collapses both streams to a common origin, so video that
+ * starts early makes the sample-exact audio audibly AHEAD). A one-packet
+ * probe with -copyts reveals the true landing; the session then uses `t`
+ * for -ss and the landing as its timeline base for everything else.
+ */
+function probeSeekLanding(filePath, t, cb) {
     if (t <= 0.5) return cb(0);
-    const from = Math.max(0, t - 30);
-    execFile(config.FFPROBE_PATH, [
-        '-v', 'quiet',
-        '-select_streams', 'v:0',
-        '-show_packets',
-        '-show_entries', 'packet=pts_time,flags',
-        '-read_intervals', `${from}%${t + 0.5}`,
-        '-print_format', 'json',
-        filePath
-    ], { maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-        if (err) return cb(Math.max(0, t - 10));   // fallback: generous rewind
-        try {
-            const pkts = (JSON.parse(stdout).packets || [])
-                .filter(p => (p.flags || '').includes('K') && parseFloat(p.pts_time) <= t)
-                .map(p => parseFloat(p.pts_time));
-            cb(pkts.length ? Math.max(...pkts) : Math.max(0, t - 10));
-        } catch (e) {
-            cb(Math.max(0, t - 10));
-        }
+    const tmp = path.join(os.tmpdir(),
+        `halosound-seek-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}.mkv`);
+    const fallback = () => { fs.rm(tmp, { force: true }, () => {}); cb(Math.max(0, t - 10)); };
+    execFile(config.FFMPEG_PATH, [
+        '-v', 'error', '-y',
+        '-ss', String(t),
+        '-i', filePath,
+        '-map', '0:v:0', '-c', 'copy', '-copyts',
+        '-frames:v', '1',
+        '-f', 'matroska', tmp
+    ], (err) => {
+        if (err) return fallback();
+        execFile(config.FFPROBE_PATH, [
+            '-v', 'quiet',
+            '-show_packets',
+            '-show_entries', 'packet=pts_time,dts_time',
+            '-print_format', 'json',
+            tmp
+        ], (e2, stdout) => {
+            if (e2) return fallback();
+            try {
+                const p = (JSON.parse(stdout).packets || [])[0] || {};
+                const ts = parseFloat(p.pts_time != null ? p.pts_time : p.dts_time);
+                fs.rm(tmp, { force: true }, () => {});
+                cb(Number.isFinite(ts) ? Math.max(0, ts) : Math.max(0, t - 10));
+            } catch (e) { fallback(); }
+        });
     });
 }
 
@@ -213,7 +228,8 @@ class HlsSession {
         this.channels = opts.channels;
         this.sofaPath = opts.sofaPath;
         this.room = opts.room;
-        this.base = opts.base;                            // keyframe-aligned start (s)
+        this.base = opts.base;                            // actual session start (s)
+        this.seekTarget = opts.seekTarget || opts.base;   // -ss value that lands at base
         this.transcode = !!opts.transcode;                // re-encode video (NVENC)
         this.bw = opts.bw || 0;                           // client-measured link (bps)
         this.passthrough = !!opts.passthrough;            // original audio, TV decodes
@@ -235,7 +251,13 @@ class HlsSession {
     start() {
         fs.mkdirSync(this.dir, { recursive: true });
 
-        const ssArgs = this.base > 0 ? ['-ss', String(this.base)] : [];
+        // Copy sessions: -ss uses the ORIGINAL requested time — its actual
+        // landing (probed) is this.base, where the decoded audio seeks
+        // sample-exactly. Transcode sessions decode video too: exact both.
+        const ssTarget = this.transcode ? this.base : this.seekTarget;
+        const ssArgs = this.base > 0 ? ['-ss', String(ssTarget)] : [];
+        // Decoded audio trims sample-exact, so it seeks to `base` proper.
+        const ssArgsExact = this.base > 0 ? ['-ss', String(this.base)] : [];
         const videoArgs = [
             '-map', '0:v:0',
             ...(this.transcode ? nvencArgs(this.bw).args : ['-c:v', 'copy']),
@@ -334,7 +356,7 @@ class HlsSession {
             // 1) audio: decode selected track to multichannel f32
             const ffA = spawn(config.FFMPEG_PATH, [
                 '-v', 'error',
-                ...ssArgs,
+                ...ssArgsExact,
                 '-i', this.file.path,
                 '-map', `0:${this.audioStreamIndex}`,
                 '-vn',
@@ -454,13 +476,13 @@ function createHlsManager(options = {}) {
             console.log(`[hls] ${path.basename(file.path)}: ${(bitrate / 1e6).toFixed(1)} Mbps ` +
                         `> ${(copyCap(bw) / 1e6).toFixed(0)} Mbps cap → NVENC re-encode`);
         }
-        // With -c:v copy the session can only start on a source keyframe
-        // (audio decodes exactly, video snaps — both start together at the
-        // keyframe). A re-encode decodes the video first, so it starts at
-        // the exact requested time: seeks land where the user asked.
+        // With -c:v copy the session starts wherever ffmpeg's seek actually
+        // lands (probed — see probeSeekLanding); audio decodes exactly at
+        // that point so both streams start together. A re-encode decodes the
+        // video too, so it starts at the exact requested time.
         const base = transcode
             ? t
-            : await new Promise(res => findKeyframeBefore(file.path, t, res));
+            : await new Promise(res => probeSeekLanding(file.path, t, res));
         // Object audio starts on a TrueHD major sync <= base; render trims
         // (base - sync) samples for exact alignment.
         const audioSync = objectAudio
@@ -474,6 +496,7 @@ function createHlsManager(options = {}) {
             sofaPath: opts.sofaPath || DEFAULT_SOFA,
             room: Number.isFinite(opts.room) ? opts.room : 1,
             base,
+            seekTarget: t,
             transcode,
             bw,
             passthrough,
