@@ -223,6 +223,7 @@ class HlsSession {
         this.audioSync = opts.audioSync || 0;             // TrueHD major sync <= base
         this.totalDuration = opts.totalDuration || 0;     // movie length (s)
         this.segEstimate = opts.segEstimate || 0;         // projected segment dur (s)
+        this.audioDelay = opts.audioDelay || 0;           // shift audio later (s)
         this.dir = path.join(os.tmpdir(), 'halosound-hls', this.id);
         this.procs = [];
         this.stopped = false;
@@ -259,7 +260,12 @@ class HlsSession {
             // Original audio, single process — the TV decodes it itself.
             // E-AC-3/AC-3 ride fMP4 untouched (Atmos JOC metadata survives);
             // TrueHD/DTS can't be carried in fMP4, so they become DD+ 5.1.
-            const copyOk = this.audioCodec === 'eac3' || this.audioCodec === 'ac3';
+            // Audio delay pads real silence (adelay) — that requires the
+            // decode path, so a delayed session re-encodes to DD+ even for
+            // E-AC-3 sources (Atmos JOC is lost while a delay is set).
+            const copyOk = (this.audioCodec === 'eac3' || this.audioCodec === 'ac3') &&
+                           this.audioDelay <= 0;
+            const delayMs = Math.round(this.audioDelay * 1000);
             const ffM = spawn(config.FFMPEG_PATH, [
                 '-v', 'error', '-y',
                 ...(this.transcode ? ['-hwaccel', 'cuda'] : []),
@@ -269,7 +275,8 @@ class HlsSession {
                 '-map', `0:${this.audioStreamIndex}`,
                 ...(copyOk ? ['-c:a', 'copy']
                            : ['-c:a', 'eac3', '-b:a', '640k',
-                              ...(this.audioChannels > 6 ? ['-ac', '6'] : [])]),
+                              ...(this.audioChannels > 6 ? ['-ac', '6'] : []),
+                              ...(delayMs > 0 ? ['-af', `adelay=${delayMs}:all=1`] : [])]),
                 ...hlsArgs
             ], { stdio: ['ignore', 'ignore', 'pipe'], cwd: this.dir });
             tag(ffM, 'mux');
@@ -358,6 +365,8 @@ class HlsSession {
             '-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
             ...videoArgs,
             '-map', '1:a', '-c:a', 'aac', '-b:a', '256k',
+            ...(this.audioDelay > 0
+                ? ['-af', `adelay=${Math.round(this.audioDelay * 1000)}:all=1`] : []),
             ...hlsArgs
         ], { stdio: ['pipe', 'ignore', 'pipe'], cwd: this.dir });
 
@@ -432,6 +441,7 @@ function createHlsManager(options = {}) {
 
         const t = Math.max(0, parseFloat(opts.t) || 0);
         const bw = Math.max(0, parseFloat(opts.bw) || 0);
+        const audioDelay = Math.min(2, Math.max(0, (parseFloat(opts.delay) || 0) / 1000));
         const passthrough = opts.audioMode === 'original';
         const audioInfo = await new Promise(res => probeAudioStream(file, opts.audioStreamIndex, res));
         // TrueHD Atmos + truehdd available → object-based binaural render
@@ -472,6 +482,7 @@ function createHlsManager(options = {}) {
             objectAudio,
             audioSync,
             totalDuration: fmt.duration,
+            audioDelay,
             // Segment duration the muxer will actually produce: exact 2s
             // GOPs when re-encoding, first-keyframe-after-2s with copy.
             segEstimate: transcode ? 2.002 : await new Promise(res =>

@@ -372,6 +372,7 @@ function createHttpServer(files, options = {}) {
                 t: req.query.t,
                 bw: req.query.bw,
                 audioMode: req.query.audioMode,
+                delay: req.query.delay,
             });
             res.json({ url: `/hls/${session.id}/out.m3u8`, base: session.base });
         } catch (e) {

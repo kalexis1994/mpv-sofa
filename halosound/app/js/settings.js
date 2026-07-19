@@ -172,9 +172,15 @@ class HaloSettings {
                         const out = String(r.soundOutput || r.soundOut || '').toLowerCase();
                         console.log('[audio-out]', out || raw.slice(0, 120));
                         if (out.includes('bt') || out.includes('bluetooth') || out.includes('headset')) {
-                            let saved = null;
-                            try { saved = localStorage.getItem('mpvsofa.audioDelayMs'); } catch (e) {}
-                            if (saved === null && this.player) {
+                            let saved = null, engine = 'hls';
+                            try {
+                                saved = localStorage.getItem('mpvsofa.audioDelayMs');
+                                engine = localStorage.getItem('mpvsofa.engine') || 'hls';
+                            } catch (e) {}
+                            // Seed only in low-latency mode: in TV-native
+                            // (HLS) the TV compensates BT itself — seeding
+                            // 200ms there would ADD lip-sync error.
+                            if (saved === null && engine !== 'hls' && this.player) {
                                 this.player.setAudioDelay(200);   // typical SBC latency
                                 const slider = document.getElementById('setting-audio-delay');
                                 if (slider) slider.value = 200;

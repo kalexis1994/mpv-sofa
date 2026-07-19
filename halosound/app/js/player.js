@@ -237,6 +237,11 @@ class HaloPlayer {
         if (this.connection.bandwidthBps > 0) {
             params.set('bw', Math.round(this.connection.bandwidthBps));
         }
+        // Audio delay applies IN the stream (server -itsoffset): true
+        // audio-vs-video shift the TV's own pipeline can't undo.
+        if (this.userAudioDelay > 0) {
+            params.set('delay', Math.round(this.userAudioDelay * 1000));
+        }
         return params;
     }
 
@@ -712,6 +717,15 @@ class HaloPlayer {
         this.userAudioDelay = newDelay;
         try { localStorage.setItem('mpvsofa.audioDelayMs', String(Math.round(newDelay * 1000))); }
         catch (e) { /* localStorage unavailable */ }
+        if (this.engineMode === 'hls') {
+            // Audio rides in the stream: the shift happens server-side, so
+            // restart the session (debounced while the slider is moving).
+            if (this.videoStarted && Math.abs(delta) > 0.001) {
+                clearTimeout(this._delayRestart);
+                this._delayRestart = setTimeout(() => this.restartHls(), 900);
+            }
+            return;
+        }
         if (this.videoStarted && Math.abs(delta) > 0.001) {
             this.video.currentTime = Math.max(0, this.video.currentTime - delta);
             this.suppressSync(2000);
