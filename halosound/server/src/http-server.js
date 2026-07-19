@@ -427,6 +427,25 @@ function createHttpServer(files, options = {}) {
         } catch (e) { return null; }
     };
 
+    /* Transcode progress of the active session: how many seconds (from its
+     * base) are actually produced. The client uses this to decide between a
+     * native in-session seek and starting a fresh session — the synthetic
+     * VOD playlist makes the whole movie look seekable, but seeking past
+     * the head would stall on the blocking segment endpoint. */
+    app.get('/api/hls/status', (req, res) => {
+        const s = hls.getActive();
+        if (!s) return res.json({});
+        let produced = 0;
+        const t = sessionPlaylist(s.id);
+        if (t) {
+            for (const line of t.split('\n')) {
+                const m = line.match(/^#EXTINF:([\d.]+)/);
+                if (m) produced += parseFloat(m[1]);
+            }
+        }
+        res.json({ id: s.id, base: s.base, produced });
+    });
+
     app.get('/hls/:sid/:name', async (req, res) => {
         const sid = req.params.sid, name = req.params.name;
         if (!/^[a-z0-9-]+$/.test(sid) || !/^[\w.-]+$/.test(name)) {

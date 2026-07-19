@@ -803,7 +803,7 @@ class HaloPlayer {
 
     /* Seek within the HLS session natively when the target region is
      * already transcoded; otherwise spin up a fresh session there. */
-    seekHls(absSeconds) {
+    async seekHls(absSeconds) {
         const rel = absSeconds - this.sessionBase;
         let within = false;
         try {
@@ -813,8 +813,20 @@ class HaloPlayer {
             }
         } catch (e) {}
         if (rel >= 0 && within) {
-            this.video.currentTime = rel;          // native, TV keeps sync
-            return;
+            // The synthetic VOD playlist makes the WHOLE movie seekable, but
+            // only content the transcode has produced plays now — seeking
+            // past the head would hang on the blocking segment endpoint for
+            // however long the transcode takes to get there. Ask the server.
+            let head = 0;
+            try {
+                const r = await fetch(`${this.connection.httpBase}/api/hls/status`);
+                const j = await r.json();
+                if (j && j.id) head = (j.base || 0) + (j.produced || 0);
+            } catch (e) {}
+            if (absSeconds <= head - 4) {
+                this.video.currentTime = rel;      // native, TV keeps sync
+                return;
+            }
         }
         this.showLoading('Buffering...');
         this.startHlsSession(Math.max(0, absSeconds));
