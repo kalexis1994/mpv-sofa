@@ -73,10 +73,39 @@ function nvencArgs(bw) {
             '-maxrate', String(maxr), '-bufsize', String(maxr * 2),
             '-spatial-aq', '1',
             '-profile:v', 'main10', '-pix_fmt', 'p010le',
+            // L5.1 high tier: the ceiling TV decoders are comfortable at
+            // (some remuxes are flagged L6.1, which strains the chip).
+            '-level', '5.1', '-tier', 'high',
             '-g', '48', '-forced-idr', '1',   // ~2s GOP at 24fps so hls_time 2 can cut
                                               // (force_key_frames is ignored by nvenc)
         ],
     };
+}
+
+/* Video height + frame rate, cached on the file entry. */
+function probeVideoStream(file, cb) {
+    if (file._video) return cb(file._video);
+    execFile(config.FFPROBE_PATH, [
+        '-v', 'quiet',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=height,avg_frame_rate',
+        '-print_format', 'json',
+        file.path
+    ], (err, stdout) => {
+        let v = { height: 0, fps: 0 };
+        if (!err) {
+            try {
+                const s = (JSON.parse(stdout).streams || [])[0] || {};
+                v.height = s.height || 0;
+                const m = String(s.avg_frame_rate || '').split('/');
+                v.fps = m.length === 2 && parseFloat(m[1]) > 0
+                    ? parseFloat(m[0]) / parseFloat(m[1])
+                    : parseFloat(m[0]) || 0;
+            } catch (e) {}
+        }
+        file._video = v;
+        cb(v);
+    });
 }
 
 /* Codec + channel count (+Atmos flag) of one audio stream (absolute index). */
@@ -471,10 +500,18 @@ function createHlsManager(options = {}) {
             audioInfo.codec === 'truehd' && audioInfo.atmos;
         const fmt = await new Promise(res => probeFormat(file, res));
         const bitrate = fmt.bitrate;
-        const transcode = bitrate > copyCap(bw);
+        const vinfo = await new Promise(res => probeVideoStream(file, res));
+        // Re-encode when the file can't fit the link — or when it's 4K at
+        // high frame rate: those remuxes (often flagged HEVC L6.1 with DV)
+        // push the TV decoder past its comfort zone and it drops frames in
+        // heavy scenes; NVENC's clean L5.1 stream decodes smoothly.
+        const tooHeavy = vinfo.height >= 2000 && vinfo.fps >= 48;
+        const transcode = bitrate > copyCap(bw) || tooHeavy;
         if (transcode && options.verbose) {
-            console.log(`[hls] ${path.basename(file.path)}: ${(bitrate / 1e6).toFixed(1)} Mbps ` +
-                        `> ${(copyCap(bw) / 1e6).toFixed(0)} Mbps cap → NVENC re-encode`);
+            const reason = tooHeavy
+                ? `4K@${vinfo.fps.toFixed(0)}fps strains the TV decoder`
+                : `${(bitrate / 1e6).toFixed(1)} Mbps > ${(copyCap(bw) / 1e6).toFixed(0)} Mbps cap`;
+            console.log(`[hls] ${path.basename(file.path)}: ${reason} → NVENC re-encode`);
         }
         // With -c:v copy the session starts wherever ffmpeg's seek actually
         // lands (probed — see probeSeekLanding); audio decodes exactly at
