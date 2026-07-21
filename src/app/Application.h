@@ -44,6 +44,11 @@ private:
     bool m_showRecentDialog = false;
     void renderRecentDialog();
 
+    // Logo shown above the wordmark on the home screen.  Stays 0 when the
+    // asset is missing, and the layout then closes the gap.
+    unsigned int m_logoTex = 0;
+    int m_logoW = 0, m_logoH = 0;
+
     // True the first frame the home screen is visible after either
     // app startup or a transition from playing → idle.  Used to seed
     // the gamepad / keyboard nav focus on the first home button so

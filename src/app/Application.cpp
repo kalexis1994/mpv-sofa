@@ -2,6 +2,7 @@
 #include "core/SharedState.h"
 #include "core/Settings.h"
 #include "renderer/Picking.h"
+#include "ui/ImageTexture.h"
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -207,6 +208,9 @@ bool Application::init(int argc, char* argv[]) {
 
     // Create FBOs for video and 3D visualizer
     createFBOs();
+
+    m_logoTex = loadTextureFromFile("assets/icons/mpv-sofa-logo.png",
+                                    &m_logoW, &m_logoH);
 
     // Settings::load already ran before window creation; here we just
     // push the persisted preferences that need a live player into mpv
@@ -1458,21 +1462,31 @@ void Application::renderHomeScreen() {
                  ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar(2);
 
-    // Block geometry: title + subtitle + 4 big buttons.  Centred both
-    // axes so the layout stays tidy on whatever viewport size the host
+    // Block geometry: logo + title + subtitle + 4 big buttons.  Centred
+    // both axes so the layout stays tidy on whatever viewport size the host
     // window happens to be.
     const float btnSize    = 180.0f;
     const float btnGap     = 24.0f;
     const float titleScale = 2.4f;
     const float subScale   = 1.1f;
 
+    const float logoH     = m_logoTex ? 208.0f : 0.0f;
+    const float logoGap   = m_logoTex ? 10.0f  : 0.0f;
     const float titleH    = ImGui::GetFontSize() * titleScale;
     const float subH      = ImGui::GetFontSize() * subScale;
-    const float blockH    = titleH + 12.0f + subH + 36.0f + btnSize;
+    const float blockH    = logoH + logoGap + titleH + 12.0f + subH + 36.0f + btnSize;
     const float yStart    = (size.y - blockH) * 0.5f;
+
+    // Logo, above the wordmark.
+    if (m_logoTex) {
+        const float w = logoH * (m_logoH > 0 ? (float)m_logoW / (float)m_logoH : 1.0f);
+        ImGui::SetCursorPos(ImVec2((size.x - w) * 0.5f, yStart));
+        ImGui::Image((ImTextureID)(intptr_t)m_logoTex, ImVec2(w, logoH));
+    }
 
     // Wordmark — "mpv" in the accent, "-sofa" in plain ink, centred as one
     // unit.  Same split the style lab uses for the brand.
+    const float wordmarkY = yStart + logoH + logoGap;
     {
         const char* head = "mpv";
         const char* tail = "-sofa";
@@ -1480,7 +1494,7 @@ void Application::renderHomeScreen() {
                         ImGui::GetFontSize() * titleScale);
         const ImVec2 hs = ImGui::CalcTextSize(head);
         const ImVec2 ts = ImGui::CalcTextSize(tail);
-        ImGui::SetCursorPos(ImVec2((size.x - (hs.x + ts.x)) * 0.5f, yStart));
+        ImGui::SetCursorPos(ImVec2((size.x - (hs.x + ts.x)) * 0.5f, wordmarkY));
         ImGui::TextColored(ImGuiLayer::accentColor(), "%s", head);
         ImGui::SameLine(0.0f, 0.0f);
         ImGui::TextUnformatted(tail);
@@ -1493,7 +1507,7 @@ void Application::renderHomeScreen() {
         ImGui::PushFont(nullptr, ImGui::GetFontSize() * subScale);
         ImVec2 ts = ImGui::CalcTextSize(sub);
         ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f,
-                                    yStart + titleH + 12.0f));
+                                    wordmarkY + titleH + 12.0f));
         ImGui::TextDisabled("%s", sub);
         ImGui::PopFont();
 
@@ -1503,7 +1517,7 @@ void Application::renderHomeScreen() {
         const int   segs = 6;
         const float stripeW = 200.0f, segW = stripeW / segs;
         const float sx = pos.x + (size.x - stripeW) * 0.5f;
-        const float sy = pos.y + yStart + titleH + 12.0f + subH + 12.0f;
+        const float sy = pos.y + wordmarkY + titleH + 12.0f + subH + 12.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const int active = Settings::appearanceConfig().accent;
         for (int i = 0; i < segs; i++) {
@@ -1522,7 +1536,7 @@ void Application::renderHomeScreen() {
     {
         const float totalW = btnSize * 4 + btnGap * 3;
         const float xStart = (size.x - totalW) * 0.5f;
-        const float yButtons = yStart + titleH + 12.0f + subH + 36.0f;
+        const float yButtons = wordmarkY + titleH + 12.0f + subH + 36.0f;
 
         ImGui::SetCursorPos(ImVec2(xStart, yButtons));
 
@@ -1805,6 +1819,7 @@ void Application::shutdown() {
     if (m_mediaServer) m_mediaServer->stop();
 
     if (m_videoFBO) glDeleteFramebuffers(1, &m_videoFBO);
+    if (m_logoTex)      glDeleteTextures(1, &m_logoTex);
     if (m_videoTexture) glDeleteTextures(1, &m_videoTexture);
     if (m_videoDepth) glDeleteRenderbuffers(1, &m_videoDepth);
     if (m_vizFBO) glDeleteFramebuffers(1, &m_vizFBO);

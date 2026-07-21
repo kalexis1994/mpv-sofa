@@ -192,6 +192,7 @@ set(APP_SOURCES
     src/ui/ControlPanel.cpp
     src/ui/TransportBar.cpp
     src/ui/TrackPicker.cpp
+    src/ui/ImageTexture.cpp
     src/ui/PreferencesDialog.cpp
     src/audio/MpvPlayer.cpp
     src/audio/BinauralRenderer.cpp
