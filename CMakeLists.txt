@@ -49,20 +49,39 @@ configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.h
                ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.h COPYONLY)
 find_package(Git REQUIRED)
-# --ignore-whitespace is what makes this portable: the vendored checkout is
-# CRLF on Windows (core.autocrlf) while the patch is LF, and applied outside
-# a repository only some git builds reconcile the two — Git-for-Windows does,
-# MSYS2's doesn't.  Without the flag the build works or not depending on
-# which git CMake happens to find on PATH.
+
+# Give the staging tree its own git repository.  This is load-bearing, not
+# hygiene: `git apply` run inside a repository resolves the patch's paths
+# from that repository's root and silently ignores anything outside the
+# current directory.  When the build directory sits inside the project
+# checkout (`cmake -B build`, which is what CI does) git discovers the
+# project repo, decides every path in the patch is out of scope, and exits
+# 0 having changed nothing — so the pristine backend gets compiled and the
+# HDR entry points don't exist.  GIT_CEILING_DIRECTORIES was meant to stop
+# that walk but is matched literally, so it misses whenever CMake's
+# "C:/..." spelling doesn't match the path form the git build uses.
+# Making this directory a repository root stops discovery here, always.
+if(NOT EXISTS ${IMGUI_PATCHED_ROOT}/.git)
+    execute_process(COMMAND ${GIT_EXECUTABLE} init -q
+                    WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
+                    RESULT_VARIABLE IMGUI_GIT_INIT_RESULT
+                    OUTPUT_QUIET ERROR_QUIET)
+    if(NOT IMGUI_GIT_INIT_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not stage the ImGui patch tree at ${IMGUI_PATCHED_ROOT}")
+    endif()
+endif()
+
+# --ignore-whitespace keeps this portable across git builds: the vendored
+# checkout is CRLF on Windows (core.autocrlf) while the patch is LF, and
+# only some builds reconcile the two — Git-for-Windows does, MSYS2's
+# doesn't.
 set(IMGUI_GIT_APPLY ${GIT_EXECUTABLE} apply --ignore-whitespace --whitespace=nowarn)
-# Re-configuring must not fail on an already-patched copy either: configure_file
+# Re-configuring must not fail on an already-patched copy: configure_file
 # only refreshes the destination when the vendored source changed, so the
 # generated tree can still be carrying the patch from an earlier configure.
 # Probe with --reverse --check first and skip when it's already in.
 execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env
-            "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
-            ${GIT_EXECUTABLE} apply --ignore-whitespace --reverse --check ${IMGUI_HDR_PATCH}
+    COMMAND ${IMGUI_GIT_APPLY} --reverse --check ${IMGUI_HDR_PATCH}
     WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
     RESULT_VARIABLE IMGUI_HDR_ALREADY
     OUTPUT_QUIET ERROR_QUIET
@@ -71,9 +90,7 @@ if(IMGUI_HDR_ALREADY EQUAL 0)
     message(STATUS "ImGui HDR backend patch already applied")
 else()
     execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-                "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
-                ${IMGUI_GIT_APPLY} ${IMGUI_HDR_PATCH}
+        COMMAND ${IMGUI_GIT_APPLY} ${IMGUI_HDR_PATCH}
         WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
         RESULT_VARIABLE IMGUI_HDR_PATCH_RESULT
         ERROR_VARIABLE IMGUI_HDR_PATCH_ERROR
@@ -82,6 +99,21 @@ else()
         message(FATAL_ERROR "Failed to apply ImGui HDR backend patch: ${IMGUI_HDR_PATCH_ERROR}")
     endif()
 endif()
+
+# Never take the patch step's word for it.  Every way this has failed so far
+# ended with a silently unpatched backend and a compile error hundreds of
+# lines later; checking for the entry point the patch adds turns that into
+# an immediate, obvious failure.
+file(READ ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.h IMGUI_PATCHED_HEADER)
+string(FIND "${IMGUI_PATCHED_HEADER}" "ImGui_ImplOpenGL3_SetHdrColorDefaults"
+       IMGUI_HDR_MARKER)
+if(IMGUI_HDR_MARKER EQUAL -1)
+    message(FATAL_ERROR
+            "ImGui HDR backend patch reported success but the result is unpatched "
+            "(${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.h). Delete the build "
+            "directory and re-run CMake.")
+endif()
+unset(IMGUI_PATCHED_HEADER)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${IMGUI_HDR_PATCH})
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
