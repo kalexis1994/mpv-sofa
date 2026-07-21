@@ -362,6 +362,10 @@ void Application::toggleVideoFullscreen() {
 void Application::processInput() {
     // Handle pending file drops
     if (!m_pendingFile.empty() && m_player) {
+        if (FILE* dbg = fopen("app_debug.log", "a")) {
+            fprintf(dbg, "loadFile dispatch: '%s'\n", m_pendingFile.c_str());
+            fclose(dbg);
+        }
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
         Settings::pushRecent(m_pendingFile);
@@ -1151,17 +1155,34 @@ void Application::renderModalLayers() {
     ImVec2 vpSize = ImGui::GetMainViewport()->Size;
     ImVec2 dlgMin(640, 420);
     ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
+    // NOTE: GetFilePathName() is the SAVE-dialog accessor — it recomposes
+    // the name through extension logic that collapses consecutive dots
+    // ("2004..2160p" became "2004.2160p"), silently producing a path that
+    // doesn't exist. GetSelection() returns the picked entries untouched
+    // and is the documented OPEN-dialog accessor.
+    auto pickedPath = []() -> std::string {
+        auto sel = ImGuiFileDialog::Instance()->GetSelection();
+        if (!sel.empty()) return sel.begin()->second;
+        return ImGuiFileDialog::Instance()->GetFilePathName(
+            IGFD_ResultMode_KeepInputFile);
+    };
     if (ImGuiFileDialog::Instance()->Display("open_media", 0, dlgMin, dlgMax)) {
         if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
-            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
-            m_pendingFile = path;
+            m_pendingFile = pickedPath();
+        }
+        // Breadcrumb log: the exact dialog outcome, for diagnosing "Open
+        // does nothing" reports without a console attached.
+        if (FILE* dbg = fopen("app_debug.log", "a")) {
+            fprintf(dbg, "open_media closed: ok=%d path='%s'\n",
+                    ImGuiFileDialog::Instance()->IsOk() ? 1 : 0,
+                    m_pendingFile.c_str());
+            fclose(dbg);
         }
         ImGuiFileDialog::Instance()->Close();
     }
     if (ImGuiFileDialog::Instance()->Display("open_subtitle", 0, dlgMin, dlgMax)) {
         if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
-            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
-            m_player->loadSubtitleFile(path);
+            m_player->loadSubtitleFile(pickedPath());
         }
         ImGuiFileDialog::Instance()->Close();
     }
