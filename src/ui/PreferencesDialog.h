@@ -38,7 +38,8 @@ public:
 private:
     std::function<HdrStatus()> m_hdrStatus;
     enum Tab {
-        TAB_LANGUAGES = 0,
+        TAB_APPEARANCE = 0,
+        TAB_LANGUAGES,
         TAB_SUBTITLES,
         TAB_DISPLAY,
         TAB_SPATIAL,
@@ -54,6 +55,7 @@ private:
     void renderTabs();
 
     // Active section bodies.
+    void renderAppearance();
     void renderLanguages();
     void renderSubtitles();
     void renderDisplay();
@@ -94,7 +96,7 @@ private:
     // popup's dismissal.
     int  m_lastPopupCount = 0;
 
-    int  m_currentTab   = TAB_LANGUAGES;
+    int  m_currentTab   = TAB_APPEARANCE;
 
     // Languages now write through directly on change (live apply), but
     // we still keep the editable indices as state so the combo boxes

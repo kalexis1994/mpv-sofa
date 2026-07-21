@@ -49,16 +49,38 @@ configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
 configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.h
                ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.h COPYONLY)
 find_package(Git REQUIRED)
+# --ignore-whitespace is what makes this portable: the vendored checkout is
+# CRLF on Windows (core.autocrlf) while the patch is LF, and applied outside
+# a repository only some git builds reconcile the two — Git-for-Windows does,
+# MSYS2's doesn't.  Without the flag the build works or not depending on
+# which git CMake happens to find on PATH.
+set(IMGUI_GIT_APPLY ${GIT_EXECUTABLE} apply --ignore-whitespace --whitespace=nowarn)
+# Re-configuring must not fail on an already-patched copy either: configure_file
+# only refreshes the destination when the vendored source changed, so the
+# generated tree can still be carrying the patch from an earlier configure.
+# Probe with --reverse --check first and skip when it's already in.
 execute_process(
     COMMAND ${CMAKE_COMMAND} -E env
             "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
-            ${GIT_EXECUTABLE} apply --whitespace=nowarn ${IMGUI_HDR_PATCH}
+            ${GIT_EXECUTABLE} apply --ignore-whitespace --reverse --check ${IMGUI_HDR_PATCH}
     WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
-    RESULT_VARIABLE IMGUI_HDR_PATCH_RESULT
-    ERROR_VARIABLE IMGUI_HDR_PATCH_ERROR
+    RESULT_VARIABLE IMGUI_HDR_ALREADY
+    OUTPUT_QUIET ERROR_QUIET
 )
-if(NOT IMGUI_HDR_PATCH_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to apply ImGui HDR backend patch: ${IMGUI_HDR_PATCH_ERROR}")
+if(IMGUI_HDR_ALREADY EQUAL 0)
+    message(STATUS "ImGui HDR backend patch already applied")
+else()
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+                "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
+                ${IMGUI_GIT_APPLY} ${IMGUI_HDR_PATCH}
+        WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
+        RESULT_VARIABLE IMGUI_HDR_PATCH_RESULT
+        ERROR_VARIABLE IMGUI_HDR_PATCH_ERROR
+    )
+    if(NOT IMGUI_HDR_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to apply ImGui HDR backend patch: ${IMGUI_HDR_PATCH_ERROR}")
+    endif()
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${IMGUI_HDR_PATCH})
 add_library(imgui STATIC

@@ -59,6 +59,14 @@ struct DisplayConfig {
     float panscan = 0.0f;
 };
 
+// Desktop look — the "Polaroid" theme explored in design/style-lab.html.
+// Two neutral sets (a warm darkroom black and a warm paper white) plus an
+// accent picked from the Polaroid spectrum stripe.  Stored in [appearance].
+struct AppearanceConfig {
+    int mode   = 0;   // 0 = dark ("darkroom"), 1 = light ("daylight")
+    int accent = 0;   // 0=red 1=orange 2=yellow 3=green 4=blue 5=magenta
+};
+
 // Playback / sync settings (audio offset for BT lip-sync etc.).
 // Sub-delay lives in the subtitle picker because it's typically per-
 // file metadata; audio-delay is set-once-per-headphone so it gets a
@@ -145,6 +153,11 @@ void                 applySubtitleStyleToPlayer(MpvPlayer* p);
 const DisplayConfig& displayConfig();
 void                 setDisplayConfig(const DisplayConfig& c);
 void                 applyDisplayConfigToPlayer(MpvPlayer* p);
+
+// Desktop theme.  Call ImGuiLayer::applyTheme() after changing it to push
+// the new palette into the live ImGui style.  Persisted in [appearance].
+const AppearanceConfig& appearanceConfig();
+void                    setAppearanceConfig(const AppearanceConfig& c);
 
 // Playback sync (audio-delay).  Persisted in [playback].
 const PlaybackConfig& playbackConfig();

@@ -1468,7 +1468,8 @@ void Application::renderHomeScreen() {
     // Title
     {
         const char* title = "mpv-sofa";
-        ImGui::PushFont(nullptr, ImGui::GetFontSize() * titleScale);
+        ImGui::PushFont(ImGuiLayer::fonts().display,
+                        ImGui::GetFontSize() * titleScale);
         ImVec2 ts = ImGui::CalcTextSize(title);
         ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
         ImGui::TextUnformatted(title);
@@ -1484,6 +1485,26 @@ void Application::renderHomeScreen() {
                                     yStart + titleH + 12.0f));
         ImGui::TextDisabled("%s", sub);
         ImGui::PopFont();
+
+        // The Polaroid spectrum stripe, centred under the wordmark.  Drawn
+        // blue→red like the film packaging; the active accent is the one
+        // segment at full height so the theme choice is visible at a glance.
+        const int   segs = 6;
+        const float stripeW = 200.0f, segW = stripeW / segs;
+        const float sx = pos.x + (size.x - stripeW) * 0.5f;
+        const float sy = pos.y + yStart + titleH + 12.0f + subH + 12.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const int active = Settings::appearanceConfig().accent;
+        for (int i = 0; i < segs; i++) {
+            const int idx = segs - 1 - i;            // blue … red
+            ImVec4 col = ImGuiLayer::accentPreview(idx,
+                                                   Settings::appearanceConfig().mode);
+            const float h = (idx == active) ? 5.0f : 3.0f;
+            if (idx != active) col.w = 0.55f;
+            dl->AddRectFilled(ImVec2(sx + segW * i, sy),
+                              ImVec2(sx + segW * (i + 1), sy + h),
+                              ImGui::GetColorU32(col));
+        }
     }
 
     // 4 buttons
@@ -1645,13 +1666,23 @@ bool Application::homeButton(const char* icon, const char* label, float size) {
     const bool emph    = hovered || focused;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec4 accent = ImGuiLayer::accentColor();
     const ImU32 bg     = ImGui::GetColorU32(emph ? ImGuiCol_FrameBgHovered
                                                  : ImGuiCol_FrameBg);
-    const ImU32 border = ImGui::GetColorU32(emph ? ImGuiCol_Text
-                                                 : ImGuiCol_Border);
+    // Focus is the accent, not white — it's the one place the theme's
+    // intense colour earns its keep, and it reads from across a room.
+    const ImU32 border = emph ? ImGui::GetColorU32(accent)
+                              : ImGui::GetColorU32(ImGuiCol_Border);
     const ImU32 textCol= ImGui::GetColorU32(ImGuiCol_Text);
     const ImVec2 pmax(origin.x + size, origin.y + size);
 
+    if (emph) {
+        ImVec4 glow = accent;
+        glow.w = 0.20f;
+        dl->AddRect(ImVec2(origin.x - 5.0f, origin.y - 5.0f),
+                    ImVec2(pmax.x + 5.0f, pmax.y + 5.0f),
+                    ImGui::GetColorU32(glow), 15.0f, 0, 7.0f);
+    }
     dl->AddRectFilled(origin, pmax, bg, 12.0f);
     dl->AddRect(origin, pmax, border, 12.0f, 0, emph ? 2.5f : 1.0f);
 

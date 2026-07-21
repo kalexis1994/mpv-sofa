@@ -1,5 +1,6 @@
 #include "PreferencesDialog.h"
 #include "ControlPanel.h"
+#include "ImGuiLayer.h"
 #include "app/Window.h"
 #include "core/Settings.h"
 #include "core/MediaServer.h"
@@ -155,6 +156,7 @@ void PreferencesDialog::render() {
     ImGui::BeginChild("##prefs_body", ImVec2(0, 0),
                       ImGuiChildFlags_NavFlattened);
     switch (m_currentTab) {
+        case TAB_APPEARANCE: renderAppearance();  break;
         case TAB_LANGUAGES:  renderLanguages();   break;
         case TAB_SUBTITLES:  renderSubtitles();   break;
         case TAB_DISPLAY:    renderDisplay();     break;
@@ -199,6 +201,7 @@ void PreferencesDialog::renderHeader() {
 void PreferencesDialog::renderTabs() {
     struct TabDef { const char* icon; const char* label; };
     static const TabDef kTabs[TAB_COUNT] = {
+        { ICON_LC_PALETTE,     "Appearance"    },
         { ICON_LC_LANGUAGES,   "Languages"     },
         { ICON_LC_CAPTIONS,    "Subtitles"     },
         { ICON_LC_EYE,         "Display & HDR" },
@@ -300,6 +303,81 @@ bool PreferencesDialog::tabPill(const char* icon, const char* label, bool active
 // ──────────────────────────────────────────────────────────────────
 //  Section bodies
 // ──────────────────────────────────────────────────────────────────
+
+void PreferencesDialog::renderAppearance() {
+    ImGui::TextWrapped(
+        "The \"Polaroid\" theme: warm neutrals so the video stays the "
+        "brightest thing on screen, and one intense accent taken from the "
+        "Polaroid spectrum stripe. Changes apply immediately.");
+    ImGui::Spacing();
+
+    Settings::AppearanceConfig a = Settings::appearanceConfig();
+    bool dirty = false;
+    const float labelW = 200.0f;
+
+    ImGui::SeparatorText("Theme");
+    ImGui::TextUnformatted("Mode");
+    ImGui::SameLine(labelW);
+    if (ImGui::RadioButton(ICON_LC_MOON "  Darkroom", a.mode == 0)) {
+        a.mode = 0; dirty = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton(ICON_LC_SUN "  Daylight", a.mode == 1)) {
+        a.mode = 1; dirty = true;
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled(
+        "Darkroom is the one to use for watching — Daylight is there for "
+        "setting things up in a lit room.");
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Accent");
+    ImGui::TextUnformatted("Colour");
+    ImGui::SameLine(labelW);
+
+    // Swatch row.  Each button paints its own colour so the choice is made
+    // by looking, not by reading a combo box.
+    const float sw = ImGui::GetFrameHeight();
+    for (int i = 0; ImGuiLayer::accentName(i) != nullptr; i++) {
+        if (i > 0) ImGui::SameLine();
+        ImGui::PushID(i);
+
+        // Show each swatch as it would look under the selected mode, so
+        // switching to Daylight visibly deepens the row.
+        const ImVec4 col = ImGuiLayer::accentPreview(i, a.mode);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, a.accent == i ? 3.0f : 1.0f);
+        if (ImGui::Button("##sw", ImVec2(sw * 1.6f, sw))) {
+            a.accent = i;
+            dirty = true;
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", ImGuiLayer::accentName(i));
+        ImGui::PopID();
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Preview");
+    ImGui::Button("Play");
+    ImGui::SameLine();
+    static bool demoCheck = true;
+    ImGui::Checkbox("Binaural", &demoCheck);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(180.0f);
+    static float demoSlider = 0.62f;
+    ImGui::SliderFloat("##demo_slider", &demoSlider, 0.0f, 1.0f, "");
+    ImGui::TextDisabled("Typeface: Dosis (SIL Open Font License)");
+
+    if (dirty) {
+        Settings::setAppearanceConfig(a);
+        ImGuiLayer::applyTheme();
+    }
+}
 
 void PreferencesDialog::renderLanguages() {
     const float labelW = 200.0f;

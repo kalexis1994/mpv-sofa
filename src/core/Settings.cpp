@@ -83,6 +83,9 @@ struct Snapshot {
     // Playback (audio-delay).
     Settings::PlaybackConfig playback;
 
+    // Desktop theme (Polaroid palette / accent).
+    Settings::AppearanceConfig appearance;
+
     // OS-level window presentation mode.
     int window_mode = 0;   // 0=Fullscreen, 1=Borderless, 2=Windowed
 
@@ -152,6 +155,8 @@ struct Snapshot {
         if (display.gamutMode != o.display.gamutMode) return false;
         if (display.panscan   != o.display.panscan)   return false;
         if (playback.audioDelay != o.playback.audioDelay) return false;
+        if (appearance.mode   != o.appearance.mode)   return false;
+        if (appearance.accent != o.appearance.accent) return false;
         if (window_mode != o.window_mode) return false;
         if (server.enabled  != o.server.enabled)  return false;
         if (server.mediaDir != o.server.mediaDir) return false;
@@ -171,6 +176,7 @@ int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
 Settings::SubtitleStyle  g_subStyle;
 Settings::CinemaGrain    g_grain;
 Settings::DisplayConfig  g_display;
+Settings::AppearanceConfig g_appearance;
 Settings::PlaybackConfig g_playback;
 Settings::ServerConfig   g_server;
 int                      g_windowMode = 0;   // 0=Fullscreen
@@ -260,6 +266,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     snap.grain           = g_grain;
     snap.display         = g_display;
     snap.playback        = g_playback;
+    snap.appearance      = g_appearance;
     snap.window_mode     = g_windowMode;
     snap.server          = g_server;
     return snap;
@@ -454,6 +461,11 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_playback.audioDelay = getF(kv, "audio_delay", g_playback.audioDelay);
         }
+        if (auto it = ini.find("appearance"); it != ini.end()) {
+            const KV& kv = it->second;
+            g_appearance.mode   = getI(kv, "mode",   g_appearance.mode);
+            g_appearance.accent = getI(kv, "accent", g_appearance.accent);
+        }
         if (auto it = ini.find("window"); it != ini.end()) {
             const KV& kv = it->second;
             g_windowMode = getI(kv, "mode", g_windowMode);
@@ -611,6 +623,11 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "panscan=%g\n",    g_display.panscan);
     fprintf(f, "\n");
 
+    fprintf(f, "[appearance]\n");
+    fprintf(f, "mode=%d\n",   g_appearance.mode);
+    fprintf(f, "accent=%d\n", g_appearance.accent);
+    fprintf(f, "\n");
+
     fprintf(f, "[playback]\n");
     fprintf(f, "audio_delay=%g\n", g_playback.audioDelay);
     fprintf(f, "\n");
@@ -710,6 +727,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
     g_subStyle = SubtitleStyle{};
     g_grain    = CinemaGrain{};
     g_display  = DisplayConfig{};
+    g_appearance = AppearanceConfig{};
     g_playback   = PlaybackConfig{};
     g_windowMode = 0;   // Fullscreen
     g_server     = ServerConfig{};
@@ -733,6 +751,9 @@ void Settings::setCinemaGrain(const CinemaGrain& g)  { g_grain = g; }
 
 const Settings::DisplayConfig& Settings::displayConfig() { return g_display; }
 void Settings::setDisplayConfig(const DisplayConfig& c)  { g_display = c; }
+
+const Settings::AppearanceConfig& Settings::appearanceConfig() { return g_appearance; }
+void Settings::setAppearanceConfig(const AppearanceConfig& c)  { g_appearance = c; }
 
 void Settings::applyDisplayConfigToPlayer(MpvPlayer* p) {
     if (!p) return;
