@@ -518,6 +518,9 @@ void MpvPlayer::refreshTrackList() {
     fprintf(stderr, "[MpvPlayer] Found %zu audio tracks (current=%d), %zu subtitle tracks (current=%d)\n",
             m_audioTracks.size(), m_currentAudioTrack,
             m_subtitleTracks.size(), m_currentSubtitleTrack);
+    for (const SubtitleTrack& s : m_subtitleTracks)
+        fprintf(stderr, "[MpvPlayer]   sub id=%d lang='%s' title='%s'\n",
+                s.id, s.lang.c_str(), s.title.c_str());
 #endif
 }
 

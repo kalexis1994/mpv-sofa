@@ -726,7 +726,13 @@ void Application::update(float dt) {
                     break;
                 }
         }
-        m_trackPicker->open(TrackPicker::Mode::Audio, /*isAutoLoad=*/true);
+        // HRTF_UI_OPEN=subs opens the subtitle side instead — a hook for
+        // screenshotting the picker without driving the UI by hand.
+        const char* uiOpen = std::getenv("HRTF_UI_OPEN");
+        const bool wantSubs = uiOpen && strcmp(uiOpen, "subs") == 0;
+        m_trackPicker->open(wantSubs ? TrackPicker::Mode::Subtitle
+                                     : TrackPicker::Mode::Audio,
+                            /*isAutoLoad=*/true);
     }
 }
 

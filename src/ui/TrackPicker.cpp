@@ -1,4 +1,5 @@
 #include "TrackPicker.h"
+#include "ImGuiLayer.h"
 #include "audio/MpvPlayer.h"
 #include "core/Settings.h"
 
@@ -6,6 +7,7 @@
 #include <IconsLucide.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <numeric>
@@ -157,35 +159,83 @@ ImU32 rarityColorHover(Rarity r) {
     }
 }
 
-// Friendly language name from ISO 639-2/B/T or 639-1 code.  Falls back
-// to the raw code when unknown.
-std::string langLabel(const std::string& code) {
-    if (code.empty()) return "";
+// Friendly language name from an ISO 639-1 / 639-2/B / 639-2/T code.
+//
+// Both 639-2 variants have to be here: the bibliographic codes (fre, ger,
+// dut, chi, gre, …) and the terminological ones (fra, deu, nld, zho, ell,
+// …) show up in the wild for the same language, sometimes in the same
+// file.  A WEB-DL with 36 subtitle tracks will happily use the /T set
+// throughout, and anything missing from this table surfaces in the UI as a
+// bare three-letter code, which reads like the language is unknown.
+//
+// A region suffix ("pt-BR", "es-419", "zh-Hans") is resolved on the base
+// code and the region kept as a qualifier.
+std::string langLabel(const std::string& codeIn) {
+    if (codeIn.empty()) return "";
+
+    std::string code = codeIn;
+    std::transform(code.begin(), code.end(), code.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+
+    std::string region;
+    if (const size_t dash = code.find_first_of("-_"); dash != std::string::npos) {
+        region = codeIn.substr(dash + 1);
+        code   = code.substr(0, dash);
+    }
+
     static const std::unordered_map<std::string, std::string> map = {
+        {"ara","Arabic"},      {"ar","Arabic"},
+        {"bul","Bulgarian"},   {"bg","Bulgarian"},
+        {"cat","Catalan"},     {"ca","Catalan"},
+        {"ces","Czech"},       {"cze","Czech"},   {"cs","Czech"},
+        {"chi","Chinese"},     {"zho","Chinese"}, {"zh","Chinese"},
+        {"dan","Danish"},      {"da","Danish"},
+        {"deu","German"},      {"ger","German"},  {"de","German"},
+        {"ell","Greek"},       {"gre","Greek"},   {"el","Greek"},
         {"eng","English"},     {"en","English"},
-        {"spa","Spanish"},     {"es","Spanish"},
-        {"fre","French"},      {"fra","French"}, {"fr","French"},
-        {"ger","German"},      {"deu","German"}, {"de","German"},
+        {"est","Estonian"},    {"et","Estonian"},
+        {"eus","Basque"},      {"baq","Basque"},  {"eu","Basque"},
+        {"fas","Persian"},     {"per","Persian"}, {"fa","Persian"},
+        {"fin","Finnish"},     {"fi","Finnish"},
+        {"fra","French"},      {"fre","French"},  {"fr","French"},
+        {"glg","Galician"},    {"gl","Galician"},
+        {"heb","Hebrew"},      {"he","Hebrew"},
+        {"hin","Hindi"},       {"hi","Hindi"},
+        {"hrv","Croatian"},    {"hr","Croatian"},
+        {"hun","Hungarian"},   {"hu","Hungarian"},
+        {"ind","Indonesian"},  {"id","Indonesian"},
+        {"isl","Icelandic"},   {"ice","Icelandic"},{"is","Icelandic"},
         {"ita","Italian"},     {"it","Italian"},
-        {"por","Portuguese"},  {"pt","Portuguese"},
         {"jpn","Japanese"},    {"ja","Japanese"},
         {"kor","Korean"},      {"ko","Korean"},
-        {"chi","Chinese"},     {"zho","Chinese"}, {"zh","Chinese"},
-        {"rus","Russian"},     {"ru","Russian"},
-        {"ara","Arabic"},      {"ar","Arabic"},
-        {"hin","Hindi"},       {"hi","Hindi"},
-        {"dut","Dutch"},       {"nld","Dutch"},   {"nl","Dutch"},
-        {"swe","Swedish"},     {"sv","Swedish"},
+        {"lav","Latvian"},     {"lv","Latvian"},
+        {"lit","Lithuanian"},  {"lt","Lithuanian"},
+        {"mkd","Macedonian"},  {"mac","Macedonian"},{"mk","Macedonian"},
+        {"msa","Malay"},       {"may","Malay"},   {"ms","Malay"},
+        {"nld","Dutch"},       {"dut","Dutch"},   {"nl","Dutch"},
+        {"nno","Norwegian Nynorsk"},              {"nn","Norwegian Nynorsk"},
+        {"nob","Norwegian Bokmal"},               {"nb","Norwegian Bokmal"},
         {"nor","Norwegian"},   {"no","Norwegian"},
-        {"dan","Danish"},      {"da","Danish"},
-        {"fin","Finnish"},     {"fi","Finnish"},
         {"pol","Polish"},      {"pl","Polish"},
+        {"por","Portuguese"},  {"pt","Portuguese"},
+        {"ron","Romanian"},    {"rum","Romanian"},{"ro","Romanian"},
+        {"rus","Russian"},     {"ru","Russian"},
+        {"slk","Slovak"},      {"slo","Slovak"},  {"sk","Slovak"},
+        {"slv","Slovenian"},   {"sl","Slovenian"},
+        {"spa","Spanish"},     {"es","Spanish"},
+        {"srp","Serbian"},     {"scc","Serbian"}, {"sr","Serbian"},
+        {"swe","Swedish"},     {"sv","Swedish"},
+        {"tha","Thai"},        {"th","Thai"},
         {"tur","Turkish"},     {"tr","Turkish"},
+        {"ukr","Ukrainian"},   {"uk","Ukrainian"},
+        {"vie","Vietnamese"},  {"vi","Vietnamese"},
         {"und","Undetermined"},
     };
+
     auto it = map.find(code);
-    if (it != map.end()) return it->second;
-    return code;
+    std::string name = (it != map.end()) ? it->second : code;
+    if (!region.empty()) name += " (" + region + ")";
+    return name;
 }
 
 // Pill-shaped tag.  Returns the width consumed (including outer padding),
@@ -195,6 +245,20 @@ struct TagStyle {
     ImU32 fg;
     ImU32 border;
 };
+
+// Tag palettes derived from the live theme, so accents and neutrals track
+// whatever the user picked in Preferences instead of being pinned to the
+// colours of an older palette.
+TagStyle accentTagStyle() {
+    ImVec4 acc = ImGuiLayer::accentColor();
+    ImVec4 soft = acc; soft.w = 0.22f;
+    return { ImGui::GetColorU32(soft), ImGui::GetColorU32(acc), 0 };
+}
+
+TagStyle neutralTagStyle() {
+    return { ImGui::GetColorU32(ImGuiCol_ScrollbarGrab),
+             ImGui::GetColorU32(ImGuiCol_TextDisabled), 0 };
+}
 
 float drawTag(ImDrawList* dl, ImVec2 pos, const char* text,
                const TagStyle& s) {
@@ -287,19 +351,14 @@ bool drawCard(const AudioTrack& t, float w, float h) {
         yc += 2.0f;
     }
 
-    // Categorical pill palette.  Each tag type gets its own colour so the
-    // grid reads at a glance; bg colours sit a step or two away from the
-    // navy card background and the text colour is chosen for contrast on
-    // each pill.
-    const ImU32 sand = IM_COL32(210, 193, 182, 255);   // #D2C1B6
-    const ImU32 deep = IM_COL32( 27,  60,  83, 255);   // #1B3C53
-
-    const TagStyle tagTech    = { IM_COL32( 69, 104, 130, 255), sand, 0 }; // steel
-    const TagStyle tagBitrate = { IM_COL32( 60, 120, 130, 255), sand, 0 }; // teal
-    const TagStyle tagLang    = { IM_COL32(150, 110,  90, 255), sand, 0 }; // sienna
-    const TagStyle tagSpatial = { IM_COL32(140, 175, 130, 255), deep, 0 }; // sage green
-    const TagStyle tagDefault = { IM_COL32(210, 178,  95, 255), deep, 0 }; // amber gold
-    const TagStyle tagForced  = { IM_COL32(180,  90,  80, 255), sand, 0 }; // muted red
+    // Technical facts stay neutral; the things worth spotting from across
+    // the grid (spatial audio, the default track) carry the accent.
+    const TagStyle tagTech    = neutralTagStyle();
+    const TagStyle tagBitrate = neutralTagStyle();
+    const TagStyle tagLang    = neutralTagStyle();
+    const TagStyle tagSpatial = accentTagStyle();
+    const TagStyle tagDefault = accentTagStyle();
+    const TagStyle tagForced  = neutralTagStyle();
 
     // Build the tag list in render order.  Strings stay alive until the
     // function returns since we hold them in std::string locals.
@@ -396,39 +455,40 @@ bool drawSubCard(const SubtitleTrack& t, float w, float h) {
     const float padY = 12.0f;
     float       yc   = origin.y + padY;
 
-    const std::string codec = subCodecLabel(t);
-    dl->AddText(ImVec2(origin.x + padX, yc), colText, codec.c_str());
+    // A subtitle track's identity is its language — every other field is
+    // the same across the whole list (a WEB-DL ships 36 mov_text tracks),
+    // so the language leads and the format drops to the dim second line.
+    const std::string lang = langLabel(t.lang);
+    dl->AddText(ImVec2(origin.x + padX, yc), colText,
+                lang.empty() ? "Unknown language" : lang.c_str());
     yc += lh + 6.0f;
 
-    if (!t.title.empty()) {
-        std::string title = t.title;
-        const size_t maxLen = 36;
-        if (title.size() > maxLen)
-            title = title.substr(0, maxLen - 1) + "\xe2\x80\xa6";
-        dl->AddText(ImVec2(origin.x + padX, yc), colDim, title.c_str());
+    {
+        std::string second = subCodecLabel(t);
+        if (!t.title.empty()) {
+            std::string title = t.title;
+            const size_t maxLen = 28;
+            if (title.size() > maxLen)
+                title = title.substr(0, maxLen - 1) + "\xe2\x80\xa6";
+            second += "  \xc2\xb7  " + title;
+        }
+        dl->AddText(ImVec2(origin.x + padX, yc), colDim, second.c_str());
         yc += lh + 8.0f;
-    } else {
-        yc += 2.0f;
     }
 
-    const ImU32 sand = IM_COL32(210, 193, 182, 255);
-    const ImU32 deep = IM_COL32( 27,  60,  83, 255);
-    const TagStyle tagLang    = { IM_COL32(150, 110,  90, 255), sand, 0 };
-    const TagStyle tagDefault = { IM_COL32(210, 178,  95, 255), deep, 0 };
-    const TagStyle tagForced  = { IM_COL32(180,  90,  80, 255), sand, 0 };
+    const TagStyle tagAccent  = accentTagStyle();
+    const TagStyle tagNeutral = neutralTagStyle();
 
     struct TagEntry { std::string text; const TagStyle* style; };
     std::vector<TagEntry> tags;
+    // Files routinely carry two tracks per language (regular + SDH) with no
+    // titles to tell them apart; the id at least makes them addressable.
     {
-        std::string lang = langLabel(t.lang);
-        if (!lang.empty()) {
-            char b[64]; snprintf(b, sizeof(b), ICON_LC_LANGUAGES "  %s",
-                                  lang.c_str());
-            tags.push_back({b, &tagLang});
-        }
+        char b[16]; snprintf(b, sizeof(b), "#%d", t.id);
+        tags.push_back({b, &tagNeutral});
     }
-    if (t.isDefault) tags.push_back({ICON_LC_STAR "  Default", &tagDefault});
-    if (t.isForced)  tags.push_back({"Forced",                  &tagForced});
+    if (t.isDefault) tags.push_back({ICON_LC_STAR "  Default", &tagAccent});
+    if (t.isForced)  tags.push_back({"Forced",                 &tagNeutral});
 
     const float gapX = 6.0f, gapY = 6.0f;
     const float tagH = lh + 6.0f;
