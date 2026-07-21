@@ -12,6 +12,7 @@ struct mpv_render_context;
 
 struct AudioTrack {
     int id;
+    int ffIndex = -1;   // absolute ffmpeg stream index (for external tools)
     std::string lang;
     std::string title;
     std::string codec;
@@ -54,6 +55,11 @@ public:
     void seek(double seconds);
     void seekRelative(double seconds);
     void setAudioTrack(int id);
+    // Play a pre-rendered binaural sidecar (external audio track, HRTF
+    // filter bypassed) / return to internal track + HRTF.
+    void useExternalBinaural(const std::string& wavPath);
+    void revertInternalAudio();
+    bool usingExternalBinaural() const { return m_externalBinaural; }
     void setSubtitleTrack(int id);
     void toggleSubtitles();
     void loadSubtitleFile(const std::string& path);
@@ -128,6 +134,8 @@ private:
     double m_position = 0.0;
     double m_duration = 0.0;
     std::string m_filename;
+    std::string m_afChain;               // saved HRTF filter option
+    bool        m_externalBinaural = false;
     std::vector<AudioTrack> m_audioTracks;
     int m_currentAudioTrack = 0;
     std::vector<SubtitleTrack> m_subtitleTracks;

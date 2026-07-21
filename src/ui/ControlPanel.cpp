@@ -604,6 +604,8 @@ void ControlPanel::renderSpatialContent() {
             atomic_store(&m_state->master_volume, vol);
     }
 
+    if (m_spatialExtraUi) m_spatialExtraUi();
+
     ImGui::SeparatorText("HRTF profile");
 
     if (m_profiles.empty()) {

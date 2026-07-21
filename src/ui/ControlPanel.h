@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 struct HrtfSharedState;
 class MpvPlayer;
 
@@ -40,6 +41,10 @@ public:
     // master volume, debug, status.  No Begin/End: caller owns the
     // window/child.
     void renderSpatialContent();
+    // Optional extra UI drawn at the top of the Spatial tab (Application
+    // wires the Atmos object-render control here — it owns the renderer).
+    using ExtraUiCallback = std::function<void()>;
+    void setSpatialExtraUi(ExtraUiCallback cb) { m_spatialExtraUi = cb; }
 
     // Renders the Headphone EQ tab body — EQ profile selection plus the
     // two crossfeed knobs.  These are pure post-processing on the
@@ -66,6 +71,7 @@ private:
     HrtfSharedState* m_state;
     int* m_selectedSpeaker = nullptr;
     MpvPlayer* m_player = nullptr;
+    ExtraUiCallback m_spatialExtraUi;
     char m_sofaPath[512] = {};
 
     // HRTF ear profiles

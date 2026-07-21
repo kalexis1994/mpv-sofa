@@ -148,6 +148,8 @@ bool Application::init(int argc, char* argv[]) {
     // Create UI panels
     m_controlPanel = std::make_unique<ControlPanel>(m_sharedState, &m_selectedSpeaker,
                                                        m_player.get());
+    // Atmos object-render control at the top of the Spatial tab.
+    m_controlPanel->setSpatialExtraUi([this]() { renderAtmosObjectsUi(); });
     m_transportBar = std::make_unique<TransportBar>(m_player.get());
     m_transportBar->setFullscreenCallback([this]() { toggleVideoFullscreen(); });
 
@@ -359,6 +361,77 @@ void Application::toggleVideoFullscreen() {
     }
 }
 
+// Absolute ffmpeg stream index of a TrueHD Atmos track in the current
+// file, or -1. "Atmos" here = TrueHD with >6 channels (7.1 bed + objects);
+// a plain TrueHD 5.1 has nothing to extract.
+int Application::atmosTrackIndex() const {
+    if (!m_player) return -1;
+    for (const auto& t : m_player->getAudioTracks()) {
+        if (t.codec == "truehd" && t.ffIndex >= 0 &&
+            (t.channels >= 8 || t.title.find("Atmos") != std::string::npos ||
+                                 t.title.find("atmos") != std::string::npos))
+            return t.ffIndex;
+    }
+    return -1;
+}
+
+// User pressed "Render Atmos objects": kick the background chain.
+void Application::requestBinaural() {
+    if (m_binauralMovie.empty()) return;
+    int idx = atmosTrackIndex();
+    if (idx < 0) return;
+    m_binauralArmed = true;
+    std::string sofa = m_sharedState && m_sharedState->sofa_path[0]
+                         ? std::string(m_sharedState->sofa_path)
+                         : std::string("assets/hrtf/default.sofa");
+    m_binaural.request(m_binauralMovie, idx, sofa, Settings::roomPreset());
+}
+
+// Spatial-tab control: only shown when the current file has a TrueHD
+// Atmos track. Renders the object bed through truehdd + the DSP into a
+// cached binaural sidecar and swaps mpv's audio to it.
+void Application::renderAtmosObjectsUi() {
+    int idx = atmosTrackIndex();
+    if (idx < 0) return;   // nothing object-based to offer
+
+    ImGui::SeparatorText("Atmos objects");
+    auto st = m_binaural.state();
+    if (m_player && m_player->usingExternalBinaural() &&
+        st == BinauralRenderer::State::Ready) {
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                           "Object-based binaural active");
+        ImGui::TextDisabled("Rendered through truehdd + the full DSP.");
+        if (ImGui::Button("Back to 7.1 bed (real-time)")) {
+            m_binauralArmed = false;
+            m_player->revertInternalAudio();
+        }
+    } else if (st == BinauralRenderer::State::Rendering) {
+        ImGui::Text("Rendering Atmos objects...");
+        ImGui::ProgressBar(m_binaural.progress(), ImVec2(-1, 0));
+        ImGui::TextDisabled("Decoding objects via truehdd, then binaural. "
+                            "Cached for next time.");
+        if (ImGui::Button("Cancel")) { m_binauralArmed = false; m_binaural.cancel(); }
+    } else {
+        ImGui::TextWrapped("This track carries Atmos objects. The real-time "
+                           "path spatializes the 7.1 bed; render the true "
+                           "objects for full height/movement precision.");
+        if (st == BinauralRenderer::State::Failed)
+            ImGui::TextColored(ImVec4(0.95f, 0.5f, 0.4f, 1.0f),
+                               "Last render failed: %s", m_binaural.error().c_str());
+        if (ImGui::Button("Render Atmos objects (binaural)"))
+            requestBinaural();
+    }
+}
+
+// Per-frame: when a render finishes, swap mpv's audio to the sidecar.
+void Application::updateBinaural() {
+    if (!m_binauralArmed || !m_player) return;
+    if (m_binaural.state() == BinauralRenderer::State::Ready &&
+        !m_player->usingExternalBinaural()) {
+        m_player->useExternalBinaural(m_binaural.resultPath());
+    }
+}
+
 void Application::processInput() {
     // Handle pending file drops
     if (!m_pendingFile.empty() && m_player) {
@@ -369,8 +442,14 @@ void Application::processInput() {
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
         Settings::pushRecent(m_pendingFile);
+        // New file → forget any previous object-render arming.
+        m_binauralMovie = m_pendingFile;
+        m_binauralArmed = false;
+        m_binaural.cancel();
         m_pendingFile.clear();
     }
+
+    updateBinaural();
 
     GLFWwindow* handle = m_window->getHandle();
 

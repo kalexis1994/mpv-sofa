@@ -139,6 +139,7 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
              "hrtf=sofa=assets/hrtf/default.sofa:shared-state=%" PRId64,
              (int64_t)(intptr_t)m_sharedState);
     fprintf(stderr, "[MpvPlayer] af option: %s\n", af_opt);
+    m_afChain = af_opt;   // remembered so external-binaural can restore it
     int af_err = mpv_set_option_string(m_mpv, "af", af_opt);
     fprintf(stderr, "[MpvPlayer] af set result: %d (%s)\n", af_err,
             af_err < 0 ? mpv_error_string(af_err) : "ok");
@@ -302,6 +303,36 @@ void MpvPlayer::setAudioTrack(int id) {
 #endif
 }
 
+void MpvPlayer::useExternalBinaural(const std::string& wavPath) {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    // The sidecar is ALREADY binaural (rendered through the full DSP), so
+    // bypass the HRTF filter to avoid double-spatialization, mute the
+    // internal track, and add + select the sidecar. audio-add with
+    // "cached" keeps it if re-selected; select flag makes it active.
+    mpv_set_property_string(m_mpv, "af", "");
+    const char* add[] = {"audio-add", wavPath.c_str(), "select", "Atmos objects (binaural)", nullptr};
+    mpv_command_async(m_mpv, 0, add);
+    m_externalBinaural = true;
+    fprintf(stderr, "[MpvPlayer] external binaural sidecar: %s\n", wavPath.c_str());
+#else
+    (void)wavPath;
+#endif
+}
+
+void MpvPlayer::revertInternalAudio() {
+#ifdef HAVE_MPV
+    if (!m_mpv || !m_externalBinaural) return;
+    // Restore the HRTF filter chain and hand playback back to an internal
+    // audio track (mpv auto-selects the next best when the external one is
+    // dropped by the next loadfile; here we just re-arm the filter).
+    m_externalBinaural = false;
+    if (!m_afChain.empty())
+        mpv_set_property_string(m_mpv, "af", m_afChain.c_str());
+    fprintf(stderr, "[MpvPlayer] reverted to internal audio + HRTF\n");
+#endif
+}
+
 void MpvPlayer::setSubtitleTrack(int id) {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
@@ -405,6 +436,7 @@ void MpvPlayer::refreshTrackList() {
         // Check if this is an audio track
         const char* type = nullptr;
         int id = 0;
+        int ffIndex = -1;
         const char* lang = nullptr;
         const char* title = nullptr;
         const char* codec = nullptr;
@@ -425,6 +457,8 @@ void MpvPlayer::refreshTrackList() {
                 type = val.u.string;
             else if (strcmp(key, "id") == 0 && val.format == MPV_FORMAT_INT64)
                 id = (int)val.u.int64;
+            else if (strcmp(key, "ff-index") == 0 && val.format == MPV_FORMAT_INT64)
+                ffIndex = (int)val.u.int64;
             else if (strcmp(key, "lang") == 0 && val.format == MPV_FORMAT_STRING)
                 lang = val.u.string;
             else if (strcmp(key, "title") == 0 && val.format == MPV_FORMAT_STRING)
@@ -450,6 +484,7 @@ void MpvPlayer::refreshTrackList() {
         if (type && strcmp(type, "audio") == 0) {
             AudioTrack track;
             track.id = id;
+            track.ffIndex = ffIndex;
             track.lang = lang ? lang : "";
             track.title = title ? title : "";
             track.codec = codec ? codec : "";

@@ -9,6 +9,7 @@
 #include "ui/TrackPicker.h"
 #include "ui/PreferencesDialog.h"
 #include "audio/MpvPlayer.h"
+#include "audio/BinauralRenderer.h"
 #include "core/MediaServer.h"
 
 #include <memory>
@@ -77,6 +78,14 @@ private:
     std::unique_ptr<Camera> m_camera;
     std::unique_ptr<ImGuiLayer> m_imgui;
     std::unique_ptr<MpvPlayer> m_player;
+    BinauralRenderer m_binaural;
+    std::string m_binauralMovie;   // path the sidecar render belongs to
+    bool m_binauralArmed = false;  // user asked for object rendering
+    // Detect the current file's TrueHD Atmos track (ff-index) or -1.
+    int atmosTrackIndex() const;
+    void updateBinaural();         // drive render + audio swap each frame
+    void requestBinaural();        // user pressed "Render Atmos objects"
+    void renderAtmosObjectsUi();   // Spatial-tab control (ImGui)
 
     // UI panels
     std::unique_ptr<ControlPanel> m_controlPanel;

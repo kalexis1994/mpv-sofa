@@ -117,6 +117,7 @@ set(APP_SOURCES
     src/ui/TrackPicker.cpp
     src/ui/PreferencesDialog.cpp
     src/audio/MpvPlayer.cpp
+    src/audio/BinauralRenderer.cpp
     src/core/SharedState.c
     src/core/Settings.cpp
 )
