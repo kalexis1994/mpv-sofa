@@ -140,6 +140,8 @@ target_link_libraries(mpv-sofa PRIVATE
     glm::glm
     imgui
     imguifiledialog
+    mysofa
+    z
 )
 
 if(MPV_FOUND)

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <algorithm>
+#include <mysofa.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -233,6 +234,45 @@ static const char* guessDescription(const std::string& name) {
     return "";
 }
 
+// Real AES69 metadata straight from the .sofa file: subject/dummy head,
+// database, measurement grid, license — beats guessing from the filename.
+static std::string readSofaMetadata(const std::string& path) {
+    int err = 0;
+    MYSOFA_HRTF* h = mysofa_load(path.c_str(), &err);
+    if (!h) return "";
+
+    auto attr = [&](const char* key) -> std::string {
+        for (MYSOFA_ATTRIBUTE* a = h->attributes; a; a = a->next)
+            if (a->name && a->value && !strcmp(a->name, key))
+                return a->value;
+        return "";
+    };
+    std::string parts;
+    auto add = [&](const std::string& s) {
+        if (s.empty()) return;
+        if (!parts.empty()) parts += " \xc2\xb7 ";   /* " · " */
+        parts += s;
+    };
+
+    add(attr("ListenerShortName"));
+    add(attr("DatabaseName"));
+    char buf[64];
+    if (h->M) {
+        snprintf(buf, sizeof(buf), "%u directions", h->M);
+        add(buf);
+    }
+    if (h->N && h->DataSamplingRate.values && h->DataSamplingRate.elements) {
+        snprintf(buf, sizeof(buf), "%u taps @ %.0f kHz", h->N,
+                 h->DataSamplingRate.values[0] / 1000.0);
+        add(buf);
+    }
+    add(attr("Organization"));
+    add(attr("License"));
+
+    mysofa_free(h);
+    return parts;
+}
+
 // Convert filename to display name: "CIPIC_subject_003.sofa" -> "CIPIC Subject 003"
 static std::string filenameToDisplayName(const std::string& filename) {
     // Remove .sofa extension
@@ -292,6 +332,9 @@ void ControlPanel::scanProfiles() {
             // Normalize to forward slashes for consistency
             std::replace(profile.path.begin(), profile.path.end(), '\\', '/');
             profile.name = filenameToDisplayName(entry.path().filename().string());
+            // Placeholder from the filename; the real AES69 metadata loads
+            // lazily on selection (parsing ~80 SOFA files up-front would
+            // block the UI for seconds).
             profile.description = guessDescription(entry.path().filename().string());
 
             m_profiles.push_back(std::move(profile));
@@ -437,9 +480,14 @@ void ControlPanel::renderSpatialContent() {
             loadProfile(m_selectedProfile);
         }
 
-        // Show description
+        // Show description — real AES69 metadata, read lazily once per file
         if (m_selectedProfile >= 0 && m_selectedProfile < (int)m_profiles.size()) {
-            const auto& prof = m_profiles[m_selectedProfile];
+            auto& prof = m_profiles[m_selectedProfile];
+            if (!prof.metaLoaded) {
+                prof.metaLoaded = true;
+                std::string meta = readSofaMetadata(prof.path);
+                if (!meta.empty()) prof.description = meta;
+            }
             if (!prof.description.empty())
                 ImGui::TextDisabled("%s", prof.description.c_str());
             ImGui::TextDisabled("File: %s", prof.path.c_str());

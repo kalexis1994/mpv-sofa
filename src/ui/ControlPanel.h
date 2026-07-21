@@ -9,7 +9,8 @@ class MpvPlayer;
 struct HrtfProfile {
     std::string name;        // Display name (derived from filename)
     std::string path;        // Full path to .sofa file
-    std::string description; // Optional description
+    std::string description; // Filename guess until metaLoaded, then AES69
+    bool metaLoaded = false; // Real SOFA metadata read lazily on selection
 };
 
 // Spatial object sidecar (.aobj) file format:
