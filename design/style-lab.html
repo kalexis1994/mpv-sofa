@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>mpv-sofa — Style Lab (Polaroid)</title>
+<style>
+/* ============================================================
+   mpv-sofa STYLE LAB — tema "Polaroid"
+   Archivo de exploración. Nada de esto está conectado a la app
+   todavía: los tokens de :root son lo que después se porta a
+   halosound/app/css/styles.css y al tema ImGui del desktop.
+   Sin recursos externos (webOS va offline, y el desktop también).
+   ============================================================ */
+
+/* ---------- TOKENS ---------- */
+:root {
+  /* El "espectro Polaroid": la franja de colores de la marca.
+     Son nuestros acentos. Intensos, saturados, memorables. */
+  --pol-blue:    #0F8FE8;
+  --pol-green:   #2FC24D;
+  --pol-yellow:  #FFD426;
+  --pol-orange:  #FF8A1F;
+  --pol-red:     #FF2E4D;
+  --pol-magenta: #FF3D9A;
+
+  /* Acento activo (se cambia con los swatches de arriba) */
+  --accent: var(--pol-red);
+  --accent-ink: #ffffff;      /* texto sobre el acento */
+
+  /* El marco de la foto es SIEMPRE blanco cálido, en ambos temas.
+     Es la firma del Polaroid: la foto trae su propia luz. */
+  --frame:      #F7F3E9;
+  --frame-edge: #E2DACB;
+  --frame-ink:  #211C18;
+
+  /* Tipografía */
+  --font-ui:   'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-hand: 'Segoe Print', 'Bradley Hand', 'Chalkboard SE', 'Comic Sans MS', cursive;
+  --font-cap:  var(--font-hand);   /* toggle "caption a mano" */
+
+  /* Geometría */
+  --r-frame: 4px;     /* el Polaroid casi no tiene esquinas redondas */
+  --r-ui:   14px;
+  --r-pill: 999px;
+  --tilt: -1.4deg;
+}
+
+/* --- TEMA OSCURO: "Darkroom" (cuarto de revelado) --- */
+:root, :root[data-theme="dark"] {
+  --bg:        #100E0D;   /* negro cálido, no azulado */
+  --bg-2:      #1A1614;
+  --surface:   #221D1A;
+  --surface-2: #2C2521;
+  --line:      #3A312C;
+  --ink:       #F5EFE4;
+  --ink-2:     #B3A79A;
+  --ink-3:     #7A6F65;
+  --shadow: 0 18px 40px rgba(0,0,0,.55), 0 3px 10px rgba(0,0,0,.4);
+  --glow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent),
+          0 0 42px color-mix(in srgb, var(--accent) 45%, transparent);
+  --grain-op: .20;
+  --grain-blend: overlay;
+}
+
+/* --- TEMA CLARO: "Daylight" (fotos sobre la mesa) --- */
+:root[data-theme="light"] {
+  --bg:        #E3D9C8;   /* papel/cartón cálido */
+  --bg-2:      #DED3C0;   /* más hondo que el marco: la foto tiene que resaltar */
+  --surface:   #FDFBF6;
+  --surface-2: #F4EEE3;
+  --line:      #DCD2C2;
+  --ink:       #191512;
+  --ink-2:     #5C5248;
+  --ink-3:     #8B8075;
+  --shadow: 0 14px 30px rgba(80,60,40,.18), 0 2px 6px rgba(80,60,40,.14);
+  --glow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent),
+          0 0 30px color-mix(in srgb, var(--accent) 30%, transparent);
+  --grain-op: .10;
+  --grain-blend: multiply;
+}
+
+/* ---------- BASE ---------- */
+* { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  transition: background .35s ease, color .35s ease;
+  padding-bottom: 80px;
+}
+/* Grano de película: es lo que hace que "se sienta" analógico.
+   SVG inline, cero peticiones. */
+body::after {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:9998;
+  opacity: var(--grain-op); mix-blend-mode: var(--grain-blend);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+body.no-grain::after { display:none; }
+
+h1,h2,h3 { font-weight:700; letter-spacing:-.02em; }
+section { max-width:1180px; margin:0 auto; padding:56px 28px 0; }
+.sec-head { display:flex; align-items:baseline; gap:14px; margin-bottom:6px; }
+.sec-head h2 { font-size:26px; }
+.sec-head .num {
+  font-family:var(--font-hand); font-size:20px; color:var(--accent);
+}
+.sec-note { color:var(--ink-2); font-size:15px; line-height:1.65; max-width:76ch; margin-bottom:26px; }
+
+/* ---------- BARRA SUPERIOR ---------- */
+.topbar {
+  position:sticky; top:0; z-index:9000;
+  display:flex; align-items:center; gap:20px; flex-wrap:wrap;
+  padding:14px 28px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(14px);
+  border-bottom:1px solid var(--line);
+}
+.brand { font-size:19px; font-weight:800; letter-spacing:-.03em; }
+.brand em { font-style:normal; color:var(--accent); }
+.brand small { display:block; font-family:var(--font-hand); font-size:12px; color:var(--ink-3); letter-spacing:0; font-weight:400; }
+.tb-group { display:flex; align-items:center; gap:8px; margin-left:auto; }
+.tb-label { font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--ink-3); }
+.swatch {
+  width:26px; height:26px; border-radius:50%; border:2px solid transparent;
+  cursor:pointer; padding:0; transition:transform .18s ease, border-color .18s;
+}
+.swatch:hover { transform:scale(1.18); }
+.swatch[aria-pressed="true"] { border-color:var(--ink); transform:scale(1.18); }
+.btn-ghost {
+  font-family:inherit; font-size:13px; color:var(--ink);
+  background:var(--surface); border:1px solid var(--line);
+  padding:8px 14px; border-radius:var(--r-pill); cursor:pointer;
+  transition:border-color .2s, background .2s;
+}
+.btn-ghost:hover { border-color:var(--accent); }
+
+/* ---------- POLAROID ---------- */
+/* La idea central: cada póster es una foto instantánea. Marco blanco,
+   más grueso abajo, con el título escrito a mano en ese margen. */
+.pola {
+  background:var(--frame);
+  padding:13px 13px 0;
+  border-radius:var(--r-frame);
+  border:1px solid var(--frame-edge);   /* filo del cartón */
+  box-shadow:var(--shadow);
+  transform: rotate(var(--tilt));
+  transition: transform .28s cubic-bezier(.2,.9,.3,1.3), box-shadow .28s;
+  position:relative;
+  width:210px; flex:0 0 auto;
+  cursor:pointer;
+}
+.pola:nth-child(even) { --tilt: 1.6deg; }
+.pola:nth-child(3n)   { --tilt: -.6deg; }
+.pola .shot {
+  aspect-ratio:2/3; border-radius:2px; overflow:hidden; position:relative;
+  background:#0b0b0d;
+  /* viñeta + calce de emulsión */
+  box-shadow: inset 0 0 60px rgba(0,0,0,.55);
+}
+.pola .shot::after {   /* brillo de la superficie */
+  content:''; position:absolute; inset:0;
+  background:linear-gradient(115deg, rgba(255,255,255,.16) 0%, transparent 34%);
+}
+.pola .cap {
+  font-family:var(--font-cap); color:var(--frame-ink);
+  padding:11px 4px 15px; line-height:1.15;
+  /* Altura fija: los títulos de dos líneas no deben descuadrar el estante. */
+  height:76px; display:flex; flex-direction:column; justify-content:space-between;
+}
+.pola .cap b { display:block; font-size:15px; font-weight:600;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.pola .cap span { font-size:12px; opacity:.55; }
+
+/* Foco (d-pad de la TV / teclado): la foto se endereza, sube y
+   se enciende el borde del acento. Endereza = "la elegiste". */
+.pola:hover, .pola.is-focus {
+  transform: rotate(0deg) translateY(-10px) scale(1.045);
+  box-shadow: var(--shadow), var(--glow);
+  z-index:5;
+}
+/* Cinta adhesiva, opcional, para lo "fijado"/continuar viendo */
+.pola.taped::before {
+  content:''; position:absolute; top:-16px; left:50%; translate:-50% 0; z-index:6;
+  width:82px; height:32px; rotate:-4deg;
+  background:linear-gradient(180deg, rgba(255,252,236,.72), rgba(236,226,196,.55));
+  border-left:1px solid rgba(255,255,255,.45); border-right:1px solid rgba(0,0,0,.08);
+  box-shadow:0 2px 8px rgba(0,0,0,.35);
+}
+/* Insignia de espectro: marca "Atmos"/"HDR" en la esquina de la foto */
+.badge {
+  position:absolute; z-index:3; top:9px; left:9px;
+  display:flex; gap:4px; align-items:center;
+  background:rgba(10,8,7,.72); backdrop-filter:blur(6px);
+  color:#fff; font-size:10px; font-weight:700; letter-spacing:.09em;
+  padding:5px 9px; border-radius:var(--r-pill); text-transform:uppercase;
+}
+.badge i { width:6px; height:6px; border-radius:50%; background:var(--accent); font-style:normal; }
+
+/* Pósters falsos (sin imágenes externas) */
+.art { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:14px; }
+.art h4 { font-size:19px; color:#fff; text-shadow:0 2px 14px rgba(0,0,0,.7); letter-spacing:-.02em; line-height:1.1; }
+.a1 { background:radial-gradient(120% 80% at 30% 20%, #7a1220, #180507 60%), linear-gradient(#2a0a0e,#0b0405); }
+.a2 { background:radial-gradient(100% 70% at 70% 30%, #0d4f74, #04141f 65%), linear-gradient(#07202e,#030a10); }
+.a3 { background:radial-gradient(110% 80% at 50% 15%, #6b4a12, #150d03 62%), linear-gradient(#241705,#0a0602); }
+.a4 { background:radial-gradient(120% 90% at 40% 80%, #1d5f37, #04120a 60%), linear-gradient(#092414,#020805); }
+.a5 { background:radial-gradient(120% 90% at 60% 25%, #4a1d63, #100518 62%), linear-gradient(#1c0a26,#070209); }
+
+/* ---------- FRANJA DE ESPECTRO ---------- */
+.spectrum {
+  height:6px; border-radius:var(--r-pill);
+  background:linear-gradient(90deg,
+    var(--pol-blue) 0 20%, var(--pol-green) 20% 40%, var(--pol-yellow) 40% 60%,
+    var(--pol-orange) 60% 80%, var(--pol-red) 80% 100%);
+}
+
+/* ---------- TOKENS / PALETA ---------- */
+.tokens { display:grid; grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:12px; }
+.tok {
+  border:1px solid var(--line); border-radius:var(--r-ui); overflow:hidden;
+  background:var(--surface);
+}
+.tok .chip { height:64px; }
+.tok .meta { padding:9px 11px; }
+.tok .meta b { display:block; font-size:12px; }
+.tok .meta code { font-size:11px; color:var(--ink-3); }
+
+/* ---------- COMPONENTES ---------- */
+.row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+.stack { display:flex; flex-direction:column; gap:22px; }
+.card {
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--r-ui); padding:20px;
+}
+.card h3 { font-size:15px; margin-bottom:14px; }
+
+.btn {
+  font-family:inherit; font-size:15px; font-weight:600; cursor:pointer;
+  padding:12px 22px; border-radius:var(--r-pill); border:1px solid transparent;
+  transition:transform .16s, box-shadow .2s, background .2s;
+}
+.btn:active { transform:translateY(1px); }
+.btn-primary { background:var(--accent); color:var(--accent-ink); }
+.btn-primary:hover { box-shadow:var(--glow); }
+.btn-second { background:transparent; color:var(--ink); border-color:var(--line); }
+.btn-second:hover { border-color:var(--accent); color:var(--accent); }
+
+.chip-tag {
+  font-size:12px; font-weight:600; letter-spacing:.04em;
+  padding:6px 12px; border-radius:var(--r-pill);
+  background:color-mix(in srgb, var(--accent) 16%, transparent);
+  color:var(--accent);
+  border:1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.chip-tag.neutral {
+  background:var(--surface-2); color:var(--ink-2); border-color:var(--line);
+}
+
+/* Slider estilo carrete */
+.slider { width:280px; }
+.slider .track { height:6px; border-radius:var(--r-pill); background:var(--surface-2); position:relative; }
+.slider .fill { position:absolute; inset:0 auto 0 0; width:62%; border-radius:var(--r-pill); background:var(--accent); }
+.slider .knob {
+  position:absolute; left:62%; top:50%; translate:-50% -50%;
+  width:20px; height:20px; border-radius:50%; background:var(--frame);
+  border:3px solid var(--accent); box-shadow:0 2px 8px rgba(0,0,0,.4);
+}
+
+/* Toggle */
+.tgl { width:52px; height:30px; border-radius:var(--r-pill); background:var(--surface-2);
+       border:1px solid var(--line); position:relative; cursor:pointer; transition:background .22s; }
+.tgl i { position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%;
+         background:var(--ink-3); transition:left .22s cubic-bezier(.2,.9,.3,1.3), background .22s; }
+.tgl.on { background:color-mix(in srgb, var(--accent) 28%, transparent); border-color:var(--accent); }
+.tgl.on i { left:25px; background:var(--accent); }
+
+/* ---------- MOCKUP: pantalla ---------- */
+.screen-wrap { border-radius:18px; overflow:hidden; border:1px solid var(--line); box-shadow:var(--shadow); }
+.screen-bar { display:flex; align-items:center; gap:8px; padding:10px 14px; background:var(--surface-2); border-bottom:1px solid var(--line); }
+.screen-bar span { width:10px; height:10px; border-radius:50%; background:var(--ink-3); opacity:.5; }
+.screen-bar small { margin-left:8px; font-size:11px; color:var(--ink-3); letter-spacing:.1em; text-transform:uppercase; }
+.screen-body { background:var(--bg-2); padding:34px 30px; }
+
+/* Biblioteca */
+.lib-head { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:26px; }
+.lib-head h3 { font-size:30px; letter-spacing:-.03em; }
+.lib-head p { font-family:var(--font-hand); color:var(--ink-3); font-size:14px; margin-top:4px; }
+.shelf { display:flex; gap:30px; overflow-x:auto; padding:30px 6px 34px;
+  scrollbar-width:none; }
+.shelf::-webkit-scrollbar { display:none; }  /* en TV se navega con d-pad */
+/* La "repisa": línea sutil bajo las fotos, como el borde de una mesa */
+.shelf-line { height:1px; background:linear-gradient(90deg, transparent, var(--line) 12%, var(--line) 88%, transparent); margin-top:-18px; }
+
+/* Reproductor */
+.stage { position:relative; aspect-ratio:16/9; background:#000; border-radius:6px; overflow:hidden; }
+.stage .frame-art { position:absolute; inset:0;
+  background:radial-gradient(75% 60% at 50% 42%, #2b3f52 0%, #0a0f14 62%, #000 100%); }
+.stage .vig { position:absolute; inset:0; box-shadow:inset 0 0 160px rgba(0,0,0,.85); }
+.hud {
+  position:absolute; left:0; right:0; bottom:0;
+  padding:44px 30px 22px;
+  background:linear-gradient(transparent, rgba(8,6,5,.55) 35%, rgba(8,6,5,.93));
+  color:#F5EFE4;
+}
+.hud .now { display:flex; align-items:flex-end; gap:14px; margin-bottom:16px; }
+.hud .now b { font-size:22px; letter-spacing:-.02em; }
+.hud .now span { font-size:13px; color:#b3a79a; }
+/* Línea de tiempo con marcas de capítulo (lo que ya tenemos en la app) */
+.timeline { position:relative; height:26px; display:flex; align-items:center; }
+.tl-track { position:absolute; left:0; right:0; height:6px; border-radius:var(--r-pill); background:rgba(255,255,255,.16); }
+.tl-buf   { position:absolute; left:0; height:6px; width:71%; border-radius:var(--r-pill); background:rgba(255,255,255,.28); }
+.tl-play  { position:absolute; left:0; height:6px; width:38%; border-radius:var(--r-pill);
+            background:linear-gradient(90deg, var(--pol-orange), var(--accent)); }
+.tl-tick  { position:absolute; top:50%; translate:0 -50%; width:2px; height:14px; background:rgba(255,255,255,.5); border-radius:1px; }
+.tl-knob  { position:absolute; left:38%; top:50%; translate:-50% -50%; width:18px; height:18px;
+            border-radius:50%; background:var(--frame); border:3px solid var(--accent);
+            box-shadow:0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent); }
+.hud .times { display:flex; justify-content:space-between; font-size:12px; color:#b3a79a; margin-top:6px; }
+.hud .chapter { font-family:var(--font-hand); font-size:13px; color:var(--accent); }
+.controls { display:flex; align-items:center; gap:12px; margin-top:16px; }
+.ctl {
+  width:44px; height:44px; border-radius:50%; display:grid; place-items:center;
+  background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.14);
+  color:#fff; font-size:16px; cursor:pointer; transition:.2s;
+}
+.ctl:hover { background:var(--accent); border-color:var(--accent); }
+.ctl.big { width:58px; height:58px; background:var(--accent); border-color:var(--accent); font-size:20px; }
+.controls .right { margin-left:auto; display:flex; gap:10px; }
+.pill {
+  display:flex; align-items:center; gap:7px; font-size:12px; font-weight:600;
+  padding:9px 14px; border-radius:var(--r-pill);
+  background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.14); color:#fff; cursor:pointer;
+}
+.pill:hover { border-color:var(--accent); }
+.pill i { width:7px; height:7px; border-radius:50%; background:var(--pol-green); font-style:normal; }
+
+/* Tarjetas SOFA (el selector de perfiles del desktop) */
+.sofa-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:16px; }
+.sofa {
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--r-ui);
+  padding:16px; cursor:pointer; transition:.22s; position:relative; overflow:hidden;
+}
+.sofa::before { content:''; position:absolute; inset:0 auto 0 0; width:4px; background:var(--line); transition:.22s; }
+.sofa:hover { border-color:color-mix(in srgb, var(--accent) 50%, var(--line)); transform:translateY(-2px); }
+.sofa.sel { border-color:var(--accent); box-shadow:var(--glow); }
+.sofa.sel::before { background:var(--accent); }
+.sofa b { display:block; font-size:15px; margin-bottom:3px; }
+.sofa .sub { font-size:12px; color:var(--ink-3); margin-bottom:12px; }
+.sofa .tags { display:flex; gap:6px; flex-wrap:wrap; }
+.sofa .tags span {
+  font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  padding:4px 8px; border-radius:5px; background:var(--surface-2); color:var(--ink-2);
+  border:1px solid var(--line);
+}
+
+.foot { max-width:1180px; margin:70px auto 0; padding:26px 28px 0; border-top:1px solid var(--line); color:var(--ink-3); font-size:13px; line-height:1.7; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><em>mpv</em>-sofa <small>style lab · polaroid</small></div>
+  <div class="tb-group">
+    <span class="tb-label">Acento</span>
+    <button class="swatch" style="background:#FF2E4D" data-accent="--pol-red"     aria-pressed="true"  title="Rojo"></button>
+    <button class="swatch" style="background:#FF8A1F" data-accent="--pol-orange"  aria-pressed="false" title="Naranja"></button>
+    <button class="swatch" style="background:#FFD426" data-accent="--pol-yellow"  aria-pressed="false" title="Amarillo"></button>
+    <button class="swatch" style="background:#2FC24D" data-accent="--pol-green"   aria-pressed="false" title="Verde"></button>
+    <button class="swatch" style="background:#0F8FE8" data-accent="--pol-blue"    aria-pressed="false" title="Azul"></button>
+    <button class="swatch" style="background:#FF3D9A" data-accent="--pol-magenta" aria-pressed="false" title="Magenta"></button>
+  </div>
+  <div class="tb-group" style="margin-left:0">
+    <button class="btn-ghost" id="btn-theme">☾ Oscuro</button>
+    <button class="btn-ghost" id="btn-grain">Grano: on</button>
+    <button class="btn-ghost" id="btn-hand">Manuscrita: on</button>
+  </div>
+</div>
+
+<section>
+  <div class="sec-head"><span class="num">00</span><h2>La idea</h2></div>
+  <p class="sec-note">
+    Un Polaroid es <b>una foto que trae su propio marco blanco y su propia luz</b>. Eso resuelve
+    justo el problema de una app de cine: el fondo tiene que ser oscuro y desaparecer, pero la
+    biblioteca tiene que sentirse cálida y tocable. Cada póster va montado como una instantánea
+    —marco blanco, margen grueso abajo, título escrito a mano, ligeramente torcida— y al enfocarla
+    con el d-pad <b>se endereza y se levanta</b>. Ese gesto es el foco: no hace falta un rectángulo
+    azul de sistema, la foto elegida es la que está derecha.
+    Los acentos salen de la franja de colores de Polaroid (azul, verde, amarillo, naranja, rojo):
+    intensos de verdad, y ya vienen como familia coherente. El grano de película por encima ata
+    todo y disimula el banding en gradientes oscuros del OLED.
+  </p>
+  <div class="spectrum"></div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">01</span><h2>Paleta</h2></div>
+  <p class="sec-note">
+    El acento se cambia arriba y todo lo demás reacciona. Los neutros son <b>cálidos</b>, no
+    azulados: el negro es #100E0D (negro de cuarto oscuro) y el claro es papel/cartón, no blanco
+    clínico. El marco de las fotos se queda blanco cálido en los dos temas — es la constante.
+  </p>
+  <div class="tokens">
+    <div class="tok"><div class="chip" style="background:var(--pol-blue)"></div><div class="meta"><b>Azul</b><code>#0F8FE8</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--pol-green)"></div><div class="meta"><b>Verde</b><code>#2FC24D</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--pol-yellow)"></div><div class="meta"><b>Amarillo</b><code>#FFD426</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--pol-orange)"></div><div class="meta"><b>Naranja</b><code>#FF8A1F</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--pol-red)"></div><div class="meta"><b>Rojo</b><code>#FF2E4D</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--pol-magenta)"></div><div class="meta"><b>Magenta</b><code>#FF3D9A</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--bg)"></div><div class="meta"><b>Fondo</b><code>--bg</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--surface)"></div><div class="meta"><b>Superficie</b><code>--surface</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--surface-2)"></div><div class="meta"><b>Superficie 2</b><code>--surface-2</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--frame)"></div><div class="meta"><b>Marco foto</b><code>#F7F3E9</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--ink)"></div><div class="meta"><b>Texto</b><code>--ink</code></div></div>
+    <div class="tok"><div class="chip" style="background:var(--ink-3)"></div><div class="meta"><b>Texto tenue</b><code>--ink-3</code></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">02</span><h2>Biblioteca</h2></div>
+  <p class="sec-note">
+    La tercera foto está en estado <b>enfocado</b> (así se vería con el d-pad encima) y la primera
+    tiene <b>cinta adhesiva</b> — mi propuesta para "continuar viendo": lo que dejaste a medias
+    queda pegado al estante. Pasá el mouse por las demás para ver el gesto.
+  </p>
+  <div class="screen-wrap">
+    <div class="screen-bar"><span></span><span></span><span></span><small>TV · 1920×1080</small></div>
+    <div class="screen-body">
+      <div class="lib-head">
+        <div>
+          <h3>Tu biblioteca</h3>
+          <p>34 películas · servidor HaloSound</p>
+        </div>
+        <div class="row">
+          <span class="chip-tag">Continuar</span>
+          <span class="chip-tag neutral">Todas</span>
+          <span class="chip-tag neutral">Atmos</span>
+        </div>
+      </div>
+      <div class="shelf">
+        <div class="pola taped">
+          <div class="shot"><div class="art a1"><h4>Dawn of the Dead</h4></div><div class="badge"><i></i>Atmos</div></div>
+          <div class="cap"><b>Dawn of the Dead</b><span>2004 · 1h 41m · 38%</span></div>
+        </div>
+        <div class="pola">
+          <div class="shot"><div class="art a2"><h4>The Bourne Supremacy</h4></div><div class="badge"><i></i>4K HDR</div></div>
+          <div class="cap"><b>The Bourne Supremacy</b><span>2004 · 1h 48m</span></div>
+        </div>
+        <div class="pola is-focus">
+          <div class="shot"><div class="art a3"><h4>Sleepy Hollow</h4></div><div class="badge"><i></i>Atmos</div></div>
+          <div class="cap"><b>Sleepy Hollow</b><span>1999 · 1h 45m</span></div>
+        </div>
+        <div class="pola">
+          <div class="shot"><div class="art a4"><h4>The Two Towers</h4></div><div class="badge"><i></i>TrueHD</div></div>
+          <div class="cap"><b>The Two Towers</b><span>2002 · 2h 59m</span></div>
+        </div>
+        <div class="pola">
+          <div class="shot"><div class="art a5"><h4>Blade Runner 2049</h4></div><div class="badge"><i></i>4K HDR</div></div>
+          <div class="cap"><b>Blade Runner 2049</b><span>2017 · 2h 44m</span></div>
+        </div>
+      </div>
+      <div class="shelf-line"></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">03</span><h2>Reproductor</h2></div>
+  <p class="sec-note">
+    El HUD no lleva marco de Polaroid — encima del video el marco molesta. Lo que hereda es
+    el <b>acento en la barra de progreso</b> (degradado naranja→acento, como una tira de película
+    revelándose), las marcas de capítulo que ya tenemos, y el capítulo actual escrito a mano.
+    Los selectores de audio y subtítulo van como píldoras a la derecha, con un punto verde cuando
+    el binaural está activo.
+  </p>
+  <div class="screen-wrap">
+    <div class="screen-bar"><span></span><span></span><span></span><small>Reproducción</small></div>
+    <div class="stage">
+      <div class="frame-art"></div><div class="vig"></div>
+      <div class="hud">
+        <div class="now">
+          <b>The Bourne Supremacy</b>
+          <span>2004 · HEVC 4K · TrueHD Atmos → binaural</span>
+        </div>
+        <div class="timeline">
+          <div class="tl-track"></div>
+          <div class="tl-buf"></div>
+          <div class="tl-play"></div>
+          <div class="tl-tick" style="left:12%"></div>
+          <div class="tl-tick" style="left:27%"></div>
+          <div class="tl-tick" style="left:44%"></div>
+          <div class="tl-tick" style="left:58%"></div>
+          <div class="tl-tick" style="left:76%"></div>
+          <div class="tl-tick" style="left:89%"></div>
+          <div class="tl-knob"></div>
+        </div>
+        <div class="times">
+          <span>41:12</span>
+          <span class="chapter">3 · Persecución en Moscú</span>
+          <span>1:48:03</span>
+        </div>
+        <div class="controls">
+          <div class="ctl">⏮</div>
+          <div class="ctl big">❚❚</div>
+          <div class="ctl">⏭</div>
+          <div class="right">
+            <div class="pill"><i></i>Binaural · KEMAR</div>
+            <div class="pill">Subtítulos · ES</div>
+            <div class="pill">⚙</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><span class="num">04</span><h2>Componentes</h2></div>
+  <p class="sec-note">
+    Los controles sí son limpios y geométricos: el carácter analógico vive en las fotos y el grano,
+    no en los botones. Si todo fuera "vintage" se vuelve ruidoso y en una TV a 3 metros se lee mal.
+  </p>
+  <div class="stack">
+    <div class="card">
+      <h3>Botones y etiquetas</h3>
+      <div class="row">
+        <button class="btn btn-primary">Reproducir</button>
+        <button class="btn btn-second">Ver info</button>
+        <span class="chip-tag">Atmos</span>
+        <span class="chip-tag neutral">1080p</span>
+        <span class="chip-tag neutral">DTS-HD</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Controles</h3>
+      <div class="row" style="gap:36px">
+        <div class="slider">
+          <div class="track"><div class="fill"></div><div class="knob"></div></div>
+        </div>
+        <div class="tgl on" onclick="this.classList.toggle('on')"><i></i></div>
+        <div class="tgl" onclick="this.classList.toggle('on')"><i></i></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Perfiles SOFA — tarjetas con tags (versión desktop)</h3>
+      <div class="sofa-grid">
+        <div class="sofa sel">
+          <b>MIT KEMAR</b>
+          <div class="sub">Gardner &amp; Martin, 1994</div>
+          <div class="tags"><span>710 medidas</span><span>44.1 kHz</span><span>CC-BY</span><span>Maniquí</span></div>
+        </div>
+        <div class="sofa">
+          <b>SADIE II · D2</b>
+          <div class="sub">Universidad de York</div>
+          <div class="tags"><span>2114 medidas</span><span>48 kHz</span><span>CC-BY</span><span>Humano</span></div>
+        </div>
+        <div class="sofa">
+          <b>HUTUBS · pp01</b>
+          <div class="sub">TU Berlín</div>
+          <div class="tags"><span>440 medidas</span><span>44.1 kHz</span><span>CC-BY</span><span>Humano</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="foot">
+  <b>Cómo se porta:</b> el bloque <code>:root</code> de arriba es literalmente lo que reemplaza a los
+  tokens actuales de <code>halosound/app/css/styles.css</code> (que hoy son <code>#1a1a2e</code> azulados),
+  y los mismos valores alimentan el tema de ImGui en el desktop vía <code>ImGuiStyle</code>.
+  El grano y el marco Polaroid son CSS puro en la TV; en el desktop el marco se dibuja con
+  <code>ImDrawList</code> y el grano ya lo tenemos como filtro de mpv (<i>cinema grain</i>).
+  <br><br>
+  <b>Para decidir:</b> ¿acento rojo o naranja de base? ¿la manuscrita se queda (probá el toggle —
+  en webOS cae a una cursiva del sistema) o vamos con la sans en todo? ¿la cinta adhesiva para
+  "continuar viendo" te cierra o es demasiado?
+</div>
+
+<script>
+const root = document.documentElement;
+
+document.querySelectorAll('.swatch').forEach(sw => {
+  sw.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(s => s.setAttribute('aria-pressed','false'));
+    sw.setAttribute('aria-pressed','true');
+    root.style.setProperty('--accent', `var(${sw.dataset.accent})`);
+    // El amarillo necesita texto oscuro encima para que se lea.
+    const dark = sw.dataset.accent === '--pol-yellow';
+    root.style.setProperty('--accent-ink', dark ? '#1a1410' : '#ffffff');
+  });
+});
+
+const btnTheme = document.getElementById('btn-theme');
+btnTheme.addEventListener('click', () => {
+  const light = root.getAttribute('data-theme') === 'light';
+  root.setAttribute('data-theme', light ? 'dark' : 'light');
+  btnTheme.textContent = light ? '☾ Oscuro' : '☀ Claro';
+});
+
+const btnGrain = document.getElementById('btn-grain');
+btnGrain.addEventListener('click', () => {
+  document.body.classList.toggle('no-grain');
+  btnGrain.textContent = 'Grano: ' + (document.body.classList.contains('no-grain') ? 'off' : 'on');
+});
+
+const btnHand = document.getElementById('btn-hand');
+btnHand.addEventListener('click', () => {
+  const on = getComputedStyle(root).getPropertyValue('--font-cap').includes('Print');
+  root.style.setProperty('--font-cap', on ? 'var(--font-ui)' : 'var(--font-hand)');
+  btnHand.textContent = 'Manuscrita: ' + (on ? 'off' : 'on');
+});
+</script>
+</body>
+</html>
