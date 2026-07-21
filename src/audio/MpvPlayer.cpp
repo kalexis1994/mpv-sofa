@@ -688,15 +688,28 @@ void MpvPlayer::update() {
         else if (event->event_id == MPV_EVENT_HOOK) {
             // on_preloaded: demuxer is open (tracks known) but decoders
             // haven't started — the only safe moment to flip decoder
-            // options per file. extract_objects only for TrueHD tracks.
+            // options per file.
+            //
+            // extract_objects is opt-in (HRTF_EXTRACT_OBJECTS=1) until the
+            // extraction is trustworthy: on real TrueHD Atmos remuxes the
+            // patched decoder logs "No restart header present in substream
+            // 3" → "ANOMALY: FALLBACK (atmos failed)" and the decoded
+            // audio diverges massively from the clean bed decode (measured
+            // >100% relative divergence on LotR) — audible as bass
+            // dropping in and out as objects move, independent of the
+            // HRTF stage.
             mpv_event_hook* hook = (mpv_event_hook*)event->data;
-            char* tracks = mpv_get_property_string(m_mpv, "track-list");
-            bool hasTrueHd = tracks && strstr(tracks, "\"truehd\"");
-            if (tracks) mpv_free(tracks);
+            const char* wantExt = std::getenv("HRTF_EXTRACT_OBJECTS");
+            bool extOn = false;
+            if (wantExt && wantExt[0] && strcmp(wantExt, "0") != 0) {
+                char* tracks = mpv_get_property_string(m_mpv, "track-list");
+                extOn = tracks && strstr(tracks, "\"truehd\"");
+                if (tracks) mpv_free(tracks);
+            }
             mpv_set_option_string(m_mpv, "ad-lavc-o",
-                                  hasTrueHd ? "extract_objects=1" : "");
+                                  extOn ? "extract_objects=1" : "");
             fprintf(stderr, "[MpvPlayer] on_preloaded: extract_objects=%d\n",
-                    hasTrueHd ? 1 : 0);
+                    extOn ? 1 : 0);
             mpv_hook_continue(m_mpv, hook->id);
         }
         else if (event->event_id == MPV_EVENT_FILE_LOADED) {
