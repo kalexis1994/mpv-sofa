@@ -13,7 +13,7 @@
 #include "hrtf_engine.h"
 #include "hrtf_convolver.h"
 #include "freeverb.h"
-#include "early_reflections.h"
+#include "er_spatial.h"
 #include "sofa_loader.h"
 #include "channel_layouts.h"
 
@@ -40,7 +40,7 @@ struct HaloEngine {
 
     /* Effects */
     ReverbState reverb;
-    EarlyReflections er;
+    Er3dState er3d;
 
     /* SOFA / HRTF data */
     SofaData *sofa;
@@ -180,6 +180,21 @@ static void reload_all_hrirs(HaloEngine *e) {
     for (int ch = 0; ch < e->num_channels && ch < HRTF_MAX_CHANNELS; ch++) {
         load_channel_hrir(e, ch, 0); /* Direct set, no crossfade */
     }
+    /* Fixed-direction HRIRs for the early-reflection buses. */
+    if (e->sofa && e->hrir_length > 0) {
+        float *hl = calloc(e->hrir_length, sizeof(float));
+        float *hr = calloc(e->hrir_length, sizeof(float));
+        for (int b = 0; b < ER3D_NUM_BUS; b++) {
+            float az, el;
+            er3d_bus_dir(b, &az, &el);
+            memset(hl, 0, e->hrir_length * sizeof(float));
+            memset(hr, 0, e->hrir_length * sizeof(float));
+            get_hrir_for_position(e, az, el, 2.0f, hl, hr);
+            er3d_set_bus_hrir(&e->er3d, b, hl, hr, e->hrir_length);
+        }
+        free(hl);
+        free(hr);
+    }
     update_min_dist(e);
 }
 
@@ -225,14 +240,9 @@ HaloEngine* halo_create(int sample_rate, int num_channels) {
     else if (num_channels >= 6) layout = LAYOUT_51;
     channel_layout_get_positions(layout, e->speaker_pos, HRTF_MAX_CHANNELS);
 
-    /* Initialize reverb and early reflections */
+    /* Initialize reverb and spatialized early reflections */
     reverb_init(&e->reverb, sample_rate);
-    er_init(&e->er);
-
-    /* Default room: Home Theater */
-    er_update(&e->er, 6.5f, 5.0f, 2.7f, 0.35f, sample_rate);
-    reverb_update(&e->reverb, 0.45f, 0.5f, 0.068f, 15.0f, sample_rate);
-    e->reverb.enabled = 1;
+    er3d_init(&e->er3d, sample_rate);
 
     update_min_dist(e);
 
@@ -246,6 +256,9 @@ HaloEngine* halo_create(int sample_rate, int num_channels) {
     }
 
     e->initialized = 1;
+
+    /* Default room: Home Theater */
+    halo_set_room_preset(e, 1);
 
     return e;
 }
@@ -262,7 +275,7 @@ void halo_destroy(HaloEngine *e) {
     }
 
     reverb_destroy(&e->reverb);
-    er_destroy(&e->er);
+    er3d_destroy(&e->er3d);
 
     if (e->sofa) sofa_destroy(e->sofa);
 
@@ -305,57 +318,94 @@ void halo_set_speaker_pos(HaloEngine *e, int ch, float az, float el, float dist)
     e->speaker_pos[ch].distance = dist;
 
     if (e->sofa) load_channel_hrir(e, ch, 1); /* With crossfade */
+    /* Re-project this source's image-source reflections (LFE never
+     * reflects — a sub is omnidirectional and only muddies the image). */
+    if (ch != 3) er3d_set_source(&e->er3d, ch, az, el, dist);
     update_min_dist(e);
+}
+
+/*
+ * Apply a room defined by its physical geometry and a mid-band RT60
+ * target.  The average absorption follows Sabine's equation
+ * α = 0.161·V / (S·RT60) and drives both the image-source reflection
+ * gains and the late reverb's HF damping; the reverb feedback is
+ * calibrated so the comb loop actually decays at RT60; pre-delay comes
+ * from the room's mean free path (4V/S).
+ */
+static void apply_room(HaloEngine *e, float W, float D, float H,
+                       float rt60, float wet, float room_gain) {
+    if (W <= 0.1f) {                              /* dry */
+        er3d_set_room(&e->er3d, 0, 0, 0, 1.0f, 0.0f);
+        e->reverb.enabled = 0;
+        e->room_gain = room_gain;
+        return;
+    }
+    const float V = W * D * H;
+    const float S = 2.0f * (W * D + W * H + D * H);
+    float alpha = 0.161f * V / (S * rt60);
+    if (alpha < 0.05f) alpha = 0.05f;
+    if (alpha > 0.85f) alpha = 0.85f;
+
+    er3d_set_room(&e->er3d, W, D, H, alpha, 1.0f);
+    for (int ch = 0; ch < e->num_channels && ch < HRTF_MAX_CHANNELS; ch++) {
+        if (ch == 3) continue;
+        er3d_set_source(&e->er3d, ch, e->speaker_pos[ch].azimuth,
+                        e->speaker_pos[ch].elevation,
+                        e->speaker_pos[ch].distance);
+    }
+
+    reverb_update_rt60(&e->reverb, rt60, alpha, wet, V, S, e->sample_rate);
+    e->reverb.enabled = (wet > 0.001f) ? 1 : 0;
+    e->room_gain = room_gain;
 }
 
 void halo_set_room(HaloEngine *e, float width, float depth, float height,
                    float decay, float damping, float wet, float absorption) {
     if (!e) return;
-
-    er_update(&e->er, width, depth, height, absorption, e->sample_rate);
-    reverb_update(&e->reverb, decay, damping, wet, 15.0f, e->sample_rate);
-    e->reverb.enabled = (wet > 0.001f) ? 1 : 0;
+    (void)damping; (void)absorption;   /* derived from geometry now */
+    /* Legacy decay knob (0-1) maps onto an RT60 range. */
+    float rt60 = 0.15f + decay * 2.35f;
+    apply_room(e, width, depth, height, rt60, wet, e->room_gain);
 }
 
 void halo_set_room_preset(HaloEngine *e, int preset) {
     if (!e) return;
 
+    /*
+     * Rooms defined by published reference geometries and mid-band RT60
+     * targets (Sabine derives the rest — see apply_room):
+     *  0 Studio        ITU-R BS.1116-3 reference listening room
+     *                  (~6.9×4.6×2.8 m, Tm ≈ 0.25 s mid-band)
+     *  1 Home Theater  Dolby Atmos home guidelines (~0.35 s, sealed room)
+     *  2 Cinema        SMPTE-style mid-size commercial hall (0.6 s @500 Hz)
+     *  3 Concert Hall  classical shoebox, V ≈ 15 000 m³ (2.0 s)
+     *  4 Living Room   typical untreated domestic room (0.55 s)
+     *  5 Screening     post-production review room (0.30 s)
+     *  6 IMAX          large but heavily treated auditorium (1.0 s)
+     *  7 Dolby Cinema  premium large format, strongly damped (0.5 s)
+     *  8 Dry           processing bypassed
+     */
     struct {
         float width, depth, height;
-        float absorption;
-        float decay, damping, wet, predelay;
-        float room_gain;
+        float rt60, wet, room_gain;
     } presets[] = {
-        /* 0: Studio */
-        { 4.5f, 3.5f, 2.8f, 0.65f,  0.10f, 0.7f, 0.014f, 5.0f,  1.0f },
-        /* 1: Home Theater */
-        { 6.5f, 5.0f, 2.7f, 0.35f,  0.45f, 0.5f, 0.068f, 15.0f, 1.0f },
-        /* 2: Cinema */
-        { 22.0f, 16.0f, 9.0f, 0.25f, 0.55f, 0.4f, 0.09f, 25.0f, 1.6f },
-        /* 3: Concert Hall */
-        { 35.0f, 25.0f, 14.0f, 0.15f, 0.82f, 0.3f, 0.16f, 40.0f, 2.2f },
-        /* 4: Living Room */
-        { 5.0f, 4.0f, 2.5f, 0.55f,  0.18f, 0.65f, 0.022f, 6.0f, 1.0f },
-        /* 5: Screening Room */
-        { 10.0f, 7.0f, 3.5f, 0.40f, 0.38f, 0.55f, 0.05f, 12.0f, 1.2f },
-        /* 6: IMAX */
-        { 30.0f, 22.0f, 18.0f, 0.18f, 0.70f, 0.35f, 0.13f, 35.0f, 2.0f },
-        /* 7: Dolby Cinema */
-        { 18.0f, 14.0f, 8.0f, 0.45f, 0.40f, 0.55f, 0.06f, 18.0f, 1.4f },
-        /* 8: None (Dry) */
-        { 0.0f, 0.0f, 0.0f, 1.0f,   0.0f, 1.0f, 0.0f, 0.0f, 1.0f },
+        /* 0 */ {  6.9f,  4.6f,  2.8f, 0.25f, 0.016f, 1.0f },
+        /* 1 */ {  6.7f,  4.9f,  2.8f, 0.35f, 0.050f, 1.0f },
+        /* 2 */ { 20.0f, 14.0f,  9.0f, 0.60f, 0.090f, 1.6f },
+        /* 3 */ { 40.0f, 22.0f, 17.0f, 2.00f, 0.160f, 2.2f },
+        /* 4 */ {  5.0f,  4.2f,  2.5f, 0.55f, 0.035f, 1.0f },
+        /* 5 */ {  9.0f,  6.5f,  3.5f, 0.30f, 0.045f, 1.2f },
+        /* 6 */ { 32.0f, 24.0f, 18.0f, 1.00f, 0.120f, 2.0f },
+        /* 7 */ { 24.0f, 16.0f, 10.0f, 0.50f, 0.070f, 1.4f },
+        /* 8 */ {  0.0f,  0.0f,  0.0f, 0.00f, 0.000f, 1.0f },
     };
 
     int num_presets = sizeof(presets) / sizeof(presets[0]);
     if (preset < 0 || preset >= num_presets) preset = 1;
 
-    er_update(&e->er, presets[preset].width, presets[preset].depth,
-              presets[preset].height, presets[preset].absorption,
-              e->sample_rate);
-    reverb_update(&e->reverb, presets[preset].decay, presets[preset].damping,
-                  presets[preset].wet, presets[preset].predelay, e->sample_rate);
-    e->reverb.enabled = (presets[preset].wet > 0.001f) ? 1 : 0;
-    e->room_gain = presets[preset].room_gain;
+    apply_room(e, presets[preset].width, presets[preset].depth,
+               presets[preset].height, presets[preset].rt60,
+               presets[preset].wet, presets[preset].room_gain);
 }
 
 void halo_process(HaloEngine *e, const float *input, float *output_lr,
@@ -437,6 +487,10 @@ void halo_process(HaloEngine *e, const float *input, float *output_lr,
 
         active_ch_count++;
 
+        /* Feed the dry signal into the image-source reflection stage; it
+         * spatializes each surface bounce from its true arrival direction. */
+        er3d_feed(&e->er3d, ch, chdata, num_samples);
+
         /* Convolve with left and right HRIRs */
         convolver_process(&pair->left[active], chdata, block_l);
         convolver_process(&pair->right[active], chdata, block_r);
@@ -479,19 +533,16 @@ void halo_process(HaloEngine *e, const float *input, float *output_lr,
     }
 
     /* Adaptive headroom: scale by 1/sqrt(active_channels) */
-    {
-        if (active_ch_count < 6) active_ch_count = 6;
-        float headroom = 1.0f / sqrtf((float)active_ch_count);
-        for (int i = 0; i < num_samples; i++) {
-            out_l[i] *= headroom;
-            out_r[i] *= headroom;
-        }
+    if (active_ch_count < 6) active_ch_count = 6;
+    const float headroom = 1.0f / sqrtf((float)active_ch_count);
+    for (int i = 0; i < num_samples; i++) {
+        out_l[i] *= headroom;
+        out_r[i] *= headroom;
     }
 
-    /* Early reflections */
-    if (e->er.initialized && e->er.num_taps > 0) {
-        er_process(&e->er, out_l, out_r, num_samples);
-    }
+    /* Spatialized early reflections (fed pre-headroom, so scale to match
+     * the direct path). */
+    er3d_render(&e->er3d, out_l, out_r, num_samples, headroom);
 
     /* Reverb */
     if (e->reverb.enabled && e->reverb.initialized) {

@@ -39,7 +39,7 @@ MYSOFA_SRCS=(
 
 DSP_SRCS=(
     "$DSP"/src/hrtf_engine.c "$DSP"/src/hrtf_convolver.c "$DSP"/src/freeverb.c
-    "$DSP"/src/early_reflections.c "$DSP"/src/sofa_loader.c "$DSP"/src/channel_layouts.c
+    "$DSP"/src/er_spatial.c "$DSP"/src/sofa_loader.c "$DSP"/src/channel_layouts.c
     "$DSP"/pffft/pffft.c "$DSP"/pffft/pffft_common.c "$DSP"/pffft/fftpack.c
 )
 

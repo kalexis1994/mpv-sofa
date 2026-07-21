@@ -3,6 +3,7 @@
  * Extracted from mpv af_hrtf.c (lines 425-608)
  */
 
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 #include "freeverb.h"
@@ -61,6 +62,50 @@ void reverb_init(ReverbState *r, int sample_rate) {
     r->dry = 1.0f;
     r->enabled = 0;
     r->initialized = 1;
+}
+
+void reverb_update_rt60(ReverbState *r, float rt60, float alpha, float wet,
+                        float volume_m3, float surface_m2, int sample_rate) {
+    if (!r->initialized) return;
+    if (rt60 < 0.05f) rt60 = 0.05f;
+
+    /* Comb feedback g so a τ ≈ 33 ms loop reaches -60 dB in RT60:
+     * g = 10^(-3·τ / RT60). */
+    float fb = powf(10.0f, -3.0f * 0.033f / rt60);
+    if (fb < 0.25f) fb = 0.25f;
+    if (fb > 0.965f) fb = 0.965f;
+
+    /* Dead rooms swallow highs faster: damping follows absorption. */
+    float damping = 0.25f + alpha * 0.6f;
+    if (damping > 0.85f) damping = 0.85f;
+
+    for (int i = 0; i < REVERB_NUM_COMBS; i++) {
+        r->combs_l[i].feedback = fb;
+        r->combs_l[i].damp1 = damping;
+        r->combs_l[i].damp2 = 1.0f - damping;
+        r->combs_r[i].feedback = fb;
+        r->combs_r[i].damp1 = damping;
+        r->combs_r[i].damp2 = 1.0f - damping;
+    }
+    for (int i = 0; i < REVERB_NUM_ALLPASS; i++) {
+        r->allpass_l[i].feedback = 0.5f;
+        r->allpass_r[i].feedback = 0.5f;
+    }
+
+    r->wet = wet;
+    r->dry = 1.0f;
+
+    /* Pre-delay ≈ time of the mean free path (4V/S): the natural gap
+     * between the direct sound and the diffuse field building up. */
+    float mfp_ms = surface_m2 > 1.0f
+        ? (4.0f * volume_m3 / surface_m2) / 343.0f * 1000.0f
+        : 15.0f;
+    if (mfp_ms < 4.0f)  mfp_ms = 4.0f;
+    if (mfp_ms > 60.0f) mfp_ms = 60.0f;
+    int pd = (int)(mfp_ms * (float)sample_rate / 1000.0f);
+    if (pd < 1) pd = 1;
+    if (pd > REVERB_MAX_PREDELAY) pd = REVERB_MAX_PREDELAY;
+    r->predelay_size = pd;
 }
 
 void reverb_update(ReverbState *r, float decay, float damping,

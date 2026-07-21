@@ -8,7 +8,7 @@ set(DSP_SOURCES
     src/hrtf_engine.c
     src/hrtf_convolver.c
     src/freeverb.c
-    src/early_reflections.c
+    src/er_spatial.c
     src/sofa_loader.c
     src/channel_layouts.c
 )

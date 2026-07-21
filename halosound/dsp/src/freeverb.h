@@ -33,6 +33,12 @@ typedef struct {
 } ReverbState;
 
 void reverb_init(ReverbState *r, int sample_rate);
+/* Physically-derived variant: feedback calibrated so the comb loop decays
+ * at the room's RT60, HF damping tied to the average absorption, and
+ * pre-delay from the mean free path 4V/S. */
+void reverb_update_rt60(ReverbState *r, float rt60, float alpha, float wet,
+                        float volume_m3, float surface_m2, int sample_rate);
+
 void reverb_update(ReverbState *r, float decay, float damping,
                    float wet, float predelay_ms, int sample_rate);
 void reverb_process(ReverbState *r, float *l, float *r_ch, int n);
