@@ -28,7 +28,57 @@
 
 #include "hrtf_engine.h"
 
+#ifndef __EMSCRIPTEN__
+#include <mysofa.h>
+#endif
+
 #define BLOCK 256   /* HRTF_BLOCK_SIZE — halo_process hard requirement */
+
+#ifndef __EMSCRIPTEN__
+/* ---- --info: dump a SOFA file's AES69 metadata as JSON ----------------- */
+
+static void json_escape_print(const char* s) {
+    putchar('"');
+    for (; s && *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { putchar('\\'); putchar(c); }
+        else if (c == '\n' || c == '\r') putchar(' ');
+        else if (c < 0x20) continue;
+        else putchar(c);
+    }
+    putchar('"');
+}
+
+static int print_sofa_info(const char* path) {
+    int err = 0;
+    struct MYSOFA_HRTF* h = mysofa_load(path, &err);
+    if (!h) {
+        fprintf(stderr, "cannot load sofa (err %d): %s\n", err, path);
+        return 1;
+    }
+    printf("{\"measurements\":%u,\"irLength\":%u,\"sampleRate\":%g",
+           h->M, h->N,
+           (h->DataSamplingRate.values && h->DataSamplingRate.elements > 0)
+               ? h->DataSamplingRate.values[0] : 0.0);
+
+    static const char* keys[] = {
+        "Title", "DatabaseName", "ListenerShortName", "Organization",
+        "License", "Comment", "AuthorContact", "DateCreated",
+    };
+    for (struct MYSOFA_ATTRIBUTE* a = h->attributes; a; a = a->next) {
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+            if (a->name && a->value && !strcmp(a->name, keys[k]) &&
+                a->value[0]) {
+                printf(",\"%c%s\":", keys[k][0] + 32, keys[k] + 1);
+                json_escape_print(a->value);
+            }
+        }
+    }
+    printf("}\n");
+    mysofa_free(h);
+    return 0;
+}
+#endif
 
 /*
  * ---- DAMF mode (--damf PREFIX) -----------------------------------------
@@ -383,6 +433,11 @@ static int layout_from_channels(int ch) {
 }
 
 int main(int argc, char** argv) {
+#ifndef __EMSCRIPTEN__
+    if (argc >= 3 && !strcmp(argv[1], "--info"))
+        return print_sofa_info(argv[2]);
+#endif
+
     const char* sofa_path = NULL;
     const char* damf_prefix = NULL;
     int channels = 8, rate = 48000, layout = -1, room = 1, follow = 0;

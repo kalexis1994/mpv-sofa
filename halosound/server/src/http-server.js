@@ -605,9 +605,27 @@ function createHttpServer(files, options = {}) {
         return seen;
     }
 
-    app.get('/api/hrtf', (req, res) => {
-        const names = [...listHrtfProfiles().keys()];
-        res.json(names.map(n => ({ name: n })));
+    /* SOFA files carry AES69 metadata (subject, database, measurement
+     * count…) — extracted once per file via `halosound-render --info` so
+     * the client selector can show more than a filename. */
+    const sofaInfoCache = new Map();
+    function sofaInfo(p, cb) {
+        if (sofaInfoCache.has(p)) return cb(sofaInfoCache.get(p));
+        execFile(hls.renderExe, ['--info', p], { timeout: 15000 }, (err, stdout) => {
+            let info = null;
+            if (!err) { try { info = JSON.parse(stdout); } catch (e) {} }
+            sofaInfoCache.set(p, info);
+            cb(info);
+        });
+    }
+
+    app.get('/api/hrtf', async (req, res) => {
+        const out = [];
+        for (const [name, p] of listHrtfProfiles()) {
+            const info = await new Promise(r => sofaInfo(p, r));
+            out.push({ name, ...(info || {}) });
+        }
+        res.json(out);
     });
 
     app.get('/api/hrtf/:name', (req, res) => {

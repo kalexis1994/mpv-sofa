@@ -208,19 +208,43 @@ class HaloSettings {
             try {
                 const resp = await fetch(`${this.connection.httpBase}/api/hrtf`);
                 const profiles = await resp.json();
-                // Rebuild options: built-in + server profiles
+                this.hrtfProfiles = profiles;
+                // Rebuild options: built-in + server profiles, labeled from
+                // the SOFA's own AES69 metadata when present.
                 sel.innerHTML = '<option value="">Built-in (MIT KEMAR)</option>';
                 for (const p of profiles) {
                     const opt = document.createElement('option');
                     opt.value = p.name;
-                    opt.textContent = p.name.replace(/\.sofa$/i, '');
+                    let label = p.title || p.name.replace(/\.sofa$/i, '');
+                    if (p.listenerShortName && !label.includes(p.listenerShortName)) {
+                        label += ` — ${p.listenerShortName}`;
+                    }
+                    opt.textContent = label;
                     sel.appendChild(opt);
                 }
+                const updateHint = () => {
+                    const hint = document.getElementById('hint-hrtf');
+                    if (!hint) return;
+                    const p = profiles.find(x => x.name === sel.value);
+                    if (!p) { hint.textContent = 'Diffuse-field MIT KEMAR, bundled with the app'; return; }
+                    const bits = [];
+                    if (p.listenerShortName) bits.push(p.listenerShortName);
+                    if (p.databaseName) bits.push(p.databaseName);
+                    if (p.measurements) bits.push(`${p.measurements} directions`);
+                    if (p.irLength && p.sampleRate) {
+                        bits.push(`${p.irLength} taps @ ${(p.sampleRate / 1000).toFixed(0)}kHz`);
+                    }
+                    if (p.organization) bits.push(p.organization);
+                    if (p.license) bits.push(p.license);
+                    hint.textContent = bits.join(' · ') || p.name;
+                };
+                sel.addEventListener('change', updateHint);
                 if (saved && profiles.some(p => p.name === saved)) {
                     sel.value = saved;
                 } else {
                     saved = '';
                 }
+                updateHint();
             } catch (e) {
                 console.warn('HRTF profile list unavailable:', e);
                 saved = '';
