@@ -9,8 +9,15 @@ class MpvPlayer;
 struct HrtfProfile {
     std::string name;        // Display name (derived from filename)
     std::string path;        // Full path to .sofa file
-    std::string description; // Filename guess until metaLoaded, then AES69
-    bool metaLoaded = false; // Real SOFA metadata read lazily on selection
+    std::string description; // Filename-guessed hint (pre-metadata fallback)
+    bool metaLoaded = false; // Real AES69 metadata read lazily (see cards)
+    // AES69 tag fields, shown as chips on the profile card:
+    std::string subject;      // ListenerShortName (measured head)
+    std::string database;     // DatabaseName
+    std::string grid;         // "<M> dirs"
+    std::string res;          // "<N> taps @ <sr> kHz"
+    std::string license;
+    std::string organization;
 };
 
 // Spatial object sidecar (.aobj) file format:

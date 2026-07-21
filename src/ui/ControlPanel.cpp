@@ -236,10 +236,11 @@ static const char* guessDescription(const std::string& name) {
 
 // Real AES69 metadata straight from the .sofa file: subject/dummy head,
 // database, measurement grid, license — beats guessing from the filename.
-static std::string readSofaMetadata(const std::string& path) {
+static void loadSofaMetadata(HrtfProfile& prof) {
+    prof.metaLoaded = true;
     int err = 0;
-    MYSOFA_HRTF* h = mysofa_load(path.c_str(), &err);
-    if (!h) return "";
+    MYSOFA_HRTF* h = mysofa_load(prof.path.c_str(), &err);
+    if (!h) return;
 
     auto attr = [&](const char* key) -> std::string {
         for (MYSOFA_ATTRIBUTE* a = h->attributes; a; a = a->next)
@@ -247,30 +248,99 @@ static std::string readSofaMetadata(const std::string& path) {
                 return a->value;
         return "";
     };
-    std::string parts;
-    auto add = [&](const std::string& s) {
-        if (s.empty()) return;
-        if (!parts.empty()) parts += " \xc2\xb7 ";   /* " · " */
-        parts += s;
-    };
+    prof.subject      = attr("ListenerShortName");
+    prof.database     = attr("DatabaseName");
+    prof.organization = attr("Organization");
+    prof.license      = attr("License");
 
-    add(attr("ListenerShortName"));
-    add(attr("DatabaseName"));
     char buf[64];
     if (h->M) {
-        snprintf(buf, sizeof(buf), "%u directions", h->M);
-        add(buf);
+        snprintf(buf, sizeof(buf), "%u dirs", h->M);
+        prof.grid = buf;
     }
     if (h->N && h->DataSamplingRate.values && h->DataSamplingRate.elements) {
         snprintf(buf, sizeof(buf), "%u taps @ %.0f kHz", h->N,
                  h->DataSamplingRate.values[0] / 1000.0);
-        add(buf);
+        prof.res = buf;
     }
-    add(attr("Organization"));
-    add(attr("License"));
-
     mysofa_free(h);
-    return parts;
+}
+
+/* ---- Profile cards ----------------------------------------------------- */
+
+static void cardChip(ImDrawList* dl, float& cx, float cy, float xLimit,
+                     const char* label, ImU32 bg, ImU32 fg) {
+    ImVec2 ts = ImGui::CalcTextSize(label);
+    float w = ts.x + 12.0f, h = ts.y + 4.0f;
+    if (cx + w > xLimit) return;               /* drop chips that don't fit */
+    dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + w, cy + h), bg, h * 0.5f);
+    dl->AddText(ImVec2(cx + 6.0f, cy + 2.0f), fg, label);
+    cx += w + 6.0f;
+}
+
+// One selectable profile card: title (measured subject when known) + a row
+// of metadata chips. `metaBudget` throttles lazy SOFA parsing to a couple
+// of files per frame so an 80-subject folder never hitches the UI.
+static bool profileCard(HrtfProfile& prof, bool selected, float w, float h,
+                        int& metaBudget) {
+    if (!prof.metaLoaded && metaBudget > 0) {
+        metaBudget--;
+        loadSofaMetadata(prof);
+    }
+
+    ImGui::PushID(prof.path.c_str());
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton("##card", ImVec2(w, h));
+    bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImU32 bg     = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
+                                              : ImGuiCol_FrameBg);
+    ImU32 border = ImGui::GetColorU32(selected ? ImGuiCol_CheckMark
+                                               : ImGuiCol_Border);
+    ImVec2 pmax(origin.x + w, origin.y + h);
+    dl->AddRectFilled(origin, pmax, bg, 8.0f);
+    dl->AddRect(origin, pmax, border, 8.0f, 0, selected ? 2.5f : 1.0f);
+
+    dl->PushClipRect(origin, pmax, true);
+    const char* title = !prof.subject.empty() ? prof.subject.c_str()
+                                              : prof.name.c_str();
+    dl->AddText(ImVec2(origin.x + 10.0f, origin.y + 8.0f),
+                ImGui::GetColorU32(ImGuiCol_Text), title);
+
+    float cx = origin.x + 10.0f;
+    float cy = pmax.y - 26.0f;
+    ImU32 chipBg = ImGui::GetColorU32(ImGuiCol_Button, 0.55f);
+    ImU32 chipFg = ImGui::GetColorU32(ImGuiCol_Text, 0.85f);
+    float xLimit = pmax.x - 8.0f;
+    if (!prof.metaLoaded) {
+        cardChip(dl, cx, cy, xLimit, "reading metadata\xe2\x80\xa6", chipBg, chipFg);
+    } else {
+        bool any = false;
+        auto chip = [&](const std::string& s) {
+            if (s.empty()) return;
+            cardChip(dl, cx, cy, xLimit, s.c_str(), chipBg, chipFg);
+            any = true;
+        };
+        chip(prof.database);
+        chip(prof.grid);
+        chip(prof.res);
+        chip(prof.license);
+        if (!any)
+            cardChip(dl, cx, cy, xLimit,
+                     prof.description.empty() ? "no metadata"
+                                              : prof.description.c_str(),
+                     chipBg, chipFg);
+    }
+    dl->PopClipRect();
+
+    if (hovered) {
+        std::string tip = prof.name + "\n" + prof.path;
+        if (!prof.organization.empty()) tip += "\n" + prof.organization;
+        ImGui::SetTooltip("%s", tip.c_str());
+    }
+    ImGui::PopID();
+    return clicked;
 }
 
 // Convert filename to display name: "CIPIC_subject_003.sofa" -> "CIPIC Subject 003"
@@ -468,30 +538,40 @@ void ControlPanel::renderSpatialContent() {
     if (m_profiles.empty()) {
         ImGui::TextDisabled("No .sofa files found in assets/hrtf/");
     } else {
-        auto profileGetter = [](void* data, int idx, const char** out) -> bool {
-            auto* profiles = (std::vector<HrtfProfile>*)data;
-            if (idx < 0 || idx >= (int)profiles->size()) return false;
-            *out = (*profiles)[idx].name.c_str();
-            return true;
-        };
+        // Card grid: one card per profile, its AES69 metadata as chips.
+        int metaBudget = 2;      /* lazy SOFA parses per frame */
+        const float cardH = 64.0f;
+        const float gapX  = 8.0f;
+        const float rowH  = cardH + ImGui::GetStyle().ItemSpacing.y;
 
-        if (ImGui::Combo("##profile", &m_selectedProfile, profileGetter,
-                          &m_profiles, (int)m_profiles.size())) {
-            loadProfile(m_selectedProfile);
-        }
+        ImGui::BeginChild("##profile_cards", ImVec2(0, 330.0f), false);
+        float availW = ImGui::GetContentRegionAvail().x;
+        int cols = availW > 540.0f ? 2 : 1;
+        float cardW = (availW - gapX * (cols - 1)) / cols;
+        int rows = ((int)m_profiles.size() + cols - 1) / cols;
 
-        // Show description — real AES69 metadata, read lazily once per file
-        if (m_selectedProfile >= 0 && m_selectedProfile < (int)m_profiles.size()) {
-            auto& prof = m_profiles[m_selectedProfile];
-            if (!prof.metaLoaded) {
-                prof.metaLoaded = true;
-                std::string meta = readSofaMetadata(prof.path);
-                if (!meta.empty()) prof.description = meta;
+        ImGuiListClipper clipper;
+        clipper.Begin(rows, rowH);
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                for (int c = 0; c < cols; c++) {
+                    int idx = row * cols + c;
+                    if (idx >= (int)m_profiles.size()) break;
+                    if (c > 0) ImGui::SameLine(0.0f, gapX);
+                    if (profileCard(m_profiles[idx],
+                                    idx == m_selectedProfile,
+                                    cardW, cardH, metaBudget)) {
+                        m_selectedProfile = idx;
+                        loadProfile(idx);
+                    }
+                }
             }
-            if (!prof.description.empty())
-                ImGui::TextDisabled("%s", prof.description.c_str());
-            ImGui::TextDisabled("File: %s", prof.path.c_str());
         }
+        ImGui::EndChild();
+
+        if (m_selectedProfile >= 0 && m_selectedProfile < (int)m_profiles.size())
+            ImGui::TextDisabled("File: %s",
+                                m_profiles[m_selectedProfile].path.c_str());
     }
 
     // Rescan button
