@@ -31,10 +31,14 @@ public:
 
     bool available() const { return m_available; }
 
-    // Whether the output display currently reports HDR capability
-    // (DXGI advertises an HDR colour space + >SDR peak luminance).
+    // Whether Windows HDR is currently ON for the output display (DXGI
+    // reports the PQ/BT.2020 colour space). Cheap to re-check via refresh().
     bool displayIsHdr() const { return m_displayHdr; }
     float displayMaxNits() const { return m_displayMaxNits; }
+
+    // Re-query the display's current HDR state (call periodically so
+    // toggling Windows HDR while the app runs takes effect).
+    void refreshDisplayHdr() { if (m_device) queryDisplayHdr(); }
 
     // Recreate swapchain buffers after a window resize.
     void resize(int width, int height);

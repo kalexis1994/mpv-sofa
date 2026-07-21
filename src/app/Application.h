@@ -82,6 +82,7 @@ private:
     std::unique_ptr<MpvPlayer> m_player;
     Direct3DHdrPresenter m_hdrPresenter;
     unsigned int m_finalFbo = 0;   // 0 = default framebuffer; else HDR interop FBO
+    unsigned long m_hdrPollCounter = 0;
     BinauralRenderer m_binaural;
     std::string m_binauralMovie;   // path the sidecar render belongs to
     bool m_binauralArmed = false;  // user asked for object rendering

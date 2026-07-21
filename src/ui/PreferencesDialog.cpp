@@ -469,30 +469,33 @@ void PreferencesDialog::renderDisplay() {
         dirty = true;
     ImGui::EndDisabled();
 
-    // --- Experimental HDR output (D3D11 present) --------------------------
+    // --- HDR output (automatic) -------------------------------------------
     ImGui::Spacing();
-    ImGui::SeparatorText("HDR output (experimental)");
+    ImGui::SeparatorText("HDR output");
     PreferencesDialog::HdrStatus hs = m_hdrStatus ? m_hdrStatus() : HdrStatus{};
     ImGui::TextWrapped(
-        "OpenGL can't present HDR on Windows, so this hands the final frame "
-        "to a Direct3D 11 HDR swapchain. Enable Windows HDR first. Colour "
-        "tuning on the actual display is still in progress.");
+        "OpenGL can't present HDR on Windows, so the final frame is handed "
+        "to a Direct3D 11 HDR swapchain. This turns on automatically whenever "
+        "Windows HDR is active on the display.");
+    const bool forceSdr = d.hdrOutput == 1;
     if (!hs.available) {
         ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.4f, 1.0f),
-                           "HDR present unavailable (no interop / device).");
+                           "Status: unavailable (no D3D11 interop).");
+    } else if (forceSdr) {
+        ImGui::TextDisabled("Status: forced SDR (override on).");
+    } else if (hs.displayHdr) {
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                           "Status: ACTIVE — HDR present (%.0f nits).", hs.maxNits);
     } else {
-        ImGui::TextDisabled("Display reports HDR: %s%s",
-                            hs.displayHdr ? "yes" : "no",
-                            hs.displayHdr ? "" : "  (enable Windows HDR)");
-        if (hs.displayHdr) ImGui::TextDisabled("Peak: %.0f nits", hs.maxNits);
+        ImGui::TextDisabled("Status: idle — Windows HDR is off for this "
+                            "display (SDR present). Enable it in Windows "
+                            "Display settings and this switches on by itself.");
     }
-    ImGui::BeginDisabled(!hs.available);
-    bool hdrOn = d.hdrOutput != 0;
-    if (ImGui::Checkbox("Present through Direct3D 11 HDR swapchain", &hdrOn)) {
-        d.hdrOutput = hdrOn ? 1 : 0;
+    bool force = forceSdr;
+    if (ImGui::Checkbox("Force SDR output (disable HDR present)", &force)) {
+        d.hdrOutput = force ? 1 : 0;
         dirty = true;
     }
-    ImGui::EndDisabled();
     if (d.mode == 2) {
         ImGui::TextDisabled(
             "    Typical OLED peak: 700-1000 nits.  Mini-LED: 1500-2000.");

@@ -92,9 +92,12 @@ void Direct3DHdrPresenter::queryDisplayHdr() {
             if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6))) {
                 DXGI_OUTPUT_DESC1 desc{};
                 if (SUCCEEDED(out6->GetDesc1(&desc))) {
-                    bool hdr = desc.ColorSpace ==
-                               DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-                    if (hdr || desc.MaxLuminance > 400.0f) {
+                    // HDR is *active* only when the output is in the PQ/BT.2020
+                    // colour space — i.e. Windows HDR is switched ON for this
+                    // display. An HDR-capable panel with Windows HDR off still
+                    // reports SDR here, which is what we want: presenting scRGB
+                    // HDR into an SDR compositor would look wrong.
+                    if (desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
                         m_displayHdr = true;
                         m_displayMaxNits = desc.MaxLuminance;
                     }
@@ -107,13 +110,6 @@ void Direct3DHdrPresenter::queryDisplayHdr() {
         safeRelease(adapter);
     }
     safeRelease(dxgiDev);
-    fprintf(stderr, "[HDR] display HDR=%d maxNits=%.0f\n",
-            m_displayHdr ? 1 : 0, m_displayMaxNits);
-    if (FILE* f = fopen("hdr_debug.log", "a")) {
-        fprintf(f, "queryDisplayHdr: HDR=%d maxNits=%.0f\n",
-                m_displayHdr ? 1 : 0, m_displayMaxNits);
-        fclose(f);
-    }
 }
 
 bool Direct3DHdrPresenter::createSwapchain(int width, int height) {
@@ -275,12 +271,8 @@ bool Direct3DHdrPresenter::init(GLFWwindow* window, int width, int height) {
     if (!createScratch(width, height)) { shutdown(); return false; }
 
     m_available = true;
-    fprintf(stderr, "[HDR] presenter ready (%dx%d, scRGB)\n", width, height);
-    if (FILE* f = fopen("hdr_debug.log", "a")) {
-        fprintf(f, "presenter READY %dx%d scRGB (displayHDR=%d)\n",
-                width, height, m_displayHdr ? 1 : 0);
-        fclose(f);
-    }
+    fprintf(stderr, "[HDR] presenter ready (%dx%d, scRGB, displayHDR=%d)\n",
+            width, height, m_displayHdr ? 1 : 0);
     return true;
 }
 

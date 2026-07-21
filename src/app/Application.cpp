@@ -352,11 +352,17 @@ void Application::run() {
         processInput();
         update(dt);
 
-        // HDR present path: composite the final frame into the D3D11
-        // interop framebuffer and present through DXGI. Falls back to the
-        // default framebuffer + glfwSwapBuffers when off/unavailable.
-        const bool hdrWanted = Settings::displayConfig().hdrOutput != 0 &&
-                               m_hdrPresenter.available();
+        // HDR present path: automatic. Whenever Windows HDR is active on
+        // the display, composite the final frame into the D3D11 interop
+        // framebuffer and present through DXGI; otherwise the default
+        // glfwSwapBuffers SDR path. Re-checks the display's HDR state about
+        // once a second so toggling Windows HDR takes effect live. The
+        // Preferences "Force SDR output" override (hdrOutput==1) opts out.
+        if ((++m_hdrPollCounter % 60) == 0)
+            m_hdrPresenter.refreshDisplayHdr();
+        const bool forceSdr = Settings::displayConfig().hdrOutput == 1;
+        const bool hdrWanted = !forceSdr && m_hdrPresenter.available() &&
+                               m_hdrPresenter.displayIsHdr();
         m_finalFbo = 0;
         if (hdrWanted) {
             int fbw = 0, fbh = 0;
