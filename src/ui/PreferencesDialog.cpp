@@ -468,6 +468,31 @@ void PreferencesDialog::renderDisplay() {
                             100.0f, 4000.0f, "%.0f nits"))
         dirty = true;
     ImGui::EndDisabled();
+
+    // --- Experimental HDR output (D3D11 present) --------------------------
+    ImGui::Spacing();
+    ImGui::SeparatorText("HDR output (experimental)");
+    PreferencesDialog::HdrStatus hs = m_hdrStatus ? m_hdrStatus() : HdrStatus{};
+    ImGui::TextWrapped(
+        "OpenGL can't present HDR on Windows, so this hands the final frame "
+        "to a Direct3D 11 HDR swapchain. Enable Windows HDR first. Colour "
+        "tuning on the actual display is still in progress.");
+    if (!hs.available) {
+        ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.4f, 1.0f),
+                           "HDR present unavailable (no interop / device).");
+    } else {
+        ImGui::TextDisabled("Display reports HDR: %s%s",
+                            hs.displayHdr ? "yes" : "no",
+                            hs.displayHdr ? "" : "  (enable Windows HDR)");
+        if (hs.displayHdr) ImGui::TextDisabled("Peak: %.0f nits", hs.maxNits);
+    }
+    ImGui::BeginDisabled(!hs.available);
+    bool hdrOn = d.hdrOutput != 0;
+    if (ImGui::Checkbox("Present through Direct3D 11 HDR swapchain", &hdrOn)) {
+        d.hdrOutput = hdrOn ? 1 : 0;
+        dirty = true;
+    }
+    ImGui::EndDisabled();
     if (d.mode == 2) {
         ImGui::TextDisabled(
             "    Typical OLED peak: 700-1000 nits.  Mini-LED: 1500-2000.");

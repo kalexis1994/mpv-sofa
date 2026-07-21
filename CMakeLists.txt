@@ -107,6 +107,7 @@ set(APP_SOURCES
     src/app/Window.cpp
     src/core/MediaServer.cpp
     src/renderer/Renderer.cpp
+    src/renderer/Direct3DHdrPresenter.cpp
     src/renderer/Camera.cpp
     src/renderer/Shader.cpp
     src/renderer/Primitives.cpp
@@ -153,7 +154,8 @@ endif()
 # Windows-specific
 if(WIN32)
     # iphlpapi + ws2_32: MediaServer::lanAddress (adapter enumeration)
-    target_link_libraries(mpv-sofa PRIVATE opengl32 iphlpapi ws2_32)
+    # d3d11 + dxgi: HDR presentation via GL->D3D11 interop swapchain.
+    target_link_libraries(mpv-sofa PRIVATE opengl32 iphlpapi ws2_32 d3d11 dxgi)
 endif()
 
 # Copy assets to build directory

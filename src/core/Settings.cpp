@@ -146,6 +146,7 @@ struct Snapshot {
         if (grain.chroma      != o.grain.chroma)      return false;
         if (display.mode      != o.display.mode)      return false;
         if (display.peakNits  != o.display.peakNits)  return false;
+        if (display.hdrOutput != o.display.hdrOutput) return false;
         if (display.toneAlg   != o.display.toneAlg)   return false;
         if (display.gamutMode != o.display.gamutMode) return false;
         if (display.panscan   != o.display.panscan)   return false;
@@ -442,6 +443,7 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_display.mode      = getI(kv, "mode",       g_display.mode);
             g_display.peakNits  = getF(kv, "peak_nits",  g_display.peakNits);
+            g_display.hdrOutput = getI(kv, "hdr_output", g_display.hdrOutput);
             g_display.toneAlg   = getI(kv, "tone_alg",   g_display.toneAlg);
             g_display.gamutMode = getI(kv, "gamut_mode", g_display.gamutMode);
             g_display.panscan   = getF(kv, "panscan",    g_display.panscan);
@@ -600,6 +602,7 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "[display]\n");
     fprintf(f, "mode=%d\n",       g_display.mode);
     fprintf(f, "peak_nits=%g\n",  g_display.peakNits);
+    fprintf(f, "hdr_output=%d\n", g_display.hdrOutput);
     fprintf(f, "tone_alg=%d\n",   g_display.toneAlg);
     fprintf(f, "gamut_mode=%d\n", g_display.gamutMode);
     fprintf(f, "panscan=%g\n",    g_display.panscan);

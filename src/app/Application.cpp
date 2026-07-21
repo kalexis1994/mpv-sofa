@@ -138,6 +138,15 @@ bool Application::init(int argc, char* argv[]) {
     m_imgui = std::make_unique<ImGuiLayer>();
     m_imgui->init(m_window->getHandle());
 
+    // HDR presentation (D3D11 interop) — optional, fail-safe. Only takes
+    // effect when the user enables it and the display reports HDR.
+    {
+        int fbw = 0, fbh = 0;
+        glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
+        if (!m_hdrPresenter.init(m_window->getHandle(), fbw, fbh))
+            fprintf(stderr, "[HDR] presenter unavailable — SDR present path\n");
+    }
+
     // Create mpv player
     m_player = std::make_unique<MpvPlayer>();
     if (!m_player->init(m_sharedState)) {
@@ -168,6 +177,13 @@ bool Application::init(int argc, char* argv[]) {
                                                           m_controlPanel.get(),
                                                           m_window.get(),
                                                           m_mediaServer.get());
+    m_prefsDialog->setHdrStatusProvider([this]() {
+        PreferencesDialog::HdrStatus s;
+        s.available  = m_hdrPresenter.available();
+        s.displayHdr = m_hdrPresenter.displayIsHdr();
+        s.maxNits    = m_hdrPresenter.displayMaxNits();
+        return s;
+    });
 
     // Auto-start the HaloSound media server when the user enabled it and
     // a library folder is configured.  Failure is non-fatal — status and
@@ -335,9 +351,28 @@ void Application::run() {
         m_window->pollEvents();
         processInput();
         update(dt);
+
+        // HDR present path: composite the final frame into the D3D11
+        // interop framebuffer and present through DXGI. Falls back to the
+        // default framebuffer + glfwSwapBuffers when off/unavailable.
+        const bool hdrWanted = Settings::displayConfig().hdrOutput != 0 &&
+                               m_hdrPresenter.available();
+        m_finalFbo = 0;
+        if (hdrWanted) {
+            int fbw = 0, fbh = 0;
+            glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
+            m_hdrPresenter.resize(fbw, fbh);
+            m_finalFbo = m_hdrPresenter.beginFrame();
+        }
+
         render();
         renderUI();
-        m_window->swapBuffers();
+
+        if (m_finalFbo != 0) {
+            m_hdrPresenter.present();
+        } else {
+            m_window->swapBuffers();
+        }
 
         frameCount++;
     }
@@ -654,6 +689,22 @@ void Application::render() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+// Composite the ImGui frame into the active output framebuffer. In HDR
+// mode that's the D3D11 interop FBO (scRGB backbuffer, cleared each frame
+// since the lock discards its contents); in SDR mode it's the default
+// framebuffer, matching the original behavior exactly.
+void Application::finalizeFrame() {
+    if (m_finalFbo != 0) {
+        int fbw = 0, fbh = 0;
+        glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_finalFbo);
+        glViewport(0, 0, fbw, fbh);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    m_imgui->endFrame();
+}
+
 void Application::renderUI() {
     // Gamepad polling is handled by imgui_impl_glfw inside NewFrame —
     // no manual call needed here.
@@ -772,7 +823,7 @@ void Application::renderUI() {
         // nothing in fullscreen (the dialogs only rendered in docked
         // mode).
         renderModalLayers();
-        m_imgui->endFrame();
+        finalizeFrame();
         return;
     }
 
@@ -924,7 +975,7 @@ void Application::renderUI() {
         // to overlay cleanly.
         if (!prefsOpen) renderHomeScreen();
         renderModalLayers();
-        m_imgui->endFrame();
+        finalizeFrame();
         return;
     }
 
@@ -1218,7 +1269,7 @@ void Application::renderUI() {
     // the back-stack we want: Preferences → playback menu → video.
     renderModalLayers();
 
-    m_imgui->endFrame();
+    finalizeFrame();
 }
 
 /*

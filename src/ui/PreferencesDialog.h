@@ -6,6 +6,8 @@
 // it reads as a proper screen on a TV-mode setup.  All sections live-
 // apply to the current Settings + mpv player; there is no OK/Cancel.
 
+#include <functional>
+
 class MpvPlayer;
 class ControlPanel;
 class Window;
@@ -20,10 +22,16 @@ public:
 
     void open();
     void render();
+
+    // HDR-present status for the Display tab (Application wires the D3D11
+    // presenter's state here). available/isHdr/maxNits.
+    struct HdrStatus { bool available = false; bool displayHdr = false; float maxNits = 0.0f; };
+    void setHdrStatusProvider(std::function<HdrStatus()> fn) { m_hdrStatus = fn; }
     bool isOpen() const { return m_requestOpen || m_isOpen; }
     void close() { m_isOpen = false; m_requestOpen = false; }
 
 private:
+    std::function<HdrStatus()> m_hdrStatus;
     enum Tab {
         TAB_LANGUAGES = 0,
         TAB_SUBTITLES,

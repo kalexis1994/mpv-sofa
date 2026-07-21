@@ -42,6 +42,10 @@ struct SubtitleStyle {
 struct DisplayConfig {
     int   mode      = 0;       // 0=Auto, 1=Force SDR (BT.709), 2=HDR10 passthrough
     float peakNits  = 1000.0f; // display peak luminance for HDR target
+    // Experimental: present the final frame through a D3D11 HDR (scRGB)
+    // swapchain via GL interop instead of the SDR OpenGL path. Only has an
+    // effect when Windows HDR is enabled and the display reports HDR.
+    int   hdrOutput = 0;       // 0=off (SDR present), 1=on (D3D11 HDR present)
     int   toneAlg   = 0;       // 0=bt.2390 (default), 1=mobius, 2=hable, 3=reinhard, 4=clip
     int   gamutMode = 0;       // 0=auto, 1=perceptual, 2=relative, 3=saturation
 

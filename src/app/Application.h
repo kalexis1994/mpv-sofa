@@ -2,6 +2,7 @@
 
 #include "Window.h"
 #include "renderer/Renderer.h"
+#include "renderer/Direct3DHdrPresenter.h"
 #include "renderer/Camera.h"
 #include "ui/ImGuiLayer.h"
 #include "ui/ControlPanel.h"
@@ -65,6 +66,7 @@ private:
     // Modal layers shared by every UI mode (docked / home / fullscreen):
     // file dialogs, playback menu, track picker, preferences, recents.
     void renderModalLayers();
+    void finalizeFrame();          // composite ImGui into the active FBO
 
     // Windows-style auto-hidden main menu bar.  Hidden by default; tap
     // Alt (keyboard) or the Start button (gamepad) to toggle, Escape
@@ -78,6 +80,8 @@ private:
     std::unique_ptr<Camera> m_camera;
     std::unique_ptr<ImGuiLayer> m_imgui;
     std::unique_ptr<MpvPlayer> m_player;
+    Direct3DHdrPresenter m_hdrPresenter;
+    unsigned int m_finalFbo = 0;   // 0 = default framebuffer; else HDR interop FBO
     BinauralRenderer m_binaural;
     std::string m_binauralMovie;   // path the sidecar render belongs to
     bool m_binauralArmed = false;  // user asked for object rendering
