@@ -1,0 +1,113 @@
+diff --git a/backends/imgui_impl_opengl3.cpp b/backends/imgui_impl_opengl3.cpp
+index b515ce0e2..02f6773ca 100644
+--- a/backends/imgui_impl_opengl3.cpp
++++ b/backends/imgui_impl_opengl3.cpp
+@@ -243,6 +243,10 @@ struct ImGui_ImplOpenGL3_Data
+     GLuint          ShaderHandle;
+     GLint           AttribLocationTex;       // Uniforms location
+     GLint           AttribLocationProjMtx;
++    GLint           AttribLocationColorMode; // [mpv-sofa] HDR compositing
++    GLint           AttribLocationSdrScaleMilli;
++    int             HdrDefaultMode;          //   frame default, set via
++    float           HdrDefaultScale;         //   ImGui_ImplOpenGL3_SetHdrColorDefaults
+     GLuint          AttribLocationVtxPos;    // Vertex attributes location
+     GLuint          AttribLocationVtxUV;
+     GLuint          AttribLocationVtxColor;
+@@ -517,6 +521,12 @@ static void ImGui_ImplOpenGL3_SetupRenderState(ImDrawData* draw_data, int fb_wid
+     glUseProgram(bd->ShaderHandle);
+     glUniform1i(bd->AttribLocationTex, 0);
+     glUniformMatrix4fv(bd->AttribLocationProjMtx, 1, GL_FALSE, &ortho_projection[0][0]);
++    if (bd->AttribLocationColorMode != -1)   // [mpv-sofa] HDR compositing defaults
++    {
++        glUniform1i(bd->AttribLocationColorMode, bd->HdrDefaultMode);
++        glUniform1i(bd->AttribLocationSdrScaleMilli,
++                    (int)(bd->HdrDefaultScale * 1000.0f + 0.5f));
++    }
+ 
+ #ifdef IMGUI_IMPL_OPENGL_MAY_HAVE_BIND_SAMPLER
+     if (bd->HasBindSampler)
+@@ -963,14 +973,30 @@ bool    ImGui_ImplOpenGL3_CreateDeviceObjects()
+         "    Out_Color = Frag_Color * texture(Texture, Frag_UV.st);\n"
+         "}\n";
+ 
++    // [mpv-sofa] ColorMode/SdrScale: HDR scRGB compositing support.
++    //   0 = stock passthrough (SDR path, byte-identical to upstream)
++    //   1 = UI drawn in sRGB -> linear scRGB, scaled to the SDR white level
++    //   2 = HDR video texture already linear -> scale only
+     const GLchar* fragment_shader_glsl_410_core =
+         "in vec2 Frag_UV;\n"
+         "in vec4 Frag_Color;\n"
+         "uniform sampler2D Texture;\n"
++        "uniform int ColorMode;\n"
++        "uniform int SdrScaleMilli;\n"
+         "layout (location = 0) out vec4 Out_Color;\n"
++        "vec3 srgb_to_linear(vec3 c)\n"
++        "{\n"
++        "    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)),\n"
++        "               step(0.04045, c));\n"
++        "}\n"
+         "void main()\n"
+         "{\n"
+-        "    Out_Color = Frag_Color * texture(Texture, Frag_UV.st);\n"
++        "    vec4 col = Frag_Color * texture(Texture, Frag_UV.st);\n"
++        "    if (ColorMode == 1)\n"
++        "        col.rgb = srgb_to_linear(col.rgb) * (float(SdrScaleMilli) * 0.001);\n"
++        "    else if (ColorMode == 2)\n"
++        "        col.rgb = col.rgb * (float(SdrScaleMilli) * 0.001);\n"
++        "    Out_Color = col;\n"
+         "}\n";
+ 
+     // Select shaders matching our GLSL versions
+@@ -1029,6 +1055,8 @@ bool    ImGui_ImplOpenGL3_CreateDeviceObjects()
+ 
+     bd->AttribLocationTex = glGetUniformLocation(bd->ShaderHandle, "Texture");
+     bd->AttribLocationProjMtx = glGetUniformLocation(bd->ShaderHandle, "ProjMtx");
++    bd->AttribLocationColorMode = glGetUniformLocation(bd->ShaderHandle, "ColorMode");
++    bd->AttribLocationSdrScaleMilli = glGetUniformLocation(bd->ShaderHandle, "SdrScaleMilli");
+     bd->AttribLocationVtxPos = (GLuint)glGetAttribLocation(bd->ShaderHandle, "Position");
+     bd->AttribLocationVtxUV = (GLuint)glGetAttribLocation(bd->ShaderHandle, "UV");
+     bd->AttribLocationVtxColor = (GLuint)glGetAttribLocation(bd->ShaderHandle, "Color");
+@@ -1050,6 +1078,26 @@ bool    ImGui_ImplOpenGL3_CreateDeviceObjects()
+     return true;
+ }
+ 
++// [mpv-sofa] HDR scRGB compositing support - see imgui_impl_opengl3.h.
++void    ImGui_ImplOpenGL3_SetHdrColorDefaults(int mode, float sdr_scale)
++{
++    ImGui_ImplOpenGL3_Data* bd = ImGui_ImplOpenGL3_GetBackendData();
++    if (!bd) return;
++    bd->HdrDefaultMode = mode;
++    bd->HdrDefaultScale = sdr_scale;
++}
++
++void    ImGui_ImplOpenGL3_SetHdrColorMode(int mode, float sdr_scale)
++{
++    // Immediate uniform update; valid while the backend's program is bound,
++    // i.e. from within an ImDrawList user callback during RenderDrawData.
++    ImGui_ImplOpenGL3_Data* bd = ImGui_ImplOpenGL3_GetBackendData();
++    if (!bd || bd->AttribLocationColorMode == -1) return;
++    glUniform1i(bd->AttribLocationColorMode, mode);
++    glUniform1i(bd->AttribLocationSdrScaleMilli,
++                (int)(sdr_scale * 1000.0f + 0.5f));
++}
++
+ void    ImGui_ImplOpenGL3_DestroyDeviceObjects()
+ {
+     ImGui_ImplOpenGL3_InitLoader();
+diff --git a/backends/imgui_impl_opengl3.h b/backends/imgui_impl_opengl3.h
+index 7855c43cf..c309aa8aa 100644
+--- a/backends/imgui_impl_opengl3.h
++++ b/backends/imgui_impl_opengl3.h
+@@ -41,5 +41,12 @@ IMGUI_IMPL_API void     ImGui_ImplOpenGL3_RenderDrawData(ImDrawData* draw_data);
+ IMGUI_IMPL_API bool     ImGui_ImplOpenGL3_CreateDeviceObjects();
+ IMGUI_IMPL_API void     ImGui_ImplOpenGL3_DestroyDeviceObjects();
+ 
++// [mpv-sofa] HDR scRGB compositing. Modes: 0 = passthrough (stock SDR),
++// 1 = sRGB -> linear * scale (UI), 2 = linear * scale (HDR video texture).
++// SetHdrColorDefaults sets the mode applied at the start of RenderDrawData;
++// SetHdrColorMode switches it mid-stream (call from an ImDrawList callback).
++IMGUI_IMPL_API void     ImGui_ImplOpenGL3_SetHdrColorDefaults(int mode, float sdr_scale);
++IMGUI_IMPL_API void     ImGui_ImplOpenGL3_SetHdrColorMode(int mode, float sdr_scale);
++
+ // (Advanced) Use e.g. if you need to precisely control the timing of texture updates (e.g. for staged rendering), by setting ImDrawData::Textures = nullptr to handle this manually.
+ IMGUI_IMPL_API void     ImGui_ImplOpenGL3_UpdateTexture(ImTextureData* tex);

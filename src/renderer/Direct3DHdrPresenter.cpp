@@ -10,6 +10,7 @@
 #include <dxgi1_6.h>
 #include <cstdio>
 #include <cstdarg>
+#include <vector>
 
 // WGL_NV_DX_interop / interop2 — declared manually so we don't depend on a
 // particular wglext.h being present. Loaded via wglGetProcAddress.
@@ -52,6 +53,50 @@ bool loadInteropFns() {
 }
 
 template <class T> void safeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
+
+// Windows' per-display "SDR content brightness" slider, in nits. This is the
+// system's own calibration for how bright SDR white should appear on an HDR
+// display, so the app's UI can match every other window instead of needing
+// its own brightness setting. 0 on failure.
+float querySdrWhiteForWindow(HWND hwnd) {
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) return 0.0f;
+
+    UINT32 nPaths = 0, nModes = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &nPaths, &nModes) != ERROR_SUCCESS)
+        return 0.0f;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(nPaths);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(nModes);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &nPaths, paths.data(),
+                           &nModes, modes.data(), nullptr) != ERROR_SUCCESS)
+        return 0.0f;
+
+    for (UINT32 i = 0; i < nPaths; i++) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
+        src.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        src.header.size = sizeof(src);
+        src.header.adapterId = paths[i].sourceInfo.adapterId;
+        src.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
+        if (wcscmp(src.viewGdiDeviceName, mi.szDevice) != 0) continue;
+
+        // DISPLAYCONFIG_SDR_WHITE_LEVEL declared locally — the enum value
+        // (11) is stable but absent from some mingw headers.
+        struct {
+            DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+            ULONG SDRWhiteLevel;   // in units of 1/1000, ×80 nits
+        } wl{};
+        wl.header.type = (DISPLAYCONFIG_DEVICE_INFO_TYPE)11;
+        wl.header.size = sizeof(wl);
+        wl.header.adapterId = paths[i].targetInfo.adapterId;
+        wl.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&wl.header) != ERROR_SUCCESS) continue;
+        return (float)wl.SDRWhiteLevel / 1000.0f * 80.0f;
+    }
+    return 0.0f;
+}
 }  // namespace
 
 Direct3DHdrPresenter::Direct3DHdrPresenter() {}
@@ -79,19 +124,31 @@ bool Direct3DHdrPresenter::createDevice() {
 void Direct3DHdrPresenter::queryDisplayHdr() {
     m_displayHdr = false;
     m_displayMaxNits = 0.0f;
+    const HMONITOR windowMonitor = MonitorFromWindow(
+        (HWND)m_hwnd, MONITOR_DEFAULTTOPRIMARY);
+
+    float sdr = querySdrWhiteForWindow((HWND)m_hwnd);
+    m_sdrWhiteNits = (sdr > 0.0f) ? sdr : 200.0f;
 
     IDXGIDevice* dxgiDev = nullptr;
     if (FAILED(((ID3D11Device*)m_device)->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgiDev)))
         return;
     IDXGIAdapter* adapter = nullptr;
     if (SUCCEEDED(dxgiDev->GetAdapter(&adapter))) {
-        // Find the output the app window is on; fall back to output 0.
+        // Only use the output that currently contains the app window. Picking
+        // the first HDR output would combine one monitor's peak with another
+        // monitor's SDR-white setting in multi-display setups.
         IDXGIOutput* out = nullptr;
         for (UINT i = 0; adapter->EnumOutputs(i, &out) != DXGI_ERROR_NOT_FOUND; i++) {
             IDXGIOutput6* out6 = nullptr;
             if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6))) {
                 DXGI_OUTPUT_DESC1 desc{};
                 if (SUCCEEDED(out6->GetDesc1(&desc))) {
+                    if (desc.Monitor != windowMonitor) {
+                        safeRelease(out6);
+                        safeRelease(out);
+                        continue;
+                    }
                     // HDR is *active* only when the output is in the PQ/BT.2020
                     // colour space — i.e. Windows HDR is switched ON for this
                     // display. An HDR-capable panel with Windows HDR off still

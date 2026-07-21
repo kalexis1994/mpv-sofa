@@ -24,8 +24,13 @@ public:
     void render();
 
     // HDR-present status for the Display tab (Application wires the D3D11
-    // presenter's state here). available/isHdr/maxNits.
-    struct HdrStatus { bool available = false; bool displayHdr = false; float maxNits = 0.0f; };
+    // presenter's state here). available/isHdr/maxNits/sdrWhiteNits.
+    struct HdrStatus {
+        bool available = false;
+        bool displayHdr = false;
+        float maxNits = 0.0f;
+        float sdrWhiteNits = 0.0f;
+    };
     void setHdrStatusProvider(std::function<HdrStatus()> fn) { m_hdrStatus = fn; }
     bool isOpen() const { return m_requestOpen || m_isOpen; }
     void close() { m_isOpen = false; m_requestOpen = false; }

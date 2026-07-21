@@ -83,6 +83,9 @@ private:
     Direct3DHdrPresenter m_hdrPresenter;
     unsigned int m_finalFbo = 0;   // 0 = default framebuffer; else HDR interop FBO
     unsigned long m_hdrPollCounter = 0;
+    bool m_hdrActive = false;       // this frame is being composed as linear scRGB
+    float m_hdrVideoScale = 1.0f;   // mpv normalized-linear -> scRGB (1.0 = 80 nits)
+    std::string m_hdrPlayerConfigKey;
     BinauralRenderer m_binaural;
     std::string m_binauralMovie;   // path the sidecar render belongs to
     bool m_binauralArmed = false;  // user asked for object rendering

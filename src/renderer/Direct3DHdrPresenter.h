@@ -36,6 +36,11 @@ public:
     bool displayIsHdr() const { return m_displayHdr; }
     float displayMaxNits() const { return m_displayMaxNits; }
 
+    // Windows' per-display "SDR content brightness" setting in nits — the
+    // system-calibrated brightness for SDR white on this display. The UI is
+    // scaled to this so it matches every other window. Falls back to 200.
+    float sdrWhiteNits() const { return m_sdrWhiteNits; }
+
     // Re-query the display's current HDR state (call periodically so
     // toggling Windows HDR while the app runs takes effect).
     void refreshDisplayHdr() { if (m_device) queryDisplayHdr(); }
@@ -65,6 +70,7 @@ private:
     bool  m_available = false;
     bool  m_displayHdr = false;
     float m_displayMaxNits = 0.0f;
+    float m_sdrWhiteNits = 200.0f;
     int   m_width = 0, m_height = 0;
     bool  m_locked = false;
 

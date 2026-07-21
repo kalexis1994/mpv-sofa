@@ -146,6 +146,7 @@ struct Snapshot {
         if (grain.chroma      != o.grain.chroma)      return false;
         if (display.mode      != o.display.mode)      return false;
         if (display.peakNits  != o.display.peakNits)  return false;
+        if (display.hdrRefWhite != o.display.hdrRefWhite) return false;
         if (display.hdrOutput != o.display.hdrOutput) return false;
         if (display.toneAlg   != o.display.toneAlg)   return false;
         if (display.gamutMode != o.display.gamutMode) return false;
@@ -443,6 +444,7 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_display.mode      = getI(kv, "mode",       g_display.mode);
             g_display.peakNits  = getF(kv, "peak_nits",  g_display.peakNits);
+            g_display.hdrRefWhite = getF(kv, "hdr_ref_white", g_display.hdrRefWhite);
             g_display.hdrOutput = getI(kv, "hdr_output", g_display.hdrOutput);
             g_display.toneAlg   = getI(kv, "tone_alg",   g_display.toneAlg);
             g_display.gamutMode = getI(kv, "gamut_mode", g_display.gamutMode);
@@ -602,6 +604,7 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "[display]\n");
     fprintf(f, "mode=%d\n",       g_display.mode);
     fprintf(f, "peak_nits=%g\n",  g_display.peakNits);
+    fprintf(f, "hdr_ref_white=%g\n", g_display.hdrRefWhite);
     fprintf(f, "hdr_output=%d\n", g_display.hdrOutput);
     fprintf(f, "tone_alg=%d\n",   g_display.toneAlg);
     fprintf(f, "gamut_mode=%d\n", g_display.gamutMode);
@@ -754,6 +757,7 @@ void Settings::applyDisplayConfigToPlayer(MpvPlayer* p) {
     p->setStringProperty("target-trc",          trcMap[idx]);
     p->setStringProperty("tone-mapping",        toneMap[ti]);
     p->setStringProperty("gamut-mapping-mode",  gamutMap[gi]);
+    p->setDoubleProperty("hdr-reference-white", d.hdrRefWhite);
 
     // Peak nits only meaningful for the HDR10 passthrough mode; the
     // other modes let mpv pick (auto = use input or sensible default).

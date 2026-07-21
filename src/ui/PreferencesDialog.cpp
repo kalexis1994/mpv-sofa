@@ -486,6 +486,8 @@ void PreferencesDialog::renderDisplay() {
     } else if (hs.displayHdr) {
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
                            "Status: ACTIVE — HDR present (%.0f nits).", hs.maxNits);
+        ImGui::TextDisabled("Windows SDR white: %.0f nits (automatic).",
+                            hs.sdrWhiteNits);
     } else {
         ImGui::TextDisabled("Status: idle — Windows HDR is off for this "
                             "display (SDR present). Enable it in Windows "
@@ -496,6 +498,15 @@ void PreferencesDialog::renderDisplay() {
         d.hdrOutput = force ? 1 : 0;
         dirty = true;
     }
+    ImGui::TextUnformatted("Video SDR white");
+    ImGui::SameLine(labelW);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    if (ImGui::SliderFloat("##hdr_ref_white", &d.hdrRefWhite,
+                           80.0f, 400.0f, "%.0f nits"))
+        dirty = true;
+    ImGui::TextDisabled(
+        "    Reference brightness for SDR content inside the HDR video signal; "
+        "203 nits is the standard default.");
     if (d.mode == 2) {
         ImGui::TextDisabled(
             "    Typical OLED peak: 700-1000 nits.  Mini-LED: 1500-2000.");

@@ -7,6 +7,7 @@
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <imgui_impl_opengl3.h>
 #include <ImGuiFileDialog.h>
 #include <IconsLucide.h>
 #include <cstdio>
@@ -31,6 +32,15 @@ static bool isSubtitleFile(const std::string& path) {
     }
     return ext == ".srt" || ext == ".ass" || ext == ".ssa" ||
            ext == ".sub" || ext == ".vtt" || ext == ".idx";
+}
+
+// Draw-list callback used immediately before an mpv video image. The texture
+// is already linear scRGB, unlike normal ImGui colors/textures which are sRGB
+// and use the backend's per-frame UI conversion.
+static void setHdrVideoColorMode(const ImDrawList*, const ImDrawCmd* cmd) {
+    const float scale = cmd->UserCallbackData
+        ? *static_cast<const float*>(cmd->UserCallbackData) : 1.0f;
+    ImGui_ImplOpenGL3_SetHdrColorMode(2, scale);
 }
 
 #ifdef _WIN32
@@ -182,6 +192,7 @@ bool Application::init(int argc, char* argv[]) {
         s.available  = m_hdrPresenter.available();
         s.displayHdr = m_hdrPresenter.displayIsHdr();
         s.maxNits    = m_hdrPresenter.displayMaxNits();
+        s.sdrWhiteNits = m_hdrPresenter.sdrWhiteNits();
         return s;
     });
 
@@ -369,6 +380,50 @@ void Application::run() {
             glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
             m_hdrPresenter.resize(fbw, fbh);
             m_finalFbo = m_hdrPresenter.beginFrame();
+        }
+        m_hdrActive = m_finalFbo != 0;
+
+        // Normal ImGui data is authored in sRGB. In HDR mode the backend
+        // linearizes it and maps white to Windows' per-monitor SDR white
+        // level. mpv video is switched to its native scRGB target below and
+        // is marked separately with a draw callback around ImGui::Image.
+        const float uiScale = m_hdrActive
+            ? m_hdrPresenter.sdrWhiteNits() / 80.0f
+            : 1.0f;
+        ImGui_ImplOpenGL3_SetHdrColorDefaults(m_hdrActive ? 1 : 0, uiScale);
+
+        // Reconfigure mpv only when the effective target changes. Preferences
+        // can apply their normal SDR/PQ settings directly; including every
+        // relevant setting in this key makes the scRGB override win again on
+        // the following frame while HDR presentation remains active.
+        const Settings::DisplayConfig& dc = Settings::displayConfig();
+        const float targetPeak = m_hdrPresenter.displayMaxNits() > 0.0f
+            ? m_hdrPresenter.displayMaxNits() : dc.peakNits;
+        const float referenceWhite = std::clamp(dc.hdrRefWhite, 80.0f, 400.0f);
+        // The classic libmpv render backend normalizes linear output so 1.0
+        // equals target-peak. Windows scRGB instead defines 1.0 as 80 nits.
+        // Multiplying by displayPeak/80 restores absolute luminance. Adjusting
+        // mpv's mapping peak inversely changes diffuse/reference white without
+        // ever moving the physical display peak.
+        m_hdrVideoScale = m_hdrActive ? targetPeak / 80.0f : 1.0f;
+        const float mappingPeak = std::clamp(
+            targetPeak * 203.0f / referenceWhite, 10.0f, 10000.0f);
+        char hdrKey[200];
+        snprintf(hdrKey, sizeof(hdrKey),
+                 "%d/%.3f/%d/%.3f/%.3f/%d/%d/%d/%.3f",
+                 m_hdrActive ? 1 : 0, targetPeak, dc.mode, dc.peakNits,
+                 dc.hdrRefWhite, dc.hdrOutput, dc.toneAlg, dc.gamutMode,
+                 dc.panscan);
+        if (m_hdrPlayerConfigKey != hdrKey) {
+            if (m_hdrActive) {
+                m_player->setStringProperty("target-prim", "bt.709");
+                m_player->setStringProperty("target-trc", "linear");
+                m_player->setDoubleProperty("target-peak", mappingPeak);
+                m_player->setDoubleProperty("hdr-reference-white", dc.hdrRefWhite);
+            } else {
+                Settings::applyDisplayConfigToPlayer(m_player.get());
+            }
+            m_hdrPlayerConfigKey = hdrKey;
         }
 
         render();
@@ -787,8 +842,13 @@ void Application::renderUI() {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoBringToFrontOnFocus |
                          ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking);
+            if (m_hdrActive)
+                ImGui::GetWindowDrawList()->AddCallback(
+                    setHdrVideoColorMode, &m_hdrVideoScale, sizeof(m_hdrVideoScale));
             ImGui::Image((ImTextureID)(intptr_t)m_videoTexture, vpSize,
                          ImVec2(0, 1), ImVec2(1, 0));
+            if (m_hdrActive)
+                ImGui::GetWindowDrawList()->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 
             // Double-click to exit fullscreen
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -1094,8 +1154,13 @@ void Application::renderUI() {
 #ifdef HAVE_MPV
         if (m_player && m_player->hasVideo()) {
             m_player->renderToFBO(m_videoFBO, m_videoWidth, m_videoHeight);
+            if (m_hdrActive)
+                ImGui::GetWindowDrawList()->AddCallback(
+                    setHdrVideoColorMode, &m_hdrVideoScale, sizeof(m_hdrVideoScale));
             ImGui::Image((ImTextureID)(intptr_t)m_videoTexture, videoSize,
                          ImVec2(0, 1), ImVec2(1, 0));
+            if (m_hdrActive)
+                ImGui::GetWindowDrawList()->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
             // Double-click on video: enter fullscreen
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 toggleVideoFullscreen();

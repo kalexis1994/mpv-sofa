@@ -634,14 +634,20 @@ void MpvPlayer::frameStepBack() {
 void MpvPlayer::setStringProperty(const char* name, const char* value) {
 #ifdef HAVE_MPV
     if (!m_mpv || !name || !value) return;
-    mpv_set_property_string(m_mpv, name, value);
+    int err = mpv_set_property_string(m_mpv, name, value);
+    if (err < 0)
+        fprintf(stderr, "[MpvPlayer] set %s=%s failed: %s\n",
+                name, value, mpv_error_string(err));
 #endif
 }
 
 void MpvPlayer::setDoubleProperty(const char* name, double value) {
 #ifdef HAVE_MPV
     if (!m_mpv || !name) return;
-    mpv_set_property(m_mpv, name, MPV_FORMAT_DOUBLE, &value);
+    int err = mpv_set_property(m_mpv, name, MPV_FORMAT_DOUBLE, &value);
+    if (err < 0)
+        fprintf(stderr, "[MpvPlayer] set %s=%g failed: %s\n",
+                name, value, mpv_error_string(err));
 #endif
 }
 

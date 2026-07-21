@@ -40,6 +40,27 @@ target_include_directories(glad PUBLIC external/glad/include)
 
 # Dear ImGui (vendored from submodule)
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/external/imgui)
+set(IMGUI_PATCHED_ROOT ${CMAKE_BINARY_DIR}/generated/imgui)
+set(IMGUI_PATCHED_BACKEND_DIR ${IMGUI_PATCHED_ROOT}/backends)
+set(IMGUI_HDR_PATCH ${CMAKE_SOURCE_DIR}/patches/imgui-opengl3-hdr.patch)
+file(MAKE_DIRECTORY ${IMGUI_PATCHED_BACKEND_DIR})
+configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+               ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.cpp COPYONLY)
+configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.h
+               ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.h COPYONLY)
+find_package(Git REQUIRED)
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env
+            "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
+            ${GIT_EXECUTABLE} apply --whitespace=nowarn ${IMGUI_HDR_PATCH}
+    WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
+    RESULT_VARIABLE IMGUI_HDR_PATCH_RESULT
+    ERROR_VARIABLE IMGUI_HDR_PATCH_ERROR
+)
+if(NOT IMGUI_HDR_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to apply ImGui HDR backend patch: ${IMGUI_HDR_PATCH_ERROR}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${IMGUI_HDR_PATCH})
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
@@ -47,10 +68,11 @@ add_library(imgui STATIC
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui PUBLIC
     ${IMGUI_DIR}
+    ${IMGUI_PATCHED_BACKEND_DIR}
     ${IMGUI_DIR}/backends
 )
 target_link_libraries(imgui PUBLIC glfw)
