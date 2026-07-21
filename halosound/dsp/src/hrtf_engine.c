@@ -49,6 +49,11 @@ struct HaloEngine {
     /* Air absorption one-pole state per channel */
     float air_abs_state[HRTF_MAX_CHANNELS];
 
+    /* Slewed per-channel distance/elevation gain (position changes step
+     * the target; the applied gain glides to it, so moving objects don't
+     * zipper) */
+    float ch_gain[HRTF_MAX_CHANNELS];
+
     /* Minimum speaker distance (for relative attenuation) */
     float min_dist;
 
@@ -209,6 +214,7 @@ HaloEngine* halo_create(int sample_rate, int num_channels) {
     e->sample_rate = sample_rate;
     e->num_channels = num_channels;
     e->min_dist = 1.0f;
+    for (int i = 0; i < HRTF_MAX_CHANNELS; i++) e->ch_gain[i] = -1.0f;
     e->room_gain = 1.0f;
     e->out_limiter_gain = 1.0f;
     e->hrir_length = 128; /* Default until SOFA loaded */
@@ -321,7 +327,12 @@ void halo_set_speaker_pos(HaloEngine *e, int ch, float az, float el, float dist)
     /* Re-project this source's image-source reflections (LFE never
      * reflects — a sub is omnidirectional and only muddies the image). */
     if (ch != 3) er3d_set_source(&e->er3d, ch, az, el, dist);
-    update_min_dist(e);
+    /* NOTE: min_dist is deliberately NOT recomputed here. It's the static
+     * loudness reference of the layout; with object audio a source flying
+     * near the listener would otherwise drag the reference down and step
+     * the gain of EVERY channel by many dB (audible as global pumping,
+     * worst in the bass). Against the stable reference a close flyby just
+     * rides the (slewed, clamped) per-channel gain instead. */
 }
 
 /*
@@ -458,8 +469,20 @@ void halo_process(HaloEngine *e, const float *input, float *output_lr,
             }
         }
 
-        for (int i = 0; i < num_samples; i++)
-            chdata[i] *= dist_gain;
+        /* Glide the applied gain toward its target (~12 ms) so per-event
+         * position changes can't step the channel level — audible as
+         * zipper/pumping on moving objects, worst in the bass. */
+        {
+            float g = e->ch_gain[ch];
+            if (!(g >= 0.0f)) g = dist_gain;          /* first block: snap */
+            const float k = 1.0f -
+                expf(-1.0f / (0.012f * (float)e->sample_rate));
+            for (int i = 0; i < num_samples; i++) {
+                g += (dist_gain - g) * k;
+                chdata[i] *= g;
+            }
+            e->ch_gain[ch] = g;
+        }
 
         /* Air absorption — one-pole lowpass (skip LFE, ch 3) */
         if (ch != 3) {

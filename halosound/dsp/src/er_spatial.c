@@ -106,6 +106,17 @@ void er3d_set_source(Er3dState *er, int src, float az_deg, float el_deg,
     if (!er->initialized || src < 0 || src >= ER3D_MAX_SRC) return;
     if (er->width <= 0.1f) { er->src_active[src] = 0; return; }
 
+    /* Crossfade from the current taps: snapshot them as "old" and restart
+     * the fade. If a previous fade was still running, freeze its blend as
+     * the new starting point isn't tracked per-tap — close enough at
+     * 512-sample fades. */
+    if (er->src_active[src]) {
+        memcpy(er->tap_old[src], er->tap[src], sizeof(er->tap[src]));
+        er->fade_pos[src] = 0;
+    } else {
+        er->fade_pos[src] = ER3D_FADE;   /* first placement: no fade */
+    }
+
     const float W = er->width, D = er->depth, H = er->height;
     const float az = az_deg * (float)M_PI / 180.0f;
     const float el = el_deg * (float)M_PI / 180.0f;
@@ -191,13 +202,11 @@ void er3d_set_room(Er3dState *er, float width, float depth, float height,
     /* Sources are re-projected by the engine after a room change. */
 }
 
-void er3d_feed(Er3dState *er, int src, const float *x, int n) {
-    if (!er->initialized || er->width <= 0.1f) return;
-    if (src < 0 || src >= ER3D_MAX_SRC || !er->src_active[src]) return;
-
+static void er3d_feed_taps(Er3dState *er, const Er3dTap *taps,
+                           const float *x, const float *w, int n) {
     const int wp = er->write_pos;
     for (int s = 0; s < ER3D_NUM_SURF; s++) {
-        const Er3dTap *t = &er->tap[src][s];
+        const Er3dTap *t = &taps[s];
         if (!t->active || t->gain < 1e-4f) continue;
         float *r0 = er->bus[t->bus0].ring;
         float *r1 = er->bus[t->bus1].ring;
@@ -206,10 +215,37 @@ void er3d_feed(Er3dState *er, int src, const float *x, int n) {
         const int base = wp + t->delay;
         for (int i = 0; i < n; i++) {
             const int idx = (base + i) & ER3D_RING_MASK;
-            r0[idx] += x[i] * g0;
-            r1[idx] += x[i] * g1;
+            const float xv = x[i] * w[i];
+            r0[idx] += xv * g0;
+            r1[idx] += xv * g1;
         }
     }
+}
+
+void er3d_feed(Er3dState *er, int src, const float *x, int n) {
+    if (!er->initialized || er->width <= 0.1f) return;
+    if (src < 0 || src >= ER3D_MAX_SRC || !er->src_active[src]) return;
+    if (n > HRTF_BLOCK_SIZE) n = HRTF_BLOCK_SIZE;
+
+    float w_new[HRTF_BLOCK_SIZE];
+    const int fp = er->fade_pos[src];
+    if (fp >= ER3D_FADE) {
+        for (int i = 0; i < n; i++) w_new[i] = 1.0f;
+        er3d_feed_taps(er, er->tap[src], x, w_new, n);
+        return;
+    }
+
+    /* Crossfade: old taps fade out while the recomputed ones fade in. */
+    float w_old[HRTF_BLOCK_SIZE];
+    for (int i = 0; i < n; i++) {
+        float w = (float)(fp + i) / (float)ER3D_FADE;
+        if (w > 1.0f) w = 1.0f;
+        w_new[i] = w;
+        w_old[i] = 1.0f - w;
+    }
+    er3d_feed_taps(er, er->tap[src], x, w_new, n);
+    er3d_feed_taps(er, er->tap_old[src], x, w_old, n);
+    er->fade_pos[src] = fp + n;
 }
 
 void er3d_render(Er3dState *er, float *out_l, float *out_r, int n,

@@ -38,12 +38,19 @@ typedef struct {
     float w0, w1;
 } Er3dTap;
 
+/* Samples over which a source's recomputed taps crossfade from the old
+ * delay/gain/panning set — instantaneous jumps comb-filter and drop bass
+ * on moving objects. */
+#define ER3D_FADE 512
+
 typedef struct {
     int initialized;
     int sample_rate;
     int write_pos;
     Er3dBus bus[ER3D_NUM_BUS];
     Er3dTap tap[ER3D_MAX_SRC][ER3D_NUM_SURF];
+    Er3dTap tap_old[ER3D_MAX_SRC][ER3D_NUM_SURF];
+    int fade_pos[ER3D_MAX_SRC];      /* < ER3D_FADE while crossfading */
     int src_active[ER3D_MAX_SRC];
     float width, depth, height;   /* room (m); 0 = ER disabled */
     float alpha;                  /* average absorption (Sabine) */
