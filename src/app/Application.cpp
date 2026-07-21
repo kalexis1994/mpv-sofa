@@ -380,9 +380,16 @@ void Application::processInput() {
         m_fullscreenKeyHeld = false;
     }
 
-    // Escape: exit video fullscreen
+    // Escape in video fullscreen: close the playback menu first if it's
+    // up, otherwise exit fullscreen.
     if (m_videoFullscreen && glfwGetKey(handle, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-        toggleVideoFullscreen();
+        if (!m_escKeyHeld) {
+            if (m_playbackMenuOpen) closePlaybackMenu();
+            else                    toggleVideoFullscreen();
+            m_escKeyHeld = true;
+        }
+    } else if (glfwGetKey(handle, GLFW_KEY_ESCAPE) == GLFW_RELEASE) {
+        m_escKeyHeld = false;
     }
 
     // F2: toggle 3D visualizer panel
@@ -609,7 +616,7 @@ void Application::renderUI() {
     const bool hasMediaForCursor = m_player && m_player->hasVideo();
     const bool hideCursor =
         m_videoFullscreen
-            ? (m_fullscreenCursorTimer <= 0.0f)
+            ? (m_fullscreenCursorTimer <= 0.0f && !m_playbackMenuOpen)
             : (hasMediaForCursor && !m_transportVisible &&
                                     !m_playbackMenuOpen);
     if (hideCursor) {
@@ -677,6 +684,11 @@ void Application::renderUI() {
             }
         }
 #endif
+        // Modal layers still work over fullscreen video — without this
+        // the transport bar's menu/open/picker buttons silently did
+        // nothing in fullscreen (the dialogs only rendered in docked
+        // mode).
+        renderModalLayers();
         m_imgui->endFrame();
         return;
     }
@@ -815,30 +827,10 @@ void Application::renderUI() {
         }
     }
 
-    // Render and dispatch the file dialogs.  Sized so they're roomy enough
-    // to navigate but not full-screen.
-    ImVec2 vpSize = ImGui::GetMainViewport()->Size;
-    ImVec2 dlgMin(640, 420);
-    ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
-    if (ImGuiFileDialog::Instance()->Display("open_media", 0, dlgMin, dlgMax)) {
-        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
-            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
-            m_pendingFile = path;
-        }
-        ImGuiFileDialog::Instance()->Close();
-    }
-    if (ImGuiFileDialog::Instance()->Display("open_subtitle", 0, dlgMin, dlgMax)) {
-        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
-            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
-            m_player->loadSubtitleFile(path);
-        }
-        ImGuiFileDialog::Instance()->Close();
-    }
-
     // No file loaded → show the TV-mode home screen instead of an
     // empty dockspace.  Dialogs (file picker / preferences / recent)
-    // are still rendered below this block on top of whatever is
-    // showing, so the home buttons can open them normally.
+    // render via renderModalLayers on top of whatever is showing, so
+    // the home buttons can open them normally.
     const bool hasMedia = m_player && m_player->hasVideo();
     const bool prefsOpen = m_prefsDialog && m_prefsDialog->isOpen();
     if (!hasMedia) {
@@ -848,9 +840,7 @@ void Application::renderUI() {
         // because it's a modal opened *from* the home and small enough
         // to overlay cleanly.
         if (!prefsOpen) renderHomeScreen();
-        if (m_trackPicker)  m_trackPicker->render();
-        if (m_prefsDialog)  m_prefsDialog->render();
-        if (m_showRecentDialog) renderRecentDialog();
+        renderModalLayers();
         m_imgui->endFrame();
         return;
     }
@@ -1143,6 +1133,39 @@ void Application::renderUI() {
     // Recent dialog still render on top of it because they're each a
     // separate ImGui window opened later in the frame; that gives us
     // the back-stack we want: Preferences → playback menu → video.
+    renderModalLayers();
+
+    m_imgui->endFrame();
+}
+
+/*
+ * Modal layers shared by every UI mode (docked, home screen and video
+ * fullscreen): the file dialogs, the in-playback menu, the track picker,
+ * Preferences and the Recent list.  The fullscreen branch used to return
+ * before any of these rendered, so its transport-bar buttons (menu, open,
+ * audio/subtitle pickers) silently did nothing.
+ */
+void Application::renderModalLayers() {
+    // File dialogs — sized so they're roomy enough to navigate but not
+    // full-screen.
+    ImVec2 vpSize = ImGui::GetMainViewport()->Size;
+    ImVec2 dlgMin(640, 420);
+    ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
+    if (ImGuiFileDialog::Instance()->Display("open_media", 0, dlgMin, dlgMax)) {
+        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            m_pendingFile = path;
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+    if (ImGuiFileDialog::Instance()->Display("open_subtitle", 0, dlgMin, dlgMax)) {
+        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            m_player->loadSubtitleFile(path);
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+
     if (m_playbackMenuOpen)
         renderPlaybackMenu();
 
@@ -1158,8 +1181,6 @@ void Application::renderUI() {
     // Recent-files modal opened from the home screen.
     if (m_showRecentDialog)
         renderRecentDialog();
-
-    m_imgui->endFrame();
 }
 
 // Shared by the menu, the Ctrl+O hotkey and the home-screen "Open"

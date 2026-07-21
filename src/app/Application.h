@@ -61,6 +61,9 @@ private:
     void openPlaybackMenu();
     void closePlaybackMenu();
     void renderPlaybackMenu();
+    // Modal layers shared by every UI mode (docked / home / fullscreen):
+    // file dialogs, playback menu, track picker, preferences, recents.
+    void renderModalLayers();
 
     // Windows-style auto-hidden main menu bar.  Hidden by default; tap
     // Alt (keyboard) or the Start button (gamepad) to toggle, Escape
@@ -141,6 +144,7 @@ private:
     // Video fullscreen mode
     bool m_videoFullscreen = false;
     bool m_fullscreenKeyHeld = false;
+    bool m_escKeyHeld = false;
     float m_fullscreenCursorTimer = 0.0f;  // hide UI after inactivity
     float m_lastMouseX = 0.0f, m_lastMouseY = 0.0f;
     bool  m_cursorHidden = false;          // current GLFW cursor state
