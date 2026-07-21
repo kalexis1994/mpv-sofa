@@ -127,8 +127,8 @@ static const RoomPreset roomPresets[] = {
     // Large format auditorium ~26 x 30 x 18m, steep stadium seating
     // 22m wide screen (1.90:1), listener at 2/3 depth (~20m from screen)
     // Volume=14040m3, Absorption=0.28 -> RT60 ~0.7s (heavy acoustic treatment)
-    {"Large Format",
-     "26x30x18m large format, 22m screen, seat at 2/3 depth",
+    {"Dolby Cinema",
+     "26x30x18m premium large format, 22m screen, seat at 2/3 depth",
      26.0f, 30.0f, 18.0f, 0.28f,
      0.60f, 0.10f, 0.35f, 25.0f,  // controlled reverb, premium acoustic standards
      3.0f,  // room_gain: +9.5dB compensates for ~5x speaker distances
@@ -152,7 +152,7 @@ static const RoomPreset roomPresets[] = {
     // Giant screen theater ~36 x 42 x 26m, the largest premium format
     // 30m wide x 23m tall screen (1.43:1), listener at 2/3 depth (~28m)
     // Volume=39312m3, Absorption=0.25 -> RT60 ~0.9s
-    {"Giant Screen",
+    {"IMAX",
      "36x42x26m giant screen, 30x23m screen, seat at 2/3 depth",
      36.0f, 42.0f, 26.0f, 0.25f,
      0.70f, 0.13f, 0.30f, 35.0f,  // more reverb from massive volume
@@ -195,6 +195,77 @@ static const RoomPreset roomPresets[] = {
         {-50.0f,  60.0f, 12.0f}, // TFR
         {140.0f,  55.0f, 10.0f}, // TBL
         {-140.0f, 55.0f, 10.0f}, // TBR
+    }},
+
+    // --- Living Room ---
+    // Typical untreated domestic room ~5 x 4.2 x 2.5m
+    // Volume=52.5m3, hard surfaces + furnishing -> RT60 ~0.55s
+    {"Living Room",
+     "5x4.2x2.5m untreated domestic room, TV setup",
+     5.0f, 4.2f, 2.5f, 0.18f,
+     0.18f, 0.035f, 0.65f, 7.0f,   // short but audible domestic reverb
+     1.0f,   // room_gain: nearfield TV distances
+     0.20f,  // er_level: bare walls reflect, furniture breaks it up
+     {
+        { 30.0f,   0.0f, 2.2f},  // FL  - flanking the TV
+        {-30.0f,   0.0f, 2.2f},  // FR
+        {  0.0f,   0.0f, 2.2f},  // FC  - soundbar/TV position
+        {  0.0f, -10.0f, 2.0f},  // LFE - floor, corner
+        {140.0f,   0.0f, 1.8f},  // BL  - behind sofa
+        {-140.0f,  0.0f, 1.8f},  // BR
+        { 90.0f,   5.0f, 1.6f},  // SL  - side walls, close
+        {-90.0f,   5.0f, 1.6f},  // SR
+        { 45.0f,  45.0f, 2.0f},  // TFL - low ceiling
+        {-45.0f,  45.0f, 2.0f},  // TFR
+        {135.0f,  45.0f, 2.0f},  // TBL
+        {-135.0f, 45.0f, 2.0f},  // TBR
+    }},
+
+    // --- Screening Room ---
+    // Post-production review room ~9 x 6.5 x 3.5m, treated
+    // Volume=205m3, Absorption~0.49 -> RT60 ~0.3s
+    {"Screening Room",
+     "9x6.5x3.5m post-production review room, seat at 2/3 depth",
+     9.0f, 6.5f, 3.5f, 0.49f,
+     0.32f, 0.050f, 0.55f, 10.0f,  // tight, controlled decay
+     1.3f,   // room_gain: mid-distance speakers
+     0.35f,  // er_level: treated but present
+     {
+        { 28.0f,   8.0f, 4.5f},  // FL  - behind small screen L
+        {-28.0f,   8.0f, 4.5f},  // FR
+        {  0.0f,   8.0f, 4.2f},  // FC  - behind screen center
+        {  0.0f,  -5.0f, 4.0f},  // LFE - front floor
+        {145.0f,   5.0f, 3.0f},  // BL  - rear wall
+        {-145.0f,  5.0f, 3.0f},  // BR
+        { 95.0f,   8.0f, 3.5f},  // SL  - side wall pair
+        {-95.0f,   8.0f, 3.5f},  // SR
+        { 42.0f,  48.0f, 3.8f},  // TFL - ceiling
+        {-42.0f,  48.0f, 3.8f},  // TFR
+        {132.0f,  48.0f, 3.4f},  // TBL
+        {-132.0f, 48.0f, 3.4f},  // TBR
+    }},
+
+    // --- None (Dry) ---
+    // Room processing bypassed: pure HRTF at ITU reference angles.
+    {"None (Dry)",
+     "No room simulation - pure HRTF, ITU reference angles at 2m",
+     0.0f, 0.0f, 0.0f, 1.0f,
+     0.0f, 0.0f, 1.0f, 0.0f,       // reverb fully off
+     1.0f,   // room_gain: unity
+     0.0f,   // er_level: no reflections
+     {
+        { 30.0f,   0.0f, 2.0f},  // FL
+        {-30.0f,   0.0f, 2.0f},  // FR
+        {  0.0f,   0.0f, 2.0f},  // FC
+        {  0.0f, -10.0f, 2.0f},  // LFE
+        {135.0f,   0.0f, 2.0f},  // BL
+        {-135.0f,  0.0f, 2.0f},  // BR
+        { 90.0f,   0.0f, 2.0f},  // SL
+        {-90.0f,   0.0f, 2.0f},  // SR
+        { 45.0f,  45.0f, 2.0f},  // TFL
+        {-45.0f,  45.0f, 2.0f},  // TFR
+        {135.0f,  45.0f, 2.0f},  // TBL
+        {-135.0f, 45.0f, 2.0f},  // TBR
     }},
 };
 
@@ -666,8 +737,8 @@ void ControlPanel::renderSpatialContent() {
         atomic_store(&m_state->er_level, room.er_level);
 
         // Screen baffling: auto-enable for cinema-class presets (Cinema=2,
-        // Large Format=3, Giant Screen=4).  Perforated projection screens
-        // add the subtle HF rolloff that cues "speakers behind a screen".
+        // Dolby Cinema=3, IMAX=4).  Perforated projection screens add the
+        // subtle HF rolloff that cues "speakers behind a screen".
         atomic_store(&m_state->screen_baffling,
                      (roomIdx >= 2 && roomIdx <= 4) ? 1 : 0);
     }
