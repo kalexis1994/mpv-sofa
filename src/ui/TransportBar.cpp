@@ -291,11 +291,19 @@ void TransportBar::renderContent() {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtitles");
 
-    // Right-aligned: fullscreen + controls drawer
+    // Right-aligned: menu + fullscreen + controls drawer
     {
-        const float endW = (btnW + spacing) * 2;
+        const float endW = (btnW + spacing) * 3;
         float region = ImGui::GetContentRegionAvail().x;
         if (region > endW) ImGui::SameLine(0, region - endW);
+
+        // Playback menu: the way back out (open another file, settings…).
+        if (ImGui::Button(ICON_LC_MENU, ImVec2(btnW, 0))) {
+            if (m_menuCb) m_menuCb();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Menu (Esc)");
+        ImGui::SameLine(0, spacing);
 
         const char* fsLabel = m_isFullscreen ? ICON_LC_MINIMIZE : ICON_LC_MAXIMIZE;
         if (ImGui::Button(fsLabel, ImVec2(btnW, 0))) {

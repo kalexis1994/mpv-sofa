@@ -155,6 +155,7 @@ bool Application::init(int argc, char* argv[]) {
     m_transportBar->setAudioPickerCallback([this]() {
         m_trackPicker->open(TrackPicker::Mode::Audio,    /*isAutoLoad=*/false);
     });
+    m_transportBar->setMenuCallback([this]() { openPlaybackMenu(); });
     m_transportBar->setSubPickerCallback([this]() {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
@@ -713,11 +714,13 @@ void Application::renderUI() {
                                        ImGuiPopupFlags_AnyPopupLevel);
 
         if (hasMediaNow) {
-            // Playback context.  Start always toggles the menu; B only
-            // does so when nothing else owns the cancel gesture, so
-            // popups in Preferences / dropdowns close first.
+            // Playback context.  Start always toggles the menu; B and Esc
+            // only do so when nothing else owns the cancel gesture, so
+            // popups in Preferences / dropdowns close first.  (In video
+            // fullscreen Esc exits fullscreen instead — that path returns
+            // before reaching here.)
             if (startEdge ||
-                (bEdge && !prefsOpenNow && !anyPopupNow)) {
+                ((bEdge || escEdge) && !prefsOpenNow && !anyPopupNow)) {
                 if (m_playbackMenuOpen) closePlaybackMenu();
                 else                    openPlaybackMenu();
             }
@@ -1337,7 +1340,7 @@ void Application::renderPlaybackMenu() {
 
     // Subtitle hint at the top of the block.
     {
-        const char* hint = "Paused — pick an action or press B to resume";
+        const char* hint = "Paused — pick an action or press Esc to resume";
         ImGui::PushFont(nullptr, ImGui::GetFontSize() * titleScale);
         ImVec2 ts = ImGui::CalcTextSize(hint);
         ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
