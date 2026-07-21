@@ -230,6 +230,27 @@ bool Direct3DHdrPresenter::registerInterop() {
     return true;
 }
 
+bool Direct3DHdrPresenter::createScratch(int width, int height) {
+    glGenFramebuffers(1, &m_scratchFbo);
+    glGenTextures(1, &m_scratchTex);
+    glBindTexture(GL_TEXTURE_2D, m_scratchTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0,
+                 GL_RGBA, GL_HALF_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_scratchFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, m_scratchTex, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return st == GL_FRAMEBUFFER_COMPLETE;
+}
+
+void Direct3DHdrPresenter::releaseScratch() {
+    if (m_scratchTex) { glDeleteTextures(1, &m_scratchTex); m_scratchTex = 0; }
+    if (m_scratchFbo) { glDeleteFramebuffers(1, &m_scratchFbo); m_scratchFbo = 0; }
+}
+
 void Direct3DHdrPresenter::releaseInterop() {
     if (m_glDevice && m_glBackHandle) {
         if (p_wglDXUnregisterObjectNV) p_wglDXUnregisterObjectNV(m_glDevice, m_glBackHandle);
@@ -251,6 +272,7 @@ bool Direct3DHdrPresenter::init(GLFWwindow* window, int width, int height) {
     queryDisplayHdr();
     if (!createSwapchain(width, height)) { shutdown(); return false; }
     if (!registerInterop()) { shutdown(); return false; }
+    if (!createScratch(width, height)) { shutdown(); return false; }
 
     m_available = true;
     fprintf(stderr, "[HDR] presenter ready (%dx%d, scRGB)\n", width, height);
@@ -265,12 +287,13 @@ bool Direct3DHdrPresenter::init(GLFWwindow* window, int width, int height) {
 void Direct3DHdrPresenter::resize(int width, int height) {
     if (!m_available || width <= 0 || height <= 0) return;
     if (width == m_width && height == m_height) return;
+    releaseScratch();
     releaseInterop();
     HRESULT hr = ((IDXGISwapChain3*)m_swapchain)->ResizeBuffers(
         0, width, height, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) { m_available = false; return; }
     m_width = width; m_height = height;
-    if (!registerInterop()) m_available = false;
+    if (!registerInterop() || !createScratch(width, height)) m_available = false;
 }
 
 unsigned int Direct3DHdrPresenter::beginFrame() {
@@ -278,11 +301,22 @@ unsigned int Direct3DHdrPresenter::beginFrame() {
     HANDLE h = (HANDLE)m_glBackHandle;
     if (!p_wglDXLockObjectsNV(m_glDevice, 1, &h)) return 0;
     m_locked = true;
-    return m_glFbo;
+    // The app renders into the scratch FBO (normal GL orientation).
+    return m_scratchFbo;
 }
 
 void Direct3DHdrPresenter::present() {
     if (!m_available || !m_locked) return;
+
+    // Blit scratch → interop texture with the Y axis flipped, converting
+    // from GL's bottom-left origin to D3D's top-left origin.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_scratchFbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_glFbo);
+    glBlitFramebuffer(0, 0, m_width, m_height,
+                      0, m_height, m_width, 0,   // dst Y inverted → vertical flip
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
     HANDLE h = (HANDLE)m_glBackHandle;
     p_wglDXUnlockObjectsNV(m_glDevice, 1, &h);
     m_locked = false;
@@ -298,6 +332,7 @@ void Direct3DHdrPresenter::present() {
 }
 
 void Direct3DHdrPresenter::shutdown() {
+    releaseScratch();
     releaseInterop();
     if (m_glDevice && p_wglDXCloseDeviceNV) { p_wglDXCloseDeviceNV(m_glDevice); m_glDevice = nullptr; }
     safeRelease(*(IDXGISwapChain3**)&m_swapchain);

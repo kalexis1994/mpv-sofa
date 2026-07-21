@@ -73,6 +73,14 @@ private:
     void* m_backTex = nullptr;       // ID3D11Texture2D* (current backbuffer)
     void* m_glDevice = nullptr;      // HANDLE from wglDXOpenDeviceNV
     void* m_glBackHandle = nullptr;  // HANDLE from wglDXRegisterObjectNV
-    unsigned int m_glFbo = 0;
-    unsigned int m_glRbo = 0;
+    unsigned int m_glFbo = 0;      // FBO wrapping the interop texture
+    unsigned int m_glRbo = 0;      // interop GL texture name
+    // Scratch FBO the app renders into (normal GL bottom-left origin); its
+    // contents are blit-flipped into the interop texture at present, fixing
+    // the GL(bottom-left) vs D3D(top-left) vertical inversion.
+    unsigned int m_scratchFbo = 0;
+    unsigned int m_scratchTex = 0;
+
+    bool createScratch(int width, int height);
+    void releaseScratch();
 };
