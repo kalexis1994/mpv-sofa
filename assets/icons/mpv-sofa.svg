@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-labelledby="title description">
+  <title id="title">mpv-sofa</title>
+  <desc id="description">Un sofá con un almohadón en forma de Play, dentro de un marco de foto instantánea.</desc>
+
+  <!-- Polaroid palette (design/style-lab.html):
+         frame  #F7F3E9  warm white, the constant in both themes
+         photo  #DED3C0  cardboard
+         sofa   #221D1A  warm near-black (darkroom surface)
+         play   #FF2E4D  accent red
+       The source artwork used a cold navy (#102A4D) for the sofa and a
+       coral (#FF6545) for the Play — both from the old palette. -->
+
+  <g transform="rotate(-3 256 256)">
+    <!-- Frame: thicker at the bottom, the way an instant photo is -->
+    <rect x="64" y="48" width="384" height="416" rx="12" fill="#F7F3E9"/>
+    <rect x="88" y="72" width="336" height="336" rx="3" fill="#DED3C0"/>
+
+    <!-- Sofa + Play cushion, scaled from the source artwork's own
+         coordinate space (bounding box 672.6 x 458 centred on 507.2,559)
+         into the photo area. -->
+    <g transform="translate(256 240) scale(0.42) translate(-507.2 -559)">
+      <g fill="#221D1A">
+        <path d="m 350,330 h 324 c 57,0 103,46 103,103 V 600 H 247 V 433 c 0,-57 46,-103 103,-103 z"/>
+        <rect x="170.90793" y="464.45514" width="202.7104" height="276.12375" rx="89.83757"
+              transform="matrix(0.99997616,0.00690433,0.0079486,0.99996841,0,0)"/>
+        <rect x="640.82751" y="464.45514" width="202.7104" height="276.12375" rx="89.83757"
+              transform="matrix(0.99997616,0.00690433,0.0079486,0.99996841,0,0)"/>
+        <path d="m 357,566 h 310 c 42,0 76,34 76,76 V 744 H 281 V 642 c 0,-42 34,-76 76,-76 z"/>
+        <rect x="275" y="650" width="474" height="112" rx="40"/>
+        <rect x="282" y="724" width="96" height="64" rx="22"/>
+        <rect x="646" y="724" width="96" height="64" rx="22"/>
+      </g>
+      <path fill="#FF2E4D"
+            d="m 464.1464,421.23907 c -16.11371,-9.20784 -35.68036,2.30196 -35.68036,21.86861 v 211.78021 c 0,19.56665 20.71763,31.07644 36.83134,20.71763 l 189.9116,-110.49403 c 16.11371,-9.20783 16.11371,-32.22742 0,-41.43525 z"/>
+    </g>
+  </g>
+</svg>

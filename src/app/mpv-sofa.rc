@@ -1,0 +1,42 @@
+// Windows resources: the application icon Explorer, the taskbar and Alt-Tab
+// read off the executable, plus the version block shown in file properties.
+//
+// The .ico is found through an include path CMake points at assets/icons.
+
+#include <windows.h>
+#include "version.h"
+
+// Lowest-numbered ICON resource wins as the application icon, so keep this 1.
+1 ICON "mpv-sofa.ico"
+
+VS_VERSION_INFO VERSIONINFO
+  FILEVERSION     MPV_SOFA_VER_COMMA,0
+  PRODUCTVERSION  MPV_SOFA_VER_COMMA,0
+  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+  FILEFLAGS       VS_FF_DEBUG
+#else
+  FILEFLAGS       0
+#endif
+  FILEOS          VOS_NT_WINDOWS32
+  FILETYPE        VFT_APP
+  FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "080904b0"          // English (UK), Unicode — matches Translation
+    BEGIN
+      VALUE "FileDescription", "mpv-sofa"
+      VALUE "FileVersion",     MPV_SOFA_VER_STR
+      VALUE "InternalName",    "mpv-sofa"
+      VALUE "OriginalFilename","mpv-sofa.exe"
+      VALUE "ProductName",     "mpv-sofa"
+      VALUE "ProductVersion",  MPV_SOFA_VER_STR
+      VALUE "Comments",        "Spatial audio cinema for headphones"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x809, 1200
+  END
+END

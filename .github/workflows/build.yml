@@ -3,7 +3,18 @@ name: Build mpv-sofa
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+# Creating the rolling development release needs write access to the repo.
+permissions:
+  contents: write
+
+# A run for an older commit on the same branch is worthless the moment a
+# newer one starts, and these runs are long.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -16,9 +27,10 @@ jobs:
     steps:
       # ── Checkout ──────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
+          fetch-depth: 0        # release notes need the history
 
       # ── MSYS2 ────────────────────────────────────────────────
       - name: Setup MSYS2
@@ -52,10 +64,22 @@ jobs:
       # ── Cache FFmpeg ─────────────────────────────────────────
       - name: Cache FFmpeg build
         id: cache-ffmpeg
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ffmpeg-build
           key: ffmpeg-n8.0-${{ hashFiles('ffmpeg-patches/**') }}
+
+      # ── Cache mpv ────────────────────────────────────────────
+      # Cloning, patching and compiling mpv is the longest part of the run
+      # and only changes when our filter sources or the pinned mpv commit
+      # do.  The FFmpeg hash is in the key because mpv links against that
+      # build — a new FFmpeg has to rebuild mpv too.
+      - name: Cache mpv build
+        id: cache-mpv
+        uses: actions/cache@v6
+        with:
+          path: mpv-src
+          key: mpv-9ccd8899-${{ hashFiles('mpv-patches/**', 'external/pffft/**') }}-ff-${{ hashFiles('ffmpeg-patches/**') }}
 
       # ── Build FFmpeg ─────────────────────────────────────────
       - name: Clone and build FFmpeg
@@ -136,6 +160,7 @@ jobs:
 
       # ── Clone & patch mpv ────────────────────────────────────
       - name: Clone and patch mpv
+        if: steps.cache-mpv.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
 
@@ -204,6 +229,7 @@ jobs:
 
       # ── Build mpv ───────────────────────────────────────────
       - name: Build mpv
+        if: steps.cache-mpv.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
 
@@ -284,8 +310,60 @@ jobs:
 
       # ── Upload artifact ──────────────────────────────────────
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mpv-sofa-windows-x64
           path: package/
           retention-days: 30
+
+      # ── Release ──────────────────────────────────────────────
+      # These run under pwsh rather than the job's msys2 shell: setup-msys2
+      # defaults to path-type "minimal", so the runner's gh.exe isn't on the
+      # PATH in there, and Compress-Archive saves installing zip.
+      - name: Zip package
+        id: zip
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path CMakeLists.txt `
+                        -Pattern 'project\(mpv-sofa VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            "mpv-sofa-$env:GITHUB_REF_NAME-windows-x64"
+          } else {
+            "mpv-sofa-$version-$($env:GITHUB_SHA.Substring(0,7))-windows-x64"
+          }
+          Compress-Archive -Path package\* -DestinationPath "$name.zip"
+          "path=$name.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Get-Item "$name.zip" | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}
+
+      # Rolling pre-release: every push to main replaces it, so the "latest
+      # build" link never goes stale and we don't accumulate one release per
+      # commit.  Tagged pushes (v*) get a real release instead.
+      - name: Publish development release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $subject = git log -1 --pretty=format:%s
+          $notes = "Automatic build of ``main`` at ``$($env:GITHUB_SHA.Substring(0,7))``.`n`n$subject"
+
+          # Delete first: `gh release create` refuses an existing tag, and
+          # --cleanup-tag keeps the tag from drifting onto an old commit.
+          gh release delete development --yes --cleanup-tag 2>&1 | Out-Null
+          gh release create development `
+            --title "Development build" `
+            --notes "$notes" `
+            --prerelease `
+            --target $env:GITHUB_SHA `
+            "${{ steps.zip.outputs.path }}"
+
+      - name: Publish tagged release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            --title $env:GITHUB_REF_NAME `
+            --generate-notes `
+            "${{ steps.zip.outputs.path }}"

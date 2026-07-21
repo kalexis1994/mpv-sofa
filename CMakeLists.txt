@@ -207,6 +207,22 @@ set(APP_SOURCES
 # parent console so logs flow back to the user's terminal.
 add_executable(mpv-sofa WIN32 ${APP_SOURCES})
 
+# Windows resources: application icon + version block.  The .rc pulls the
+# icon in by name, so windres needs assets/icons on its include path; the
+# version numbers come from project(VERSION) so there's one source of truth.
+if(WIN32)
+    enable_language(RC)
+    # The version goes through a generated header rather than -D flags:
+    # quoting a string macro survives neither CMake's nor windres's escaping.
+    string(REPLACE "." "," MPV_SOFA_VER_COMMA "${PROJECT_VERSION}")
+    configure_file(${CMAKE_SOURCE_DIR}/src/app/version.h.in
+                   ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
+    target_sources(mpv-sofa PRIVATE ${CMAKE_SOURCE_DIR}/src/app/mpv-sofa.rc)
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/app/mpv-sofa.rc PROPERTIES
+        COMPILE_FLAGS
+            "-I \"${CMAKE_SOURCE_DIR}/assets/icons\" -I \"${CMAKE_BINARY_DIR}/generated\"")
+endif()
+
 target_include_directories(mpv-sofa PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/external/IconFontCppHeaders

@@ -1,0 +1,6 @@
+// Generated from project(VERSION) — one source of truth for the version
+// that ends up in the executable's Windows version block.
+#pragma once
+
+#define MPV_SOFA_VER_COMMA @MPV_SOFA_VER_COMMA@
+#define MPV_SOFA_VER_STR   "@PROJECT_VERSION@"
