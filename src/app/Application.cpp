@@ -1465,14 +1465,19 @@ void Application::renderHomeScreen() {
     const float blockH    = titleH + 12.0f + subH + 36.0f + btnSize;
     const float yStart    = (size.y - blockH) * 0.5f;
 
-    // Title
+    // Wordmark — "mpv" in the accent, "-sofa" in plain ink, centred as one
+    // unit.  Same split the style lab uses for the brand.
     {
-        const char* title = "mpv-sofa";
+        const char* head = "mpv";
+        const char* tail = "-sofa";
         ImGui::PushFont(ImGuiLayer::fonts().display,
                         ImGui::GetFontSize() * titleScale);
-        ImVec2 ts = ImGui::CalcTextSize(title);
-        ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
-        ImGui::TextUnformatted(title);
+        const ImVec2 hs = ImGui::CalcTextSize(head);
+        const ImVec2 ts = ImGui::CalcTextSize(tail);
+        ImGui::SetCursorPos(ImVec2((size.x - (hs.x + ts.x)) * 0.5f, yStart));
+        ImGui::TextColored(ImGuiLayer::accentColor(), "%s", head);
+        ImGui::SameLine(0.0f, 0.0f);
+        ImGui::TextUnformatted(tail);
         ImGui::PopFont();
     }
 

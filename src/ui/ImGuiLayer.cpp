@@ -280,8 +280,11 @@ static void setupFonts() {
 
     g_fonts.text    = loadUiFont("assets/fonts/Dosis-Medium.ttf",   sz,          true);
     g_fonts.strong  = loadUiFont("assets/fonts/Dosis-SemiBold.ttf", sz,          false);
-    g_fonts.title   = loadUiFont("assets/fonts/Dosis-Bold.ttf",     sz * 1.5f,   false);
-    g_fonts.display = loadUiFont("assets/fonts/Dosis-Bold.ttf",     sz * 2.2f,   false);
+    g_fonts.title   = loadUiFont("assets/fonts/Dosis-Bold.ttf",      sz * 1.5f,  false);
+    // ExtraBold for the wordmark: Dosis is a light-boned face, and at Bold
+    // the logo still reads as regular weight next to the UI text.
+    g_fonts.display = loadUiFont("assets/fonts/Dosis-ExtraBold.ttf", sz * 2.2f,  false);
+    if (!g_fonts.display) g_fonts.display = g_fonts.title;
 
     if (g_fonts.text) return;
 

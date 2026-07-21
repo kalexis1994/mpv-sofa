@@ -35,7 +35,7 @@ public:
         ImFont* text    = nullptr;   // Medium, UI size
         ImFont* strong  = nullptr;   // SemiBold, UI size
         ImFont* title   = nullptr;   // Bold, ~1.5x
-        ImFont* display = nullptr;   // Bold, ~2.2x (home screen)
+        ImFont* display = nullptr;   // ExtraBold, ~2.2x (wordmark)
     };
     static const Fonts& fonts();
 
