@@ -98,14 +98,38 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     mpv_set_option_string(m_mpv, "hwdec", "auto-copy");
     mpv_set_option_string(m_mpv, "keep-open", "yes");
 
-    // Enable lossless HD spatial object extraction so the decoder outputs
-    // separate height/object channels (up to 16ch) instead of mixing
-    // everything into the 7.1 bed.
-    mpv_set_option_string(m_mpv, "ad-lavc-o", "extract_objects=1");
+    // Lossless HD spatial object extraction (separate height/object
+    // channels, up to 16ch) is a TrueHD-decoder option — but decoder
+    // options apply to EVERY audio decoder, and feeding it to the DTS
+    // decoder stalls DTS:X XLL streams for ~10s on open (measured on a
+    // DTS-X 7.1 remux: 11s -> 0.9s without it). So it's applied per-file
+    // from the on_preloaded hook below, only when a TrueHD track exists.
+    mpv_hook_add(m_mpv, 0, "on_preloaded", 0);
 
     if (m_verboseMpvLogs) {
         // Log mpv messages to file for decoder debug analysis
         mpv_set_option_string(m_mpv, "log-file", "mpv_debug.log");
+    }
+
+    // Experiment hook: HRTF_MPV_OPTS="key=value;key2=value2" applies raw
+    // mpv options at init — for diagnosing decoder/demuxer interactions
+    // without a rebuild.
+    if (const char* extra = std::getenv("HRTF_MPV_OPTS")) {
+        std::string s(extra);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t end = s.find(';', pos);
+            if (end == std::string::npos) end = s.size();
+            std::string kv = s.substr(pos, end - pos);
+            size_t eq = kv.find('=');
+            if (eq != std::string::npos) {
+                std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+                int r = mpv_set_option_string(m_mpv, k.c_str(), v.c_str());
+                fprintf(stderr, "[MpvPlayer] HRTF_MPV_OPTS %s=%s -> %d\n",
+                        k.c_str(), v.c_str(), r);
+            }
+            pos = end + 1;
+        }
     }
 
     // Enable our HRTF audio filter
@@ -660,6 +684,20 @@ void MpvPlayer::update() {
             else if (strcmp(prop->name, "chapter-list/count") == 0) {
                 refreshChapterList();
             }
+        }
+        else if (event->event_id == MPV_EVENT_HOOK) {
+            // on_preloaded: demuxer is open (tracks known) but decoders
+            // haven't started — the only safe moment to flip decoder
+            // options per file. extract_objects only for TrueHD tracks.
+            mpv_event_hook* hook = (mpv_event_hook*)event->data;
+            char* tracks = mpv_get_property_string(m_mpv, "track-list");
+            bool hasTrueHd = tracks && strstr(tracks, "\"truehd\"");
+            if (tracks) mpv_free(tracks);
+            mpv_set_option_string(m_mpv, "ad-lavc-o",
+                                  hasTrueHd ? "extract_objects=1" : "");
+            fprintf(stderr, "[MpvPlayer] on_preloaded: extract_objects=%d\n",
+                    hasTrueHd ? 1 : 0);
+            mpv_hook_continue(m_mpv, hook->id);
         }
         else if (event->event_id == MPV_EVENT_FILE_LOADED) {
             fprintf(stderr, "[MpvPlayer] FILE_LOADED event received\n");
