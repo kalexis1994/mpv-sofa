@@ -23,6 +23,7 @@ struct AudioTrack {
     bool isDefault;
     bool isForced;
     bool selected;
+    bool isExternal = false;   // audio-add'ed file (e.g. binaural sidecar)
 };
 
 struct SubtitleTrack {
@@ -57,7 +58,11 @@ public:
     void setAudioTrack(int id);
     // Play a pre-rendered binaural sidecar (external audio track, HRTF
     // filter bypassed) / return to internal track + HRTF.
-    void useExternalBinaural(const std::string& wavPath);
+    // Switch playback to the binaural sidecar (raw f32le stereo 48k, may
+    // still be growing) / back to the embedded track + HRTF filter. The
+    // revert really re-selects the internal track, so it also serves as the
+    // live fallback when a seek outruns a still-rendering sidecar.
+    void useExternalBinaural(const std::string& pcmPath);
     void revertInternalAudio();
     bool usingExternalBinaural() const { return m_externalBinaural; }
     void setSubtitleTrack(int id);
@@ -136,6 +141,7 @@ private:
     std::string m_filename;
     std::string m_afChain;               // saved HRTF filter option
     bool        m_externalBinaural = false;
+    int         m_internalAid = -1;      // track to return to on revert
     std::vector<AudioTrack> m_audioTracks;
     int m_currentAudioTrack = 0;
     std::vector<SubtitleTrack> m_subtitleTracks;

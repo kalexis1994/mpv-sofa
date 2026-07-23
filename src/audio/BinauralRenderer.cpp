@@ -20,6 +20,12 @@ bool exists(const std::string& p) {
     return a != INVALID_FILE_ATTRIBUTES;
 }
 
+uint64_t fileSize(const std::string& p) {
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, &fad)) return 0;
+    return ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+}
+
 std::string cacheDir() {
     char tmp[MAX_PATH] = {0};
     GetTempPathA(MAX_PATH, tmp);
@@ -51,9 +57,9 @@ uint64_t fileMtime(const std::string& p) {
             fad.ftLastWriteTime.dwLowDateTime;
 }
 
-// Run a command line (through cmd.exe so pipes work), hidden, blocking.
-// Returns the process exit code, or -1 on spawn failure.
-int runHidden(const std::string& cmdline) {
+// Spawn a command line (through cmd.exe so pipes/redirects work), hidden,
+// without waiting. Returns the process HANDLE or nullptr.
+HANDLE spawnHidden(const std::string& cmdline) {
     std::string full = "cmd.exe /c " + cmdline;
     std::vector<char> buf(full.begin(), full.end());
     buf.push_back('\0');
@@ -65,16 +71,34 @@ int runHidden(const std::string& cmdline) {
     PROCESS_INFORMATION pi{};
     if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-        return -1;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
+        return nullptr;
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    return pi.hProcess;
+}
+
+int waitExitCode(HANDLE h) {
+    WaitForSingleObject(h, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(h, &code);
     return (int)code;
 }
 
+// Blocking run, for the short extraction step.
+int runHidden(const std::string& cmdline) {
+    HANDLE h = spawnHidden(cmdline);
+    if (!h) return -1;
+    int rc = waitExitCode(h);
+    CloseHandle(h);
+    return rc;
+}
+
 std::string q(const std::string& s) { return "\"" + s + "\""; }
+
+void touch(const std::string& p) {
+    HANDLE f = CreateFileA(p.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+}
 
 }  // namespace
 
@@ -102,18 +126,25 @@ std::string BinauralRenderer::error() {
     return m_error;
 }
 
+void BinauralRenderer::killChildren() {
+    std::lock_guard<std::mutex> lk(m_procMutex);
+    for (void*& h : m_children) {
+        if (h) TerminateProcess((HANDLE)h, 1);
+        // Handle close happens in the worker that owns them.
+    }
+}
+
 void BinauralRenderer::cancel() {
     m_cancel.store(true);
     m_generation.fetch_add(1);
+    killChildren();
     m_state.store(State::Idle);
+    m_renderedSec.store(0.0);
 }
 
 bool BinauralRenderer::request(const std::string& moviePath, int audioStreamIndex,
-                               const std::string& sofaPath, int roomPreset) {
-    const std::string ffmpeg  = toolPath("ffmpeg.exe");
-    const std::string truehdd = toolPath("truehdd.exe");
-    const std::string render  = toolPath("halosound-render.exe");
-
+                               const std::string& sofaPath, int roomPreset,
+                               double durationSec) {
     const std::string key = hashKey(moviePath, audioStreamIndex, sofaPath,
                                     roomPreset, fileMtime(moviePath));
     {
@@ -124,22 +155,23 @@ bool BinauralRenderer::request(const std::string& moviePath, int audioStreamInde
             return true;
     }
 
-    const std::string outWav = cacheDir() + key + ".wav";
+    const std::string outPcm = cacheDir() + key + ".pcm";
 
-    // Cache hit: done instantly.
-    if (exists(outWav)) {
+    // Cache hit needs the completion marker: a bare .pcm is a render that
+    // was interrupted (crash, exit mid-movie) and must be redone.
+    if (exists(outPcm) && exists(outPcm + ".ok")) {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_currentKey = key;
-        m_resultPath = outWav;
+        m_resultPath = outPcm;
+        m_renderedSec.store(fileSize(outPcm) / kBytesPerSecond);
         m_state.store(State::Ready);
         m_progress.store(1.0f);
         return true;
     }
 
     // Fresh render on a background thread.
-    if (m_thread.joinable()) { m_cancel.store(true); m_thread.join(); }
+    if (m_thread.joinable()) { m_cancel.store(true); killChildren(); m_thread.join(); }
     m_cancel.store(false);
-    const uint64_t gen = m_generation.load();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_currentKey = key;
@@ -147,72 +179,144 @@ bool BinauralRenderer::request(const std::string& moviePath, int audioStreamInde
         m_error.clear();
     }
     m_progress.store(0.0f);
+    m_renderedSec.store(0.0);
     m_state.store(State::Rendering);
 
     const std::string workPrefix = cacheDir() + key + "_work";
     std::string movie = moviePath, sofa = sofaPath;
     int aidx = audioStreamIndex, room = roomPreset;
-    (void)gen;
-    m_thread = std::thread([this, movie, aidx, sofa, room, outWav, workPrefix]() {
-        runChain(movie, aidx, sofa, room, outWav, workPrefix, 0.0);
+    double dur = durationSec;
+    m_thread = std::thread([this, movie, aidx, sofa, room, outPcm, workPrefix, dur]() {
+        runChain(movie, aidx, sofa, room, outPcm, workPrefix, dur);
     });
     return true;
 }
 
 void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
-                                int room, std::string outWav,
-                                std::string workPrefix, double) {
+                                int room, std::string outPcm,
+                                std::string workPrefix, double durationSec) {
     const std::string ffmpeg  = toolPath("ffmpeg.exe");
     const std::string truehdd = toolPath("truehdd.exe");
     const std::string render  = toolPath("halosound-render.exe");
 
-    const std::string thd  = workPrefix + ".thd";
-    const std::string tmpWav = outWav + ".part";
+    const std::string thd       = workPrefix + ".thd";
+    const std::string damfAudio = workPrefix + ".atmos.audio";
+    const std::string damfDone  = workPrefix + ".done";
 
-    auto fail = [&](const std::string& msg) {
+    auto cleanupWork = [&]() {
         DeleteFileA(thd.c_str());
-        DeleteFileA(tmpWav.c_str());
+        DeleteFileA((workPrefix + ".atmos").c_str());
+        DeleteFileA(damfAudio.c_str());
+        DeleteFileA((workPrefix + ".atmos.metadata").c_str());
+        DeleteFileA(damfDone.c_str());
+    };
+    auto fail = [&](const std::string& msg) {
+        cleanupWork();
+        DeleteFileA(outPcm.c_str());
         std::lock_guard<std::mutex> lk(m_mutex);
         m_error = msg;
+        m_renderedSec.store(0.0);
         m_state.store(State::Failed);
     };
 
-    // 1) Extract the raw TrueHD elementary stream.
-    m_progress.store(0.05f);
+    // Stale leftovers from an interrupted run would trip the follow reader.
+    DeleteFileA(damfDone.c_str());
+    DeleteFileA(outPcm.c_str());
+    DeleteFileA((outPcm + ".ok").c_str());
+
+    // 1) Extract the raw TrueHD elementary stream. Quick (a remux), so a
+    //    blocking run keeps the error handling simple.
+    m_progress.store(0.02f);
     int rc = runHidden(q(ffmpeg) + " -v error -y -i " + q(movie) +
                        " -map 0:" + std::to_string(aidx) +
                        " -c:a copy -f truehd " + q(thd));
     if (m_cancel.load()) { fail("cancelled"); return; }
     if (rc != 0 || !exists(thd)) { fail("truehd extraction failed"); return; }
 
-    // 2) truehdd → DAMF (objects + positions).
-    m_progress.store(0.20f);
-    rc = runHidden(q(truehdd) + " decode " + q(thd) +
-                   " --output-path " + q(workPrefix) + " --loglevel error");
-    if (m_cancel.load()) { fail("cancelled"); return; }
-    const std::string damfAudio = workPrefix + ".atmos.audio";
-    if (rc != 0 || !exists(damfAudio)) { fail("truehdd decode failed"); return; }
+    // 2+3) truehdd and the render run TOGETHER, the render tailing the DAMF
+    //      via --follow exactly like the TV server does, its f32 stdout
+    //      redirected straight into the sidecar. The sidecar becomes
+    //      playable while both are still running — that's the whole point.
+    HANDLE hDecode = spawnHidden(q(truehdd) + " decode " + q(thd) +
+                                 " --output-path " + q(workPrefix) +
+                                 " --loglevel error");
+    if (!hDecode) { fail("could not start truehdd"); return; }
 
-    // 3) halosound-render --damf → binaural f32 → WAV.
-    m_progress.store(0.45f);
-    rc = runHidden(q(render) + " --sofa " + q(sofa) + " --room " +
-                   std::to_string(room) + " --damf " + q(workPrefix) +
-                   " | " + q(ffmpeg) + " -v error -f f32le -ar 48000 -ac 2 -i - " +
-                   " -c:a pcm_s16le -y " + q(tmpWav));
-    if (m_cancel.load()) { fail("cancelled"); return; }
-    if (rc != 0 || !exists(tmpWav)) { fail("binaural render failed"); return; }
+    HANDLE hRender = spawnHidden(q(render) + " --sofa " + q(sofa) + " --room " +
+                                 std::to_string(room) + " --damf " + q(workPrefix) +
+                                 " --follow > " + q(outPcm));
+    if (!hRender) {
+        TerminateProcess(hDecode, 1); CloseHandle(hDecode);
+        fail("could not start render");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(m_procMutex);
+        m_children[0] = hDecode;
+        m_children[1] = hRender;
+    }
+    {
+        // The file exists from here on; expose it so the player can hot-swap
+        // once enough of it is rendered.
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_resultPath = outPcm;
+    }
 
-    // Clean up the big DAMF intermediates; keep only the WAV.
-    DeleteFileA(thd.c_str());
-    DeleteFileA((workPrefix + ".atmos").c_str());
-    DeleteFileA(damfAudio.c_str());
-    DeleteFileA((workPrefix + ".atmos.metadata").c_str());
-    DeleteFileA((workPrefix + ".done").c_str());
+    // Progress loop: rendered seconds = sidecar size / byterate. truehdd's
+    // exit is what writes the .done marker the follow reader waits for —
+    // the same contract the server uses.
+    bool decodeDone = false, decodeFailed = false;
+    for (;;) {
+        if (m_cancel.load()) break;
 
-    MoveFileExA(tmpWav.c_str(), outWav.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!decodeDone &&
+            WaitForSingleObject(hDecode, 0) == WAIT_OBJECT_0) {
+            DWORD code = 1;
+            GetExitCodeProcess(hDecode, &code);
+            decodeDone = true;
+            if (code != 0) decodeFailed = true;
+            else touch(damfDone);
+        }
+
+        m_renderedSec.store(fileSize(outPcm) / kBytesPerSecond);
+        if (durationSec > 0.0) {
+            float p = (float)(m_renderedSec.load() / durationSec);
+            m_progress.store(p < 0.99f ? p : 0.99f);
+        }
+
+        if (WaitForSingleObject(hRender, 250) == WAIT_OBJECT_0) break;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_procMutex);
+        m_children[0] = m_children[1] = nullptr;
+    }
+
+    if (m_cancel.load()) {
+        TerminateProcess(hDecode, 1);
+        TerminateProcess(hRender, 1);
+        CloseHandle(hDecode); CloseHandle(hRender);
+        fail("cancelled");
+        return;
+    }
+
+    DWORD renderCode = 1;
+    GetExitCodeProcess(hRender, &renderCode);
+    if (!decodeDone) {
+        // Render exited first — with --follow that only happens on error.
+        TerminateProcess(hDecode, 1);
+        decodeFailed = true;
+    }
+    CloseHandle(hDecode); CloseHandle(hRender);
+
+    if (decodeFailed) { fail("truehdd decode failed"); return; }
+    if (renderCode != 0 || fileSize(outPcm) == 0) { fail("binaural render failed"); return; }
+
+    cleanupWork();
+    touch(outPcm + ".ok");
 
     std::lock_guard<std::mutex> lk(m_mutex);
-    m_resultPath = outWav;
+    m_renderedSec.store(fileSize(outPcm) / kBytesPerSecond);
     m_progress.store(1.0f);
     m_state.store(State::Ready);
 }

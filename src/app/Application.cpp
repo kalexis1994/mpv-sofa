@@ -481,10 +481,13 @@ void Application::requestBinaural() {
     int idx = atmosTrackIndex();
     if (idx < 0) return;
     m_binauralArmed = true;
+    m_extFromPartial = false;
+    m_binauralLastPos = -1.0;
     std::string sofa = m_sharedState && m_sharedState->sofa_path[0]
                          ? std::string(m_sharedState->sofa_path)
                          : std::string("assets/hrtf/default.sofa");
-    m_binaural.request(m_binauralMovie, idx, sofa, Settings::roomPreset());
+    m_binaural.request(m_binauralMovie, idx, sofa, Settings::roomPreset(),
+                       m_player ? m_player->getDuration() : 0.0);
 }
 
 // Spatial-tab control: only shown when the current file has a TrueHD
@@ -496,19 +499,31 @@ void Application::renderAtmosObjectsUi() {
 
     ImGui::SeparatorText("Atmos objects");
     auto st = m_binaural.state();
-    if (m_player && m_player->usingExternalBinaural() &&
-        st == BinauralRenderer::State::Ready) {
+    const bool external = m_player && m_player->usingExternalBinaural();
+    if (external &&
+        (st == BinauralRenderer::State::Ready ||
+         st == BinauralRenderer::State::Rendering)) {
         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
                            "Object-based binaural active");
-        ImGui::TextDisabled("Rendered through truehdd + the full DSP.");
+        if (st == BinauralRenderer::State::Rendering) {
+            ImGui::ProgressBar(m_binaural.progress(), ImVec2(-1, 0));
+            ImGui::TextDisabled(
+                "Still rendering ahead (%.0f min ready). Seeking past the "
+                "rendered part falls back to the 7.1 bed until it catches up.",
+                m_binaural.renderedSeconds() / 60.0);
+        } else {
+            ImGui::TextDisabled("Rendered through truehdd + the full DSP.");
+        }
         if (ImGui::Button("Back to 7.1 bed (real-time)")) {
             m_binauralArmed = false;
+            m_binaural.cancel();
             m_player->revertInternalAudio();
         }
     } else if (st == BinauralRenderer::State::Rendering) {
         ImGui::Text("Rendering Atmos objects...");
         ImGui::ProgressBar(m_binaural.progress(), ImVec2(-1, 0));
-        ImGui::TextDisabled("Decoding objects via truehdd, then binaural. "
+        ImGui::TextDisabled("Streaming render: playback switches to objects "
+                            "automatically once it's far enough ahead. "
                             "Cached for next time.");
         if (ImGui::Button("Cancel")) { m_binauralArmed = false; m_binaural.cancel(); }
     } else {
@@ -526,9 +541,60 @@ void Application::renderAtmosObjectsUi() {
 // Per-frame: when a render finishes, swap mpv's audio to the sidecar.
 void Application::updateBinaural() {
     if (!m_binauralArmed || !m_player) return;
-    if (m_binaural.state() == BinauralRenderer::State::Ready &&
-        !m_player->usingExternalBinaural()) {
-        m_player->useExternalBinaural(m_binaural.resultPath());
+
+    const auto st = m_binaural.state();
+    const double pos      = m_player->getPosition();
+    const double rendered = m_binaural.renderedSeconds();
+    const bool   external = m_player->usingExternalBinaural();
+
+    // How far ahead the render head must be before we trust it for live
+    // playback, and how close the playhead may get before we bail back to
+    // the bed-based filter. The gap between the two is the hysteresis that
+    // keeps a borderline render speed from flapping.
+    constexpr double kLeadIn      = 30.0;
+    constexpr double kFallBehind  = 5.0;
+    constexpr double kSeekJump    = 10.0;
+
+    const bool seeked = m_binauralLastPos >= 0.0 &&
+                        std::fabs(pos - m_binauralLastPos) > kSeekJump;
+    m_binauralLastPos = pos;
+
+    switch (st) {
+    case BinauralRenderer::State::Rendering:
+        if (!external) {
+            // Hot-swap mid-render as soon as the sidecar is safely ahead.
+            if (rendered > pos + kLeadIn && !m_binaural.resultPath().empty()) {
+                m_player->useExternalBinaural(m_binaural.resultPath());
+                m_extFromPartial = true;
+            }
+        } else {
+            // A seek re-opens the growing file (its remembered size is
+            // stale), and outrunning the render falls back to beds. Either
+            // way the !external branch re-attaches when it's safe again.
+            if (seeked || pos > rendered - kFallBehind)
+                m_player->revertInternalAudio();
+        }
+        break;
+
+    case BinauralRenderer::State::Ready:
+        if (!external) {
+            m_player->useExternalBinaural(m_binaural.resultPath());
+            m_extFromPartial = false;
+        } else if (m_extFromPartial) {
+            // Attached while the file was still growing: re-open it once so
+            // the demuxer learns the real duration and seeks work anywhere.
+            m_player->revertInternalAudio();
+            m_player->useExternalBinaural(m_binaural.resultPath());
+            m_extFromPartial = false;
+        }
+        break;
+
+    case BinauralRenderer::State::Failed:
+        if (external) m_player->revertInternalAudio();
+        break;
+
+    case BinauralRenderer::State::Idle:
+        break;
     }
 }
 
@@ -737,6 +803,12 @@ void Application::update(float dt) {
         m_trackPicker->open(wantSubs ? TrackPicker::Mode::Subtitle
                                      : TrackPicker::Mode::Audio,
                             /*isAutoLoad=*/true);
+
+        // HRTF_AUTO_OBJECTS=1 arms the object render on load, as if the
+        // user had pressed "Render Atmos objects" — automation hook.
+        if (const char* ao = std::getenv("HRTF_AUTO_OBJECTS");
+            ao && *ao == '1')
+            requestBinaural();
     }
 }
 

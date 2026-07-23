@@ -303,30 +303,55 @@ void MpvPlayer::setAudioTrack(int id) {
 #endif
 }
 
-void MpvPlayer::useExternalBinaural(const std::string& wavPath) {
+void MpvPlayer::useExternalBinaural(const std::string& pcmPath) {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
     // The sidecar is ALREADY binaural (rendered through the full DSP), so
-    // bypass the HRTF filter to avoid double-spatialization, mute the
-    // internal track, and add + select the sidecar. audio-add with
-    // "cached" keeps it if re-selected; select flag makes it active.
+    // bypass the HRTF filter to avoid double-spatialization, then add +
+    // select the sidecar.
+    //
+    // It's raw f32 PCM rather than WAV, because it may still be growing
+    // (streaming render) and a RIFF header can't describe an unfinished
+    // file. The rawaudio demuxer needs telling what's in it; the options
+    // are global but only affect files opened while the demuxer is forced,
+    // and revert clears it again.
+    m_internalAid = m_currentAudioTrack;
     mpv_set_property_string(m_mpv, "af", "");
-    const char* add[] = {"audio-add", wavPath.c_str(), "select", "Atmos objects (binaural)", nullptr};
+    mpv_set_property_string(m_mpv, "audio-demuxer", "rawaudio");
+    mpv_set_property_string(m_mpv, "demuxer-rawaudio-format",   "floatle");
+    mpv_set_property_string(m_mpv, "demuxer-rawaudio-channels", "stereo");
+    mpv_set_property_string(m_mpv, "demuxer-rawaudio-rate",     "48000");
+    const char* add[] = {"audio-add", pcmPath.c_str(), "select", "Atmos objects (binaural)", nullptr};
     mpv_command_async(m_mpv, 0, add);
     m_externalBinaural = true;
-    fprintf(stderr, "[MpvPlayer] external binaural sidecar: %s\n", wavPath.c_str());
+    fprintf(stderr, "[MpvPlayer] external binaural sidecar: %s\n", pcmPath.c_str());
 #else
-    (void)wavPath;
+    (void)pcmPath;
 #endif
 }
 
 void MpvPlayer::revertInternalAudio() {
 #ifdef HAVE_MPV
     if (!m_mpv || !m_externalBinaural) return;
-    // Restore the HRTF filter chain and hand playback back to an internal
-    // audio track (mpv auto-selects the next best when the external one is
-    // dropped by the next loadfile; here we just re-arm the filter).
     m_externalBinaural = false;
+
+    // Give playback back to the embedded track FIRST, then drop the
+    // external ones — removing a still-selected track would leave mpv to
+    // pick a successor on its own.
+    if (m_internalAid > 0) {
+        std::string aid = std::to_string(m_internalAid);
+        const char* sel[] = {"set", "aid", aid.c_str(), nullptr};
+        mpv_command_async(m_mpv, 0, sel);
+    }
+    for (const AudioTrack& t : m_audioTracks) {
+        if (!t.isExternal) continue;
+        std::string id = std::to_string(t.id);
+        const char* rem[] = {"audio-remove", id.c_str(), nullptr};
+        mpv_command_async(m_mpv, 0, rem);
+    }
+    mpv_set_property_string(m_mpv, "audio-demuxer", "");
+
+    // Re-arm the HRTF filter chain for the embedded track.
     if (!m_afChain.empty())
         mpv_set_property_string(m_mpv, "af", m_afChain.c_str());
     fprintf(stderr, "[MpvPlayer] reverted to internal audio + HRTF\n");
@@ -447,6 +472,7 @@ void MpvPlayer::refreshTrackList() {
         bool isDefault = false;
         bool isForced = false;
         bool selected = false;
+        bool isExternal = false;
 
         mpv_node_list* map = entry.u.list;
         for (int j = 0; j < map->num; j++) {
@@ -479,6 +505,8 @@ void MpvPlayer::refreshTrackList() {
                 isDefault = val.u.flag;
             else if (strcmp(key, "forced") == 0 && val.format == MPV_FORMAT_FLAG)
                 isForced = val.u.flag;
+            else if (strcmp(key, "external") == 0 && val.format == MPV_FORMAT_FLAG)
+                isExternal = val.u.flag;
         }
 
         if (type && strcmp(type, "audio") == 0) {
@@ -495,6 +523,7 @@ void MpvPlayer::refreshTrackList() {
             track.isDefault = isDefault;
             track.isForced = isForced;
             track.selected = selected;
+            track.isExternal = isExternal;
             if (selected)
                 m_currentAudioTrack = id;
             m_audioTracks.push_back(track);

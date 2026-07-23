@@ -94,6 +94,12 @@ private:
     BinauralRenderer m_binaural;
     std::string m_binauralMovie;   // path the sidecar render belongs to
     bool m_binauralArmed = false;  // user asked for object rendering
+    // Streaming-swap state: whether the current external track was attached
+    // while the sidecar was still rendering (its apparent duration is then
+    // stale and gets refreshed once the render completes), and the last
+    // playback position, for detecting user seeks.
+    bool   m_extFromPartial = false;
+    double m_binauralLastPos = -1.0;
     // Detect the current file's TrueHD Atmos track (ff-index) or -1.
     int atmosTrackIndex() const;
     void updateBinaural();         // drive render + audio swap each frame

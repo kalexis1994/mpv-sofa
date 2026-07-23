@@ -61,10 +61,25 @@ int main(int argc, char* argv[]) {
     }
 
 #ifdef _WIN32
+    // HRTF_STDERR_FILE=path sends stderr to that file unconditionally.
+    // A launcher with a console (cmd, PowerShell, a script host) makes the
+    // attach below succeed, and the console swallows stderr where neither
+    // a `2>` redirect (freopen to CONOUT$ overrides it) nor hrtf_log.txt
+    // (only written when headless) can catch it. This is the reliable tap
+    // for automation and bug reports.
+    bool logForced = false;
+    if (const char* forced = std::getenv("HRTF_STDERR_FILE")) {
+        if (std::freopen(forced, "w", stderr)) {
+            std::setvbuf(stderr, nullptr, _IONBF, 0);
+            logForced = true;
+        }
+    }
     bool gotConsole = false;
-    if (wantConsole)        gotConsole = acquireConsole(true);
-    if (!gotConsole)        gotConsole = acquireConsole(false);
-    if (!gotConsole) {
+    if (!logForced) {
+        if (wantConsole)    gotConsole = acquireConsole(true);
+        if (!gotConsole)    gotConsole = acquireConsole(false);
+    }
+    if (!gotConsole && !logForced) {
         // Headless launch (double-click, shell shortcut, …) — nothing
         // to print to.  Redirect stderr to a log file so diagnostics
         // aren't silently lost.

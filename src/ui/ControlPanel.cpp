@@ -892,6 +892,15 @@ void ControlPanel::renderSpatialContent() {
         bool muteBed = atomic_load(&m_state->mute_bed) != 0;
         bool muteObj = atomic_load(&m_state->mute_objects) != 0;
 
+        // These solos act on the realtime filter's channels. Object
+        // channels (8+) only exist on the in-decoder extraction path,
+        // which stays disabled (it corrupts audio) — true objects go
+        // through the truehdd sidecar, which bypasses this filter
+        // entirely. With no object channels, "mute bed" would mute
+        // everything and "objects only" would be silence, so the solos
+        // are gated on the channels actually being there.
+        const bool hasObjectCh = numChNow > bedCountNow;
+
         char muteBedLabel[64];
         char muteObjLabel[64];
         snprintf(muteBedLabel, sizeof(muteBedLabel), "Mute Bed (ch 0-%d)",
@@ -899,19 +908,28 @@ void ControlPanel::renderSpatialContent() {
         snprintf(muteObjLabel, sizeof(muteObjLabel), "Mute Objects (ch %d+)",
                  bedCountNow);
 
+        ImGui::BeginDisabled(!hasObjectCh);
         if (ImGui::Checkbox(muteBedLabel, &muteBed))
             atomic_store(&m_state->mute_bed, muteBed ? 1 : 0);
 
         if (ImGui::Checkbox(muteObjLabel, &muteObj))
             atomic_store(&m_state->mute_objects, muteObj ? 1 : 0);
+        ImGui::EndDisabled();
 
-        if (numChNow > bedCountNow) {
+        if (hasObjectCh) {
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
                 "Spatial: %d bed + %d object channels",
                 bedCountNow, numChNow - bedCountNow);
         } else {
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                "Standard: %d channels (no objects)", numChNow);
+                "Standard: %d channels (no objects in this filter)", numChNow);
+            ImGui::TextDisabled(
+                "Objects play via the truehdd sidecar (Spatial > Atmos "
+                "objects), not through these channels.");
+            // A stale solo from an earlier session would silently mute
+            // playback — clear both when they can't mean anything.
+            if (muteBed) atomic_store(&m_state->mute_bed, 0);
+            if (muteObj) atomic_store(&m_state->mute_objects, 0);
         }
 
         // Per-channel levels for all channels including objects
