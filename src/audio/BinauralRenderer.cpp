@@ -144,9 +144,12 @@ void BinauralRenderer::cancel() {
 
 bool BinauralRenderer::request(const std::string& moviePath, int audioStreamIndex,
                                const std::string& sofaPath, int roomPreset,
-                               double durationSec) {
+                               double durationSec, Solo solo) {
+    // The solo mode folds into roomPreset's slot of the hash by offsetting
+    // it far outside the preset range, keeping each mix its own cache entry.
     const std::string key = hashKey(moviePath, audioStreamIndex, sofaPath,
-                                    roomPreset, fileMtime(moviePath));
+                                    roomPreset + 1000 * (int)solo,
+                                    fileMtime(moviePath));
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         // Already serving / building this exact request → no-op.
@@ -186,15 +189,16 @@ bool BinauralRenderer::request(const std::string& moviePath, int audioStreamInde
     std::string movie = moviePath, sofa = sofaPath;
     int aidx = audioStreamIndex, room = roomPreset;
     double dur = durationSec;
-    m_thread = std::thread([this, movie, aidx, sofa, room, outPcm, workPrefix, dur]() {
-        runChain(movie, aidx, sofa, room, outPcm, workPrefix, dur);
+    m_thread = std::thread([this, movie, aidx, sofa, room, outPcm, workPrefix, dur, solo]() {
+        runChain(movie, aidx, sofa, room, outPcm, workPrefix, dur, solo);
     });
     return true;
 }
 
 void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
                                 int room, std::string outPcm,
-                                std::string workPrefix, double durationSec) {
+                                std::string workPrefix, double durationSec,
+                                Solo solo) {
     const std::string ffmpeg  = toolPath("ffmpeg.exe");
     const std::string truehdd = toolPath("truehdd.exe");
     const std::string render  = toolPath("halosound-render.exe");
@@ -242,9 +246,12 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
                                  " --loglevel error");
     if (!hDecode) { fail("could not start truehdd"); return; }
 
+    std::string soloArg;
+    if (solo == Solo::Bed)     soloArg = " --solo bed";
+    if (solo == Solo::Objects) soloArg = " --solo objects";
     HANDLE hRender = spawnHidden(q(render) + " --sofa " + q(sofa) + " --room " +
                                  std::to_string(room) + " --damf " + q(workPrefix) +
-                                 " --follow > " + q(outPcm));
+                                 " --follow" + soloArg + " > " + q(outPcm));
     if (!hRender) {
         TerminateProcess(hDecode, 1); CloseHandle(hDecode);
         fail("could not start render");

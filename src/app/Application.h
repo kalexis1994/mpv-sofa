@@ -100,6 +100,10 @@ private:
     // playback position, for detecting user seeks.
     bool   m_extFromPartial = false;
     double m_binauralLastPos = -1.0;
+    // Audition layer for the sidecar (0=all, 1=bed only, 2=objects only).
+    // Changing it re-renders; the streaming swap makes that a ~1 min wait,
+    // and each layer caches separately.
+    int    m_binauralSolo = 0;
     // Detect the current file's TrueHD Atmos track (ff-index) or -1.
     int atmosTrackIndex() const;
     void updateBinaural();         // drive render + audio swap each frame

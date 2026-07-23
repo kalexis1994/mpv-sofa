@@ -100,10 +100,14 @@ typedef struct {
     int  nch;                    /* total channels in CAF */
     int  ids[DAMF_MAX_CH];       /* metadata ID per channel */
     int  is_lfe[DAMF_MAX_CH];    /* bypass HRTF, direct mix */
+    int  is_object[DAMF_MAX_CH]; /* 1 = dynamic object, 0 = bed channel */
     float gain[DAMF_MAX_CH];     /* linear, from metadata events */
     float az0[DAMF_MAX_CH];      /* initial position (bed: by name) */
     float el0[DAMF_MAX_CH];
 } DamfScene;
+
+/* --solo: audition one layer of the DAMF mix. */
+enum { SOLO_NONE = 0, SOLO_BED = 1, SOLO_OBJECTS = 2 };
 
 /* The engine hard-codes channel 3 as LFE (direct mix, no HRTF). In DAMF
  * mode channel 3 is an arbitrary object, so the engine runs with one extra
@@ -161,6 +165,7 @@ static int damf_read_manifest(const char* prefix, DamfScene* sc) {
             sc->ids[ch] = id;
             sc->gain[ch] = 1.0f;
             sc->is_lfe[ch] = 0;
+            sc->is_object[ch] = in_objects;
             sc->az0[ch] = 0; sc->el0[ch] = 0;
             if (!in_objects) {
                 float az = 0, el = 0;
@@ -285,7 +290,7 @@ static FILE* damf_open_caf(const char* prefix, int* nch, int follow, const char*
 
 static int run_damf(const char* prefix, const uint8_t* sofa_buf, int sofa_len,
                     int rate, int room, float volume,
-                    long long skip_samples, int follow) {
+                    long long skip_samples, int follow, int solo) {
     char done_path[1024];
     snprintf(done_path, sizeof(done_path), "%s.done", prefix);
 
@@ -323,7 +328,14 @@ static int run_damf(const char* prefix, const uint8_t* sofa_buf, int sofa_len,
     DamfMeta meta = {0};
     meta.f = fopen(mpath, "r");
 
-    fprintf(stderr, "[render] DAMF: %d ch (objects+bed), follow=%d\n", nch, follow);
+    {
+        int nobj = 0;
+        for (int c = 0; c < nch; c++) nobj += sc.is_object[c];
+        fprintf(stderr, "[render] DAMF: %d ch (%d bed + %d objects), follow=%d%s\n",
+                nch, nch - nobj, nobj, follow,
+                solo == SOLO_BED ? ", solo=bed" :
+                solo == SOLO_OBJECTS ? ", solo=objects" : "");
+    }
 
     size_t fbytes = (size_t)caf_ch * 3;
     uint8_t* raw = (uint8_t*)malloc(fbytes * BLOCK);
@@ -372,6 +384,9 @@ static int run_damf(const char* prefix, const uint8_t* sofa_buf, int sofa_len,
         memset(in, 0, (size_t)BLOCK * eng_nch * sizeof(float));
         for (size_t i = 0; i < frames; i++) {
             for (int c = 0; c < nch; c++) {
+                /* Solo audition: drop the other layer (LFE counts as bed). */
+                if (solo == SOLO_BED     &&  sc.is_object[c]) continue;
+                if (solo == SOLO_OBJECTS && !sc.is_object[c]) continue;
                 const uint8_t* p = raw + i * fbytes + (size_t)c * 3;
                 int32_t v = ((int32_t)(int8_t)p[0] << 16) | (p[1] << 8) | p[2];
                 float s = (float)v / 8388608.0f * sc.gain[c];
@@ -411,13 +426,15 @@ static void usage(void) {
     fprintf(stderr,
         "usage: halosound-render --sofa FILE [--channels N] [--rate HZ]\n"
         "                        [--layout N] [--room N] [--volume F]\n"
-        "                        [--damf PREFIX [--follow] [--skip N]]\n"
+        "                        [--damf PREFIX [--follow] [--skip N]\n"
+        "                                       [--solo bed|objects]]\n"
         "  stdin:  f32le interleaved, N channels\n"
         "  stdout: f32le interleaved, stereo binaural\n"
         "  --damf:   object-based Atmos input from truehdd DAMF files\n"
         "            (PREFIX.atmos/.atmos.audio/.atmos.metadata); --follow\n"
         "            tails growing files until PREFIX.done exists; --skip\n"
-        "            drops N output samples (seek alignment)\n"
+        "            drops N output samples (seek alignment); --solo\n"
+        "            auditions one layer of the mix (LFE counts as bed)\n"
         "  --layout: -1 auto from channels (default), 0 stereo, 1 5.1,\n"
         "            2 7.1, 3 7.1.4, 4 7.1.4+objects\n"
         "  --room:   0 Studio 1 HomeTheater 2 Cinema 3 ConcertHall\n"
@@ -440,7 +457,7 @@ int main(int argc, char** argv) {
 
     const char* sofa_path = NULL;
     const char* damf_prefix = NULL;
-    int channels = 8, rate = 48000, layout = -1, room = 1, follow = 0;
+    int channels = 8, rate = 48000, layout = -1, room = 1, follow = 0, solo = SOLO_NONE;
     long long skip = 0;
     float volume = 1.0f;
 
@@ -454,6 +471,12 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--damf") && i + 1 < argc)     damf_prefix = argv[++i];
         else if (!strcmp(argv[i], "--follow"))                   follow = 1;
         else if (!strcmp(argv[i], "--skip") && i + 1 < argc)     skip = atoll(argv[++i]);
+        else if (!strcmp(argv[i], "--solo") && i + 1 < argc) {
+            const char* s = argv[++i];
+            if      (!strcmp(s, "bed"))     solo = SOLO_BED;
+            else if (!strcmp(s, "objects")) solo = SOLO_OBJECTS;
+            else { usage(); return 1; }
+        }
         else { usage(); return 2; }
     }
     if (!sofa_path || (!damf_prefix && (channels < 1 || channels > 16))) { usage(); return 2; }
@@ -476,7 +499,7 @@ int main(int argc, char** argv) {
     fclose(sf);
 
     if (damf_prefix) {
-        int rc = run_damf(damf_prefix, sbuf, (int)ssz, rate, room, volume, skip, follow);
+        int rc = run_damf(damf_prefix, sbuf, (int)ssz, rate, room, volume, skip, follow, solo);
         free(sbuf);
         return rc;
     }

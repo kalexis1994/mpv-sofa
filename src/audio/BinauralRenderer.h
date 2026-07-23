@@ -43,14 +43,21 @@ public:
     BinauralRenderer();
     ~BinauralRenderer();
 
+    // Audition filter for the render: everything, or one layer soloed —
+    // the only way to hear the objects alone, since the sidecar mixes
+    // bed + objects inside halosound-render (the realtime filter's debug
+    // solos never see these channels).
+    enum class Solo { None = 0, Bed = 1, Objects = 2 };
+
     // Kick off (or resolve from cache) a render for one movie + settings.
     // Cheap and non-blocking; the work runs on a background thread.
     // audioStreamIndex is the absolute ffmpeg stream index of the TrueHD
     // track; durationSec drives the progress estimate (0 = unknown).
-    // Returns false if the tools aren't available.
+    // Each Solo mode caches separately. Returns false if the tools aren't
+    // available.
     bool request(const std::string& moviePath, int audioStreamIndex,
                  const std::string& sofaPath, int roomPreset,
-                 double durationSec);
+                 double durationSec, Solo solo = Solo::None);
 
     // Abandon any in-flight render (kills the tool processes) and reset.
     void cancel();
@@ -70,7 +77,8 @@ public:
 
 private:
     void runChain(std::string movie, int aidx, std::string sofa, int room,
-                  std::string outPcm, std::string workPrefix, double durationSec);
+                  std::string outPcm, std::string workPrefix, double durationSec,
+                  Solo solo);
     static std::string toolPath(const char* exe);
     void killChildren();
 

@@ -487,7 +487,8 @@ void Application::requestBinaural() {
                          ? std::string(m_sharedState->sofa_path)
                          : std::string("assets/hrtf/default.sofa");
     m_binaural.request(m_binauralMovie, idx, sofa, Settings::roomPreset(),
-                       m_player ? m_player->getDuration() : 0.0);
+                       m_player ? m_player->getDuration() : 0.0,
+                       (BinauralRenderer::Solo)m_binauralSolo);
 }
 
 // Spatial-tab control: only shown when the current file has a TrueHD
@@ -514,6 +515,21 @@ void Application::renderAtmosObjectsUi() {
         } else {
             ImGui::TextDisabled("Rendered through truehdd + the full DSP.");
         }
+        // Audition selector: the only way to hear the objects (or the bed)
+        // alone on this path — the mix happens inside the render, so the
+        // realtime filter's debug solos can't touch it. Switching re-renders
+        // that layer (streaming, so it's ~1 min) and caches it separately.
+        static const char* kMixNames[] = { "Full mix", "Bed only", "Objects only" };
+        int mix = (m_binauralSolo >= 0 && m_binauralSolo <= 2) ? m_binauralSolo : 0;
+        ImGui::SetNextItemWidth(180.0f);
+        if (ImGui::Combo("Audition", &mix, kMixNames, 3) && mix != m_binauralSolo) {
+            m_binauralSolo = mix;
+            requestBinaural();   // new cache key → streaming re-render + swap
+        }
+        if (m_binauralSolo != 0)
+            ImGui::TextColored(ImVec4(0.95f, 0.7f, 0.3f, 1.0f),
+                               "Auditioning one layer — not the full mix.");
+
         if (ImGui::Button("Back to 7.1 bed (real-time)")) {
             m_binauralArmed = false;
             m_binaural.cancel();
