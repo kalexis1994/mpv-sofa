@@ -57,21 +57,53 @@ uint64_t fileMtime(const std::string& p) {
             fad.ftLastWriteTime.dwLowDateTime;
 }
 
-// Spawn a command line (through cmd.exe so pipes/redirects work), hidden,
-// without waiting. Returns the process HANDLE or nullptr.
-HANDLE spawnHidden(const std::string& cmdline) {
-    std::string full = "cmd.exe /c " + cmdline;
-    std::vector<char> buf(full.begin(), full.end());
+// Spawn a tool DIRECTLY — no cmd.exe wrapper. That matters twice over:
+// the returned HANDLE is the tool itself, so terminating it on cancel
+// really stops the work (killing a cmd wrapper left the tool orphaned,
+// still holding its output files open, and the next render then failed
+// to overwrite them), and redirection is done with real file handles so
+// each tool's stderr lands in a log we can quote when something fails.
+// Empty path = no redirection for that stream.
+HANDLE spawnTool(const std::string& cmdline,
+                 const std::string& stdoutPath,
+                 const std::string& stderrPath) {
+    std::vector<char> buf(cmdline.begin(), cmdline.end());
     buf.push_back('\0');
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hOut = INVALID_HANDLE_VALUE, hErr = INVALID_HANDLE_VALUE;
+    if (!stdoutPath.empty()) {
+        hOut = CreateFileA(stdoutPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hOut == INVALID_HANDLE_VALUE) return nullptr;
+    }
+    if (!stderrPath.empty()) {
+        hErr = CreateFileA(stderrPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hErr == INVALID_HANDLE_VALUE) {
+            if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+            return nullptr;
+        }
+    }
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     si.wShowWindow = SW_HIDE;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = hOut != INVALID_HANDLE_VALUE ? hOut
+                                                 : GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = hErr != INVALID_HANDLE_VALUE ? hErr
+                                                 : GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-        return nullptr;
+    BOOL ok = CreateProcessA(nullptr, buf.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+    if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+    if (!ok) return nullptr;
     CloseHandle(pi.hThread);
     return pi.hProcess;
 }
@@ -84,12 +116,30 @@ int waitExitCode(HANDLE h) {
 }
 
 // Blocking run, for the short extraction step.
-int runHidden(const std::string& cmdline) {
-    HANDLE h = spawnHidden(cmdline);
+int runHidden(const std::string& cmdline, const std::string& stderrPath) {
+    HANDLE h = spawnTool(cmdline, std::string(), stderrPath);
     if (!h) return -1;
     int rc = waitExitCode(h);
     CloseHandle(h);
     return rc;
+}
+
+// Last chunk of a (small) log file, flattened to one line — appended to
+// the user-facing error so "failed" says why.
+std::string tailOf(const std::string& path, size_t maxBytes = 240) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return std::string();
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    long from = sz > (long)maxBytes ? sz - (long)maxBytes : 0;
+    fseek(f, from, SEEK_SET);
+    std::string s(sz - from, '\0');
+    size_t got = fread(&s[0], 1, s.size(), f);
+    fclose(f);
+    s.resize(got);
+    for (char& c : s) if (c == '\r' || c == '\n') c = ' ';
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    return s;
 }
 
 std::string q(const std::string& s) { return "\"" + s + "\""; }
@@ -206,6 +256,9 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
     const std::string thd       = workPrefix + ".thd";
     const std::string damfAudio = workPrefix + ".atmos.audio";
     const std::string damfDone  = workPrefix + ".done";
+    const std::string logX      = workPrefix + ".extract.log";
+    const std::string logD      = workPrefix + ".truehdd.log";
+    const std::string logR      = workPrefix + ".render.log";
 
     auto cleanupWork = [&]() {
         DeleteFileA(thd.c_str());
@@ -214,7 +267,14 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
         DeleteFileA((workPrefix + ".atmos.metadata").c_str());
         DeleteFileA(damfDone.c_str());
     };
-    auto fail = [&](const std::string& msg) {
+    // On failure the tool logs stay on disk next to the cache for a look;
+    // the message carries the tail so the UI already says why.
+    auto fail = [&](std::string msg, const std::string& logPath = std::string()) {
+        if (!logPath.empty()) {
+            std::string t = tailOf(logPath);
+            if (!t.empty()) msg += " — " + t;
+        }
+        fprintf(stderr, "[Binaural] FAILED: %s\n", msg.c_str());
         cleanupWork();
         DeleteFileA(outPcm.c_str());
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -233,25 +293,27 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
     m_progress.store(0.02f);
     int rc = runHidden(q(ffmpeg) + " -v error -y -i " + q(movie) +
                        " -map 0:" + std::to_string(aidx) +
-                       " -c:a copy -f truehd " + q(thd));
+                       " -c:a copy -f truehd " + q(thd), logX);
     if (m_cancel.load()) { fail("cancelled"); return; }
-    if (rc != 0 || !exists(thd)) { fail("truehd extraction failed"); return; }
+    if (rc != 0 || !exists(thd)) { fail("truehd extraction failed", logX); return; }
 
     // 2+3) truehdd and the render run TOGETHER, the render tailing the DAMF
     //      via --follow exactly like the TV server does, its f32 stdout
     //      redirected straight into the sidecar. The sidecar becomes
     //      playable while both are still running — that's the whole point.
-    HANDLE hDecode = spawnHidden(q(truehdd) + " decode " + q(thd) +
-                                 " --output-path " + q(workPrefix) +
-                                 " --loglevel error");
+    HANDLE hDecode = spawnTool(q(truehdd) + " decode " + q(thd) +
+                               " --output-path " + q(workPrefix) +
+                               " --loglevel error",
+                               std::string(), logD);
     if (!hDecode) { fail("could not start truehdd"); return; }
 
     std::string soloArg;
     if (solo == Solo::Bed)     soloArg = " --solo bed";
     if (solo == Solo::Objects) soloArg = " --solo objects";
-    HANDLE hRender = spawnHidden(q(render) + " --sofa " + q(sofa) + " --room " +
-                                 std::to_string(room) + " --damf " + q(workPrefix) +
-                                 " --follow" + soloArg + " > " + q(outPcm));
+    HANDLE hRender = spawnTool(q(render) + " --sofa " + q(sofa) + " --room " +
+                               std::to_string(room) + " --damf " + q(workPrefix) +
+                               " --follow" + soloArg,
+                               outPcm, logR);
     if (!hRender) {
         TerminateProcess(hDecode, 1); CloseHandle(hDecode);
         fail("could not start render");
@@ -271,7 +333,9 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
 
     // Progress loop: rendered seconds = sidecar size / byterate. truehdd's
     // exit is what writes the .done marker the follow reader waits for —
-    // the same contract the server uses.
+    // the same contract the server uses. A failed decode never writes it,
+    // which would leave the follow reader tailing forever, so that case
+    // kills the render instead of waiting.
     bool decodeDone = false, decodeFailed = false;
     for (;;) {
         if (m_cancel.load()) break;
@@ -281,7 +345,7 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
             DWORD code = 1;
             GetExitCodeProcess(hDecode, &code);
             decodeDone = true;
-            if (code != 0) decodeFailed = true;
+            if (code != 0) { decodeFailed = true; TerminateProcess(hRender, 1); }
             else touch(damfDone);
         }
 
@@ -316,10 +380,13 @@ void BinauralRenderer::runChain(std::string movie, int aidx, std::string sofa,
     }
     CloseHandle(hDecode); CloseHandle(hRender);
 
-    if (decodeFailed) { fail("truehdd decode failed"); return; }
-    if (renderCode != 0 || fileSize(outPcm) == 0) { fail("binaural render failed"); return; }
+    if (decodeFailed) { fail("truehdd decode failed", logD); return; }
+    if (renderCode != 0 || fileSize(outPcm) == 0) { fail("binaural render failed", logR); return; }
 
     cleanupWork();
+    DeleteFileA(logX.c_str());
+    DeleteFileA(logD.c_str());
+    DeleteFileA(logR.c_str());
     touch(outPcm + ".ok");
 
     std::lock_guard<std::mutex> lk(m_mutex);
