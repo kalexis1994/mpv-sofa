@@ -136,10 +136,13 @@ set(IFD_DIR ${CMAKE_SOURCE_DIR}/external/ImGuiFileDialog)
 add_library(imguifiledialog STATIC
     ${IFD_DIR}/ImGuiFileDialog.cpp
 )
-target_include_directories(imguifiledialog PUBLIC
-    ${IFD_DIR}
-    ${IFD_DIR}/dirent
-)
+target_include_directories(imguifiledialog PUBLIC ${IFD_DIR})
+# The bundled dirent/ is a Win32 shim for the POSIX API — its header includes
+# windows.h, so putting it on the include path anywhere else breaks the build
+# by shadowing the real <dirent.h>.
+if(WIN32)
+    target_include_directories(imguifiledialog PUBLIC ${IFD_DIR}/dirent)
+endif()
 target_link_libraries(imguifiledialog PUBLIC imgui)
 # Enable the Places sidebar (drives + bookmarks).  USE_PLACES_DEVICES makes
 # the dialog auto-populate "Devices" with every mounted volume on Windows
@@ -181,9 +184,8 @@ set(APP_SOURCES
     src/main.cpp
     src/app/Application.cpp
     src/app/Window.cpp
-    src/core/MediaServer.cpp
     src/renderer/Renderer.cpp
-    src/renderer/Direct3DHdrPresenter.cpp
+    src/renderer/HdrPresenterFactory.cpp
     src/renderer/Camera.cpp
     src/renderer/Shader.cpp
     src/renderer/Primitives.cpp
@@ -200,13 +202,33 @@ set(APP_SOURCES
     src/core/Settings.cpp
 )
 
+# Per-platform sources.  The HDR presenter and the media-server launcher are
+# the only two subsystems with genuinely native implementations; everything
+# else goes through src/platform/.
+if(WIN32)
+    list(APPEND APP_SOURCES
+        src/platform/Platform_win32.cpp
+        src/core/MediaServer_win32.cpp
+        src/renderer/Direct3DHdrPresenter.cpp
+    )
+else()
+    list(APPEND APP_SOURCES
+        src/platform/Platform_posix.cpp
+        src/core/MediaServer_posix.cpp
+    )
+endif()
+
 # WIN32: link against the GUI subsystem on Windows so a console window
 # isn't spawned alongside the app on every launch.  CMake's WIN32 flag
 # is silently ignored on other platforms.  An optional console can
 # still be opened on demand via the --console command-line flag (see
 # main.cpp), and launching from cmd / PowerShell auto-attaches to the
 # parent console so logs flow back to the user's terminal.
-add_executable(mpv-sofa WIN32 ${APP_SOURCES})
+if(WIN32)
+    add_executable(mpv-sofa WIN32 ${APP_SOURCES})
+else()
+    add_executable(mpv-sofa ${APP_SOURCES})
+endif()
 
 # Windows resources: application icon + version block.  The .rc pulls the
 # icon in by name, so windres needs assets/icons on its include path; the
@@ -235,9 +257,21 @@ target_link_libraries(mpv-sofa PRIVATE
     glm::glm
     imgui
     imguifiledialog
-    mysofa
-    z
 )
+
+# libmysofa and zlib were previously bare -lmysofa/-lz, which only resolved
+# because the MSYS2 toolchain had them on its default search path.  Ask
+# pkg-config so a Linux build finds them wherever the distro put them.
+if(TARGET PkgConfig::MYSOFA)
+    target_link_libraries(mpv-sofa PRIVATE PkgConfig::MYSOFA)
+else()
+    target_link_libraries(mpv-sofa PRIVATE mysofa)
+endif()
+if(ZLIB_FOUND)
+    target_link_libraries(mpv-sofa PRIVATE ZLIB::ZLIB)
+else()
+    target_link_libraries(mpv-sofa PRIVATE z)
+endif()
 
 if(MPV_FOUND)
     target_link_libraries(mpv-sofa PRIVATE PkgConfig::MPV)
@@ -249,6 +283,10 @@ if(WIN32)
     # iphlpapi + ws2_32: MediaServer::lanAddress (adapter enumeration)
     # d3d11 + dxgi: HDR presentation via GL->D3D11 interop swapchain.
     target_link_libraries(mpv-sofa PRIVATE opengl32 iphlpapi ws2_32 d3d11 dxgi)
+else()
+    # dl for the af_hrtf symbol lookup, pthread for the render worker.
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(mpv-sofa PRIVATE OpenGL::GL ${CMAKE_DL_LIBS} pthread)
 endif()
 
 # Copy assets to build directory

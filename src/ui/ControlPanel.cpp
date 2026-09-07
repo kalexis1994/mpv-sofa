@@ -1,4 +1,5 @@
 #include "ControlPanel.h"
+#include "platform/Platform.h"
 #include "core/SharedState.h"
 #include "core/Settings.h"
 #include "audio/MpvPlayer.h"
@@ -10,10 +11,6 @@
 #include <filesystem>
 #include <algorithm>
 #include <mysofa.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 namespace fs = std::filesystem;
 
@@ -361,17 +358,26 @@ static bool profileCard(HrtfProfile& prof, bool selected, float w, float h,
 
     ImGui::PushID(prof.path.c_str());
     ImVec2 origin = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton("##card", ImVec2(w, h));
+    // EnableNav: without it directional navigation skips InvisibleButton
+    // entirely, which left the whole HRTF profile grid unreachable from a
+    // gamepad — every other card grid in the app already passes this.
+    bool clicked = ImGui::InvisibleButton("##card", ImVec2(w, h),
+                                          ImGuiButtonFlags_EnableNav);
     bool hovered = ImGui::IsItemHovered();
+    bool focused = ImGui::IsItemFocused();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    ImU32 bg     = ImGui::GetColorU32(hovered ? ImGuiCol_FrameBgHovered
-                                              : ImGuiCol_FrameBg);
+    ImU32 bg     = ImGui::GetColorU32((hovered || focused) ? ImGuiCol_FrameBgHovered
+                                                          : ImGuiCol_FrameBg);
+    // Focus has to read differently from selection, or bumping the d-pad
+    // across the grid looks like it is changing the profile.
     ImU32 border = ImGui::GetColorU32(selected ? ImGuiCol_CheckMark
+                                    : focused  ? ImGuiCol_NavCursor
                                                : ImGuiCol_Border);
     ImVec2 pmax(origin.x + w, origin.y + h);
     dl->AddRectFilled(origin, pmax, bg, 8.0f);
-    dl->AddRect(origin, pmax, border, 8.0f, 0, selected ? 2.5f : 1.0f);
+    dl->AddRect(origin, pmax, border, 8.0f, 0,
+                selected ? 2.5f : focused ? 2.0f : 1.0f);
 
     dl->PushClipRect(origin, pmax, true);
     const char* title = !prof.subject.empty() ? prof.subject.c_str()
@@ -443,7 +449,8 @@ static std::string filenameToDisplayName(const std::string& filename) {
 ControlPanel::ControlPanel(HrtfSharedState* state, int* selectedSpeaker,
                            MpvPlayer* player)
     : m_state(state), m_selectedSpeaker(selectedSpeaker), m_player(player) {
-    strncpy(m_sofaPath, "assets/hrtf/default.sofa", sizeof(m_sofaPath) - 1);
+    strncpy(m_sofaPath, (plat::assetsDir() + "hrtf/default.sofa").c_str(),
+            sizeof(m_sofaPath) - 1);
 }
 
 ControlPanel::~ControlPanel() {
@@ -453,7 +460,7 @@ void ControlPanel::scanProfiles() {
     m_profiles.clear();
     m_selectedProfile = 0;
 
-    const char* searchDir = "assets/hrtf";
+    const std::string searchDir = plat::assetsDir() + "hrtf";
 
     try {
         if (!fs::exists(searchDir))
@@ -514,7 +521,7 @@ void ControlPanel::scanProfiles() {
 void ControlPanel::scanHpEqs() {
     m_hpEqFiles.clear();
     m_selectedHpEq = 0;  // 0 = "None"
-    const char* dir = "assets/headphone_eq";
+    const std::string dir = plat::assetsDir() + "headphone_eq";
     try {
         if (!fs::exists(dir)) { m_hpEqScanned = true; return; }
         for (const auto& entry : fs::directory_iterator(dir)) {
@@ -546,7 +553,7 @@ void ControlPanel::scanHpEqs() {
 void ControlPanel::scanIrs() {
     m_irFiles.clear();
     m_selectedIr = 0;  // 0 = "None"
-    const char* dir = "assets/ir";
+    const std::string dir = plat::assetsDir() + "ir";
     try {
         if (!fs::exists(dir)) { m_irScanned = true; return; }
         for (const auto& entry : fs::directory_iterator(dir)) {
@@ -625,6 +632,12 @@ void ControlPanel::renderSpatialContent() {
 
         ImGuiListClipper clipper;
         clipper.Begin(rows, rowH);
+        // A clipped row doesn't exist as far as navigation is concerned, so
+        // the focused card would vanish the moment the d-pad scrolled it off
+        // screen and focus would be lost.  Telling the clipper to always emit
+        // the selected row keeps that from happening.
+        if (m_selectedProfile >= 0 && cols > 0)
+            clipper.IncludeItemByIndex(m_selectedProfile / cols);
         while (clipper.Step()) {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
                 for (int c = 0; c < cols; c++) {

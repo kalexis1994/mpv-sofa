@@ -1,4 +1,5 @@
 #include "TrackPicker.h"
+#include "ImGuiFileDialog.h"
 #include "ImGuiLayer.h"
 #include "audio/MpvPlayer.h"
 #include "core/Settings.h"
@@ -14,11 +15,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <commdlg.h>
-#endif
 
 namespace {
 
@@ -738,18 +734,20 @@ void TrackPicker::render() {
         ImGui::SameLine(0, style.ItemSpacing.x * 2);
 
         if (ImGui::Button(ICON_LC_FILE_PLUS "  Load file...")) {
-#ifdef _WIN32
-            char filePath[MAX_PATH] = {0};
-            OPENFILENAMEA ofn = {0};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.lpstrFilter = "Subtitle Files\0*.srt;*.ass;*.ssa;*.sub;*.vtt\0All Files\0*.*\0";
-            ofn.lpstrFile = filePath;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            ofn.lpstrTitle = "Load Subtitle File";
-            if (GetOpenFileNameA(&ofn))
-                m_player->loadSubtitleFile(filePath);
-#endif
+            // Reuse the "open_subtitle" dialog the File menu already opens —
+            // ImGuiFileDialog is a singleton and Application::renderUI() owns
+            // the handler, so loading happens there for both entry points.
+            // The native Win32 picker this replaces was also unusable with a
+            // gamepad, which is the whole point of the sofa build.
+            IGFD::FileDialogConfig cfg;
+            cfg.path  = ".";
+            cfg.flags = ImGuiFileDialogFlags_Modal |
+                        ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
+            ImGuiFileDialog::Instance()->OpenDialog(
+                "open_subtitle",
+                "Load subtitle",
+                "Subtitles{.srt,.ass,.ssa,.sub,.vtt,.idx},All files{.*}",
+                cfg);
         }
 
         ImGui::Separator();

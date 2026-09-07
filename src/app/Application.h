@@ -2,7 +2,7 @@
 
 #include "Window.h"
 #include "renderer/Renderer.h"
-#include "renderer/Direct3DHdrPresenter.h"
+#include "renderer/IHdrPresenter.h"
 #include "renderer/Camera.h"
 #include "ui/ImGuiLayer.h"
 #include "ui/ControlPanel.h"
@@ -67,6 +67,8 @@ private:
     bool m_playbackMenuFreshlyShown  = true;
     void openPlaybackMenu();
     void closePlaybackMenu();
+    // Transport bindings; must be called after ImGui::NewFrame().
+    void handlePlaybackShortcuts(bool prefsOpen, bool anyPopup);
     void renderPlaybackMenu();
     // Modal layers shared by every UI mode (docked / home / fullscreen):
     // file dialogs, playback menu, track picker, preferences, recents.
@@ -85,7 +87,7 @@ private:
     std::unique_ptr<Camera> m_camera;
     std::unique_ptr<ImGuiLayer> m_imgui;
     std::unique_ptr<MpvPlayer> m_player;
-    Direct3DHdrPresenter m_hdrPresenter;
+    std::unique_ptr<IHdrPresenter> m_hdrPresenter;
     unsigned int m_finalFbo = 0;   // 0 = default framebuffer; else HDR interop FBO
     unsigned long m_hdrPollCounter = 0;
     bool m_hdrActive = false;       // this frame is being composed as linear scRGB
@@ -161,6 +163,7 @@ private:
     // arrow-key forwarder so the analog stick can drive ImGui nav the
     // same way the d-pad does.  Edge-detection avoids spamming events
     // every frame; ImGui's own repeat timing handles the held case.
+    int  m_activePad = -1;   // GLFW joystick slot in use, -1 = none
     bool m_lstickLeft  = false;
     bool m_lstickRight = false;
     bool m_lstickUp    = false;

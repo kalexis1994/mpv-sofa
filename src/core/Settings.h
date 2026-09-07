@@ -65,6 +65,11 @@ struct DisplayConfig {
 struct AppearanceConfig {
     int mode   = 0;   // 0 = dark ("darkroom"), 1 = light ("daylight")
     int accent = 0;   // 0=red 1=orange 2=yellow 3=green 4=blue 5=magenta
+    // Global UI scale.  Every size in the theme is a hand-picked pixel
+    // constant tuned for a desktop monitor at arm's length; on a TV across
+    // a room the same layout is unreadable.  1.0 keeps the desktop look,
+    // ~1.5 is the useful setting for a couch.
+    float uiScale = 1.0f;
 };
 
 // Playback / sync settings (audio offset for BT lip-sync etc.).

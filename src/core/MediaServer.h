@@ -5,6 +5,11 @@
 // to the HaloSound TV app; here we only own its lifecycle: spawn with
 // the right arguments/environment, report status, and guarantee the
 // child dies with us (Job object with KILL_ON_JOB_CLOSE).
+//
+// TV casting is a Windows-only feature for now: the Linux port targets the
+// local player, so its implementation reports the server as unavailable and
+// the Preferences page hides the Server tab accordingly.  supported() is what
+// the UI should branch on — never the platform.
 
 #include <string>
 
@@ -31,6 +36,9 @@ public:
     // Best-guess LAN IPv4 of this machine ("192.168.1.10"), for showing
     // the user what to type into the TV app.  Empty when unavailable.
     static std::string lanAddress();
+
+    // Whether this build can actually run the media server at all.
+    static bool supported();
 
 private:
     void* m_process = nullptr;   // HANDLE

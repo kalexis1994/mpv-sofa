@@ -1,3 +1,4 @@
+#include "platform/Platform.h"
 #include "ImGuiLayer.h"
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -212,6 +213,23 @@ void ImGuiLayer::applyTheme() {
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.55f);
 
     (void)ink2;   // reserved for secondary-text call sites
+
+    // Global UI scale, applied last.
+    //
+    // Safe to do here — and only here — because everything above re-derives
+    // the style from scratch every call (StyleColorsDark/Light resets the
+    // colours, and every geometry field is assigned explicitly).  ScaleAllSizes
+    // multiplies in place, so applying it to a style that had already been
+    // scaled would compound; this way the scale is always relative to the
+    // freshly-built base, and Preferences can call applyTheme() on every
+    // slider tick without drift.
+    const float scale = (a.uiScale > 0.5f && a.uiScale < 4.0f) ? a.uiScale : 1.0f;
+    if (scale != 1.0f)
+        s.ScaleAllSizes(scale);
+    // Fonts scale separately: ScaleAllSizes only touches geometry, and the
+    // app pushes explicit per-call sizes (title, display) that derive from
+    // FontSizeBase, so scaling the base carries them along too.
+    s.FontScaleMain = scale;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +261,36 @@ static const ImWchar kFallbackRanges[] = {
 };
 static const ImWchar kIconRanges[] = { ICON_MIN_LC, ICON_MAX_16_LC, 0 };
 
+// Path to a system font with broad Greek/Cyrillic coverage, used only as a
+// merge fallback behind Dosis.  Windows always has Segoe UI; on Linux there is
+// no single guaranteed face, so probe the usual suspects rather than pulling
+// in fontconfig for one lookup.  Returning nullptr just means those scripts
+// render as boxes, which is what the Linux build did before.
+static const char* systemFallbackFontPath() {
+#ifdef _WIN32
+    return "C:/Windows/Fonts/segoeui.ttf";
+#else
+    static const char* kCandidates[] = {
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+    };
+    for (const char* p : kCandidates) {
+        if (plat::exists(p)) return p;
+    }
+    return nullptr;
+#endif
+}
+
+// Assets live next to the binary in a build tree and under share/ in an
+// install, so never reach for them with a bare relative path.
+static std::string assetFont(const char* name) {
+    return plat::assetsDir() + "fonts/" + name;
+}
+
 // Load one Dosis weight at `size`, merging the non-Latin fallback and,
 // optionally, the icon set.  Returns nullptr when the file isn't there.
 static ImFont* loadUiFont(const char* path, float size, bool withIcons) {
@@ -250,12 +298,11 @@ static ImFont* loadUiFont(const char* path, float size, bool withIcons) {
     ImFont* f = io.Fonts->AddFontFromFileTTF(path, size, nullptr, kLatinRanges);
     if (!f) return nullptr;
 
-#ifdef _WIN32
-    ImFontConfig fb;
-    fb.MergeMode = true;
-    io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", size,
-                                 &fb, kFallbackRanges);
-#endif
+    if (const char* fallback = systemFallbackFontPath()) {
+        ImFontConfig fb;
+        fb.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF(fallback, size, &fb, kFallbackRanges);
+    }
 
     if (withIcons) {
         ImFontBaked* baked = f->GetFontBaked(f->LegacySize);
@@ -267,7 +314,7 @@ static ImFont* loadUiFont(const char* path, float size, bool withIcons) {
         cfg.PixelSnapH       = true;
         cfg.GlyphOffset.y    = iconSize * 0.5f - textMid;
         cfg.GlyphMinAdvanceX = iconSize;
-        io.Fonts->AddFontFromFileTTF("assets/fonts/lucide.ttf", iconSize,
+        io.Fonts->AddFontFromFileTTF(assetFont("lucide.ttf").c_str(), iconSize,
                                      &cfg, kIconRanges);
     }
     return f;
@@ -278,12 +325,12 @@ static void setupFonts() {
     // a couple of points above the usual 15.
     const float sz = 17.0f;
 
-    g_fonts.text    = loadUiFont("assets/fonts/Dosis-Medium.ttf",   sz,          true);
-    g_fonts.strong  = loadUiFont("assets/fonts/Dosis-SemiBold.ttf", sz,          false);
-    g_fonts.title   = loadUiFont("assets/fonts/Dosis-Bold.ttf",      sz * 1.5f,  false);
+    g_fonts.text    = loadUiFont(assetFont("Dosis-Medium.ttf").c_str(),   sz,          true);
+    g_fonts.strong  = loadUiFont(assetFont("Dosis-SemiBold.ttf").c_str(), sz,          false);
+    g_fonts.title   = loadUiFont(assetFont("Dosis-Bold.ttf").c_str(),      sz * 1.5f,  false);
     // ExtraBold for the wordmark: Dosis is a light-boned face, and at Bold
     // the logo still reads as regular weight next to the UI text.
-    g_fonts.display = loadUiFont("assets/fonts/Dosis-ExtraBold.ttf", sz * 2.2f,  false);
+    g_fonts.display = loadUiFont(assetFont("Dosis-ExtraBold.ttf").c_str(), sz * 2.2f,  false);
     if (!g_fonts.display) g_fonts.display = g_fonts.title;
 
     if (g_fonts.text) return;
@@ -293,10 +340,8 @@ static void setupFonts() {
     fprintf(stderr, "[UI] Dosis not found in assets/fonts — using Segoe UI\n");
     ImGuiIO& io = ImGui::GetIO();
     ImFont* base = nullptr;
-#ifdef _WIN32
-    base = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf",
-                                        15.0f, nullptr, kLatinRanges);
-#endif
+    if (const char* fallback = systemFallbackFontPath())
+        base = io.Fonts->AddFontFromFileTTF(fallback, 15.0f, nullptr, kLatinRanges);
     if (!base) base = io.Fonts->AddFontDefault();
 
     ImFontBaked* baked = base->GetFontBaked(base->LegacySize);
@@ -305,7 +350,7 @@ static void setupFonts() {
     cfg.PixelSnapH       = true;
     cfg.GlyphOffset.y    = 8.0f - (baked->Ascent + baked->Descent) * 0.5f;
     cfg.GlyphMinAdvanceX = 16.0f;
-    io.Fonts->AddFontFromFileTTF("assets/fonts/lucide.ttf", 16.0f,
+    io.Fonts->AddFontFromFileTTF(assetFont("lucide.ttf").c_str(), 16.0f,
                                  &cfg, kIconRanges);
     g_fonts.text = base;
     g_fonts.strong = g_fonts.title = g_fonts.display = base;
@@ -319,6 +364,13 @@ void ImGuiLayer::init(GLFWwindow* window) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+
+    // ImGui defaults to writing imgui.ini into the working directory, which
+    // for a packaged install is wherever the launcher happened to start us —
+    // read-only in the worst case, and litter in the best.  Static because
+    // ImGui keeps the pointer rather than copying the string.
+    static const std::string iniPath = plat::configDir() + "imgui.ini";
+    io.IniFilename = iniPath.c_str();
 
     // Init the backends BEFORE configuring fonts.  The OpenGL backend
     // sets ImGuiBackendFlags_RendererHasTextures during its Init(), and

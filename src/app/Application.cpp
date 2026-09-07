@@ -1,6 +1,7 @@
 #include "Application.h"
 #include "core/SharedState.h"
 #include "core/Settings.h"
+#include "platform/Platform.h"
 #include "renderer/Picking.h"
 #include "ui/ImageTexture.h"
 
@@ -12,6 +13,7 @@
 #include <ImGuiFileDialog.h>
 #include <IconsLucide.h>
 #include <cstdio>
+#include <cstring>
 #include <csignal>
 #include <cstdlib>
 #include <cmath>
@@ -71,6 +73,48 @@ static LONG WINAPI crashHandler(EXCEPTION_POINTERS* ep) {
     fflush(stderr);
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#else
+#include <dlfcn.h>
+
+// The point of this handler is the same as the Win32 one above: say *which*
+// library the fault address belongs to.  A raw address is useless once mpv,
+// FFmpeg and the driver stack are all loaded; the module plus offset is what
+// makes a stack address resolvable with addr2line afterwards.  dladdr() is
+// the direct analogue of GetModuleHandleEx-from-address.
+//
+// Nothing here is async-signal-safe, which is the same trade the Windows side
+// makes: the process is already dying, and a readable line on stderr is worth
+// more than a guaranteed-clean abort.
+static void crashHandler(int sig, siginfo_t* info, void* /*ctx*/) {
+    void* addr = info ? info->si_addr : nullptr;
+
+    const char* name = "unknown";
+    uintptr_t   off  = 0;
+    Dl_info     dli;
+    if (addr && dladdr(addr, &dli) && dli.dli_fname) {
+        name = dli.dli_fname;
+        off  = (uintptr_t)addr - (uintptr_t)dli.dli_fbase;
+    }
+
+    fprintf(stderr, "[CRASH] signal %d (%s) at %p (module: %s +0x%llx)\n",
+            sig, strsignal(sig), addr, name, (unsigned long long)off);
+    fflush(stderr);
+
+    // Restore the default disposition and re-raise so the shell still sees a
+    // signal death and any core dump is written as usual.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void installCrashHandler() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crashHandler;
+    sa.sa_flags     = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    for (int s : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT})
+        sigaction(s, &sa, nullptr);
+}
 #endif
 
 Application::Application() = default;
@@ -79,6 +123,8 @@ Application::~Application() = default;
 bool Application::init(int argc, char* argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(crashHandler);
+#else
+    installCrashHandler();
 #endif
     fprintf(stderr, "[App] init() starting\n");
 
@@ -149,12 +195,14 @@ bool Application::init(int argc, char* argv[]) {
     m_imgui = std::make_unique<ImGuiLayer>();
     m_imgui->init(m_window->getHandle());
 
-    // HDR presentation (D3D11 interop) — optional, fail-safe. Only takes
-    // effect when the user enables it and the display reports HDR.
+    // HDR presentation (D3D11 interop on Windows, Vulkan on Linux) — optional
+    // and fail-safe. Only takes effect when the user enables it and the
+    // display reports HDR; otherwise the plain SDR swap path is used.
     {
+        m_hdrPresenter = createHdrPresenter();
         int fbw = 0, fbh = 0;
         glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
-        if (!m_hdrPresenter.init(m_window->getHandle(), fbw, fbh))
+        if (!m_hdrPresenter->init(m_window->getHandle(), fbw, fbh))
             fprintf(stderr, "[HDR] presenter unavailable — SDR present path\n");
     }
 
@@ -178,6 +226,13 @@ bool Application::init(int argc, char* argv[]) {
         m_trackPicker->open(TrackPicker::Mode::Audio,    /*isAutoLoad=*/false);
     });
     m_transportBar->setMenuCallback([this]() { openPlaybackMenu(); });
+    // The sliders button had no callback registered at all, so it did nothing
+    // and its tooltip advertised an F3 shortcut that no longer exists.  The
+    // Controls drawer it used to open now lives as the Spatial tab, so point
+    // it there rather than dropping the button.
+    m_transportBar->setControlsCallback([this]() {
+        if (m_prefsDialog) m_prefsDialog->open();
+    });
     m_transportBar->setSubPickerCallback([this]() {
         m_trackPicker->open(TrackPicker::Mode::Subtitle, /*isAutoLoad=*/false);
     });
@@ -190,10 +245,10 @@ bool Application::init(int argc, char* argv[]) {
                                                           m_mediaServer.get());
     m_prefsDialog->setHdrStatusProvider([this]() {
         PreferencesDialog::HdrStatus s;
-        s.available  = m_hdrPresenter.available();
-        s.displayHdr = m_hdrPresenter.displayIsHdr();
-        s.maxNits    = m_hdrPresenter.displayMaxNits();
-        s.sdrWhiteNits = m_hdrPresenter.sdrWhiteNits();
+        s.available  = m_hdrPresenter->available();
+        s.displayHdr = m_hdrPresenter->displayIsHdr();
+        s.maxNits    = m_hdrPresenter->displayMaxNits();
+        s.sdrWhiteNits = m_hdrPresenter->sdrWhiteNits();
         return s;
     });
 
@@ -209,7 +264,7 @@ bool Application::init(int argc, char* argv[]) {
     // Create FBOs for video and 3D visualizer
     createFBOs();
 
-    m_logoTex = loadTextureFromFile("assets/icons/mpv-sofa-logo.png",
+    m_logoTex = loadTextureFromFile((plat::assetsDir() + "icons/mpv-sofa-logo.png").c_str(),
                                     &m_logoW, &m_logoH);
 
     // Settings::load already ran before window creation; here we just
@@ -235,16 +290,29 @@ bool Application::init(int argc, char* argv[]) {
 
         // Pre-populate the left-hand "Bookmarks" group with common user
         // folders.  The "Devices" group is filled automatically by the
-        // library with every mounted volume (C:, D:, F:, ...).
+        // library with every mounted volume (C:, D:, F:, ... on Windows,
+        // mount points elsewhere).
+        //
+        // Only offer a folder that actually exists: on Linux these are
+        // localised and optional (XDG user dirs), so a hardcoded ~/Videos is
+        // as likely to be missing as present, and a bookmark that leads
+        // nowhere is worse than no bookmark.
         if (auto* bm = d->GetPlacesGroupPtr("Bookmarks")) {
-            const char* userProfile = std::getenv("USERPROFILE");
-            if (userProfile && *userProfile) {
-                std::string home = userProfile;
-                bm->AddPlace("Home",      home,                 false);
-                bm->AddPlace("Desktop",   home + "\\Desktop",   false);
-                bm->AddPlace("Videos",    home + "\\Videos",    false);
-                bm->AddPlace("Music",     home + "\\Music",     false);
-                bm->AddPlace("Downloads", home + "\\Downloads", false);
+#ifdef _WIN32
+            const char* homeEnv = std::getenv("USERPROFILE");
+            const char  sep     = '\\';
+#else
+            const char* homeEnv = std::getenv("HOME");
+            const char  sep     = '/';
+#endif
+            if (homeEnv && *homeEnv) {
+                const std::string home = homeEnv;
+                bm->AddPlace("Home", home, false);
+                for (const char* sub : {"Desktop", "Videos", "Music", "Downloads"}) {
+                    const std::string path = home + sep + sub;
+                    if (plat::exists(path))
+                        bm->AddPlace(sub, path, false);
+                }
             }
         }
 
@@ -374,16 +442,16 @@ void Application::run() {
         // once a second so toggling Windows HDR takes effect live. The
         // Preferences "Force SDR output" override (hdrOutput==1) opts out.
         if ((++m_hdrPollCounter % 60) == 0)
-            m_hdrPresenter.refreshDisplayHdr();
+            m_hdrPresenter->refreshDisplayHdr();
         const bool forceSdr = Settings::displayConfig().hdrOutput == 1;
-        const bool hdrWanted = !forceSdr && m_hdrPresenter.available() &&
-                               m_hdrPresenter.displayIsHdr();
+        const bool hdrWanted = !forceSdr && m_hdrPresenter->available() &&
+                               m_hdrPresenter->displayIsHdr();
         m_finalFbo = 0;
         if (hdrWanted) {
             int fbw = 0, fbh = 0;
             glfwGetFramebufferSize(m_window->getHandle(), &fbw, &fbh);
-            m_hdrPresenter.resize(fbw, fbh);
-            m_finalFbo = m_hdrPresenter.beginFrame();
+            m_hdrPresenter->resize(fbw, fbh);
+            m_finalFbo = m_hdrPresenter->beginFrame();
         }
         m_hdrActive = m_finalFbo != 0;
 
@@ -392,7 +460,7 @@ void Application::run() {
         // level. mpv video is switched to its native scRGB target below and
         // is marked separately with a draw callback around ImGui::Image.
         const float uiScale = m_hdrActive
-            ? m_hdrPresenter.sdrWhiteNits() / 80.0f
+            ? m_hdrPresenter->sdrWhiteNits() / 80.0f
             : 1.0f;
         ImGui_ImplOpenGL3_SetHdrColorDefaults(m_hdrActive ? 1 : 0, uiScale);
 
@@ -401,8 +469,8 @@ void Application::run() {
         // relevant setting in this key makes the scRGB override win again on
         // the following frame while HDR presentation remains active.
         const Settings::DisplayConfig& dc = Settings::displayConfig();
-        const float targetPeak = m_hdrPresenter.displayMaxNits() > 0.0f
-            ? m_hdrPresenter.displayMaxNits() : dc.peakNits;
+        const float targetPeak = m_hdrPresenter->displayMaxNits() > 0.0f
+            ? m_hdrPresenter->displayMaxNits() : dc.peakNits;
         const float referenceWhite = std::clamp(dc.hdrRefWhite, 80.0f, 400.0f);
         // The classic libmpv render backend normalizes linear output so 1.0
         // equals target-peak. Windows scRGB instead defines 1.0 as 80 nits.
@@ -434,7 +502,7 @@ void Application::run() {
         renderUI();
 
         if (m_finalFbo != 0) {
-            m_hdrPresenter.present();
+            m_hdrPresenter->present();
         } else {
             m_window->swapBuffers();
         }
@@ -485,7 +553,7 @@ void Application::requestBinaural() {
     m_binauralLastPos = -1.0;
     std::string sofa = m_sharedState && m_sharedState->sofa_path[0]
                          ? std::string(m_sharedState->sofa_path)
-                         : std::string("assets/hrtf/default.sofa");
+                         : plat::assetsDir() + "hrtf/default.sofa";
     m_binaural.request(m_binauralMovie, idx, sofa, Settings::roomPreset(),
                        m_player ? m_player->getDuration() : 0.0,
                        (BinauralRenderer::Solo)m_binauralSolo);
@@ -617,7 +685,7 @@ void Application::updateBinaural() {
 void Application::processInput() {
     // Handle pending file drops
     if (!m_pendingFile.empty() && m_player) {
-        if (FILE* dbg = fopen("app_debug.log", "a")) {
+        if (FILE* dbg = fopen((plat::cacheDir() + "app_debug.log").c_str(), "a")) {
             fprintf(dbg, "loadFile dispatch: '%s'\n", m_pendingFile.c_str());
             fclose(dbg);
         }
@@ -682,10 +750,26 @@ void Application::processInput() {
     // keys, so an injection there would be overwritten on the same
     // frame.  Arrow keys aren't touched by the backend, leaving us as
     // the sole writer.
-    if (glfwJoystickPresent(GLFW_JOYSTICK_1) &&
-        glfwJoystickIsGamepad(GLFW_JOYSTICK_1)) {
+    // Scan every slot rather than only the first: on a handheld the built-in
+    // controller is not always joystick 0, and plugging anything in ahead of
+    // it shifts the indices.  First one GLFW recognises as a gamepad wins.
+    int pad = -1;
+    for (int j = GLFW_JOYSTICK_1; j <= GLFW_JOYSTICK_LAST; j++) {
+        if (glfwJoystickPresent(j) && glfwJoystickIsGamepad(j)) { pad = j; break; }
+    }
+    // Report connect/disconnect once rather than every frame.  "Nothing
+    // happens when I press buttons" is otherwise indistinguishable from a
+    // controller GLFW has no mapping for, which is the usual cause.
+    if (pad != m_activePad) {
+        if (pad >= 0)
+            fprintf(stderr, "[Input] gamepad %d: %s\n", pad, glfwGetGamepadName(pad));
+        else if (m_activePad >= 0)
+            fprintf(stderr, "[Input] gamepad disconnected\n");
+        m_activePad = pad;
+    }
+    if (pad >= 0) {
         GLFWgamepadstate gp;
-        if (glfwGetGamepadState(GLFW_JOYSTICK_1, &gp)) {
+        if (glfwGetGamepadState(pad, &gp)) {
             const float dz = 0.45f;   // generous; avoids ghost moves on resting sticks
             const float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X];
             const float ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
@@ -1035,6 +1119,8 @@ void Application::renderUI() {
                 else                    openPlaybackMenu();
             }
             if (altEdge) m_menuBarVisible = !m_menuBarVisible;
+
+            handlePlaybackShortcuts(prefsOpenNow, anyPopupNow);
         } else {
             // Home / Preferences context — keep the original menu-bar
             // muscle memory.
@@ -1471,7 +1557,7 @@ void Application::renderModalLayers() {
         }
         // Breadcrumb log: the exact dialog outcome, for diagnosing "Open
         // does nothing" reports without a console attached.
-        if (FILE* dbg = fopen("app_debug.log", "a")) {
+        if (FILE* dbg = fopen((plat::cacheDir() + "app_debug.log").c_str(), "a")) {
             fprintf(dbg, "open_media closed: ok=%d path='%s'\n",
                     ImGuiFileDialog::Instance()->IsOk() ? 1 : 0,
                     m_pendingFile.c_str());
@@ -1684,6 +1770,73 @@ void Application::closePlaybackMenu() {
         m_player->play();          // resume only if we were the ones who paused
     }
     m_playbackMenuPausedUs = false;
+}
+
+// Transport bindings for gamepad and keyboard.
+//
+// Called from renderUI() rather than processInput() because ImGui::IsKeyPressed
+// only reports this frame's edges after NewFrame(); processInput() runs before
+// it and would read the previous frame.  The gamepad keys themselves come from
+// imgui_impl_glfw's own poll inside NewFrame — deliberately not re-written here,
+// since a second writer racing it is what broke d-pad navigation once before.
+//
+// Suppressed while Preferences or any popup is up so the same buttons keep
+// driving menu navigation, and while the on-screen menu is open so A activates
+// the focused tile instead of toggling playback underneath it.
+void Application::handlePlaybackShortcuts(bool prefsOpen, bool anyPopup) {
+    if (!m_player || prefsOpen || anyPopup || m_playbackMenuOpen) return;
+
+    // Any transport input counts as activity: in cinema mode the bar and
+    // cursor hide on a timer that only mouse motion used to refresh, which
+    // left the transport unreachable for a gamepad-only user.
+    auto poke = [this]() { m_fullscreenCursorTimer = 3.0f; };
+
+    const bool play =
+        ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||   // A
+        ImGui::IsKeyPressed(ImGuiKey_Space,           false);
+    if (play) { m_player->togglePause(); poke(); }
+
+    // Seek: triggers for the coarse jump, d-pad left/right for the fine one.
+    // Repeat is allowed on the triggers so holding one scrubs.
+    struct { ImGuiKey key; double secs; bool repeat; } kSeeks[] = {
+        {ImGuiKey_GamepadL2,        -10.0, true},
+        {ImGuiKey_GamepadR2,         10.0, true},
+        {ImGuiKey_LeftArrow,         -5.0, true},
+        {ImGuiKey_RightArrow,         5.0, true},
+    };
+    for (const auto& s : kSeeks) {
+        if (ImGui::IsKeyPressed(s.key, s.repeat)) { m_player->seekRelative(s.secs); poke(); }
+    }
+
+    // Chapters on the bumpers.  Falls back to a long seek when the file has
+    // none, so the buttons never feel dead.
+    const bool haveChapters = !m_player->getChapters().empty();
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
+        haveChapters ? m_player->prevChapter() : m_player->seekRelative(-60.0);
+        poke();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
+        haveChapters ? m_player->nextChapter() : m_player->seekRelative(60.0);
+        poke();
+    }
+
+    // Volume on the d-pad's vertical axis, mute on Y.
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) {
+        m_player->setVolume(m_player->getVolume() + 5.0); poke();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) {
+        m_player->setVolume(m_player->getVolume() - 5.0); poke();
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false)) {   // Y
+        m_player->toggleMute(); poke();
+    }
+
+    // X opens the track picker — the one thing you reach for mid-film that
+    // isn't transport.
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceLeft, false) && m_trackPicker) {
+        m_trackPicker->open();
+        poke();
+    }
 }
 
 void Application::renderPlaybackMenu() {

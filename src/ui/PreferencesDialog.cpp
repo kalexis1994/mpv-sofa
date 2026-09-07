@@ -6,6 +6,7 @@
 #include "core/MediaServer.h"
 #include "audio/MpvPlayer.h"
 
+#include <cmath>
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <IconsLucide.h>
@@ -87,14 +88,19 @@ void PreferencesDialog::render() {
     // m_freshlyShown nudges the gamepad focus onto the newly active
     // pill so the user can immediately bumper through several tabs
     // without losing the cursor down in the body.
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) {
-        m_currentTab   = (m_currentTab - 1 + TAB_COUNT) % TAB_COUNT;
+    // Step over any tab the build doesn't draw (the media server one), so
+    // bumpering never lands on a page that isn't there.  Bounded by TAB_COUNT
+    // rather than looping until visible: if somehow nothing were visible this
+    // would still terminate.
+    auto stepTab = [this](int dir) {
+        for (int n = 0; n < TAB_COUNT; n++) {
+            m_currentTab = (m_currentTab + dir + TAB_COUNT) % TAB_COUNT;
+            if (m_currentTab != TAB_SERVER || MediaServer::supported()) break;
+        }
         m_freshlyShown = true;
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) {
-        m_currentTab   = (m_currentTab + 1) % TAB_COUNT;
-        m_freshlyShown = true;
-    }
+    };
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false)) stepTab(-1);
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false)) stepTab(+1);
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
     if (m_freshlyShown) ImGui::SetNextWindowFocus();
@@ -212,19 +218,32 @@ void PreferencesDialog::renderTabs() {
         { ICON_LC_SERVER,      "Media Server"  },
     };
 
-    // Measure each pill, accumulate total width, then draw centred.
+    // The media server is a Windows-only feature; on a build without it the
+    // whole tab is hidden rather than shown empty, so the pill row doesn't
+    // lead anywhere useless.
+    auto tabVisible = [](int tab) {
+        return tab != TAB_SERVER || MediaServer::supported();
+    };
+
+    // Measure each visible pill, accumulate total width, then draw centred.
     const float pillPadX = 22.0f;
     const float pillGap  = 10.0f;
 
-    float widths[TAB_COUNT];
+    float widths[TAB_COUNT] = {0.0f};
     float totalW = 0.0f;
+    bool  firstPill = true;
     for (int i = 0; i < TAB_COUNT; i++) {
+        if (!tabVisible(i)) continue;
         char buf[128];
         snprintf(buf, sizeof(buf), "%s  %s", kTabs[i].icon, kTabs[i].label);
         widths[i] = ImGui::CalcTextSize(buf).x + pillPadX * 2.0f;
+        if (!firstPill) totalW += pillGap;
         totalW   += widths[i];
-        if (i + 1 < TAB_COUNT) totalW += pillGap;
+        firstPill = false;
     }
+
+    // Never leave the user parked on a tab that is no longer drawn.
+    if (!tabVisible(m_currentTab)) m_currentTab = TAB_APPEARANCE;
 
     const float avail = ImGui::GetContentRegionAvail().x;
     const float startX = ImGui::GetCursorPosX() +
@@ -235,7 +254,12 @@ void PreferencesDialog::renderTabs() {
     // can flip it back on.
     m_focusOnPill = false;
 
+    firstPill = true;
     for (int i = 0; i < TAB_COUNT; i++) {
+        if (!tabVisible(i)) continue;
+        if (!firstPill) ImGui::SameLine(0.0f, pillGap);
+        firstPill = false;
+
         const bool active = (m_currentTab == i);
         if (tabPill(kTabs[i].icon, kTabs[i].label, active)) {
             m_currentTab = i;
@@ -245,7 +269,6 @@ void PreferencesDialog::renderTabs() {
         // pill (rather than always pill 0) means re-entering the page
         // brings focus straight to whatever the user was last on.
         if (m_freshlyShown && active) ImGui::FocusItem();
-        if (i + 1 < TAB_COUNT) ImGui::SameLine(0.0f, pillGap);
     }
 }
 
@@ -360,6 +383,26 @@ void PreferencesDialog::renderAppearance() {
             ImGui::SetTooltip("%s", ImGuiLayer::accentName(i));
         ImGui::PopID();
     }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Interface size");
+    ImGui::TextUnformatted("Scale");
+    ImGui::SameLine(labelW);
+    ImGui::SetNextItemWidth(260.0f);
+    // Steps rather than a continuous slider: the useful range is a handful of
+    // settings (desk, couch, far couch) and a gamepad can't land on 1.37
+    // meaningfully anyway.
+    if (ImGui::SliderFloat("##ui_scale", &a.uiScale, 1.0f, 2.0f, "%.2f×",
+                           ImGuiSliderFlags_NoInput)) {
+        a.uiScale = std::round(a.uiScale * 20.0f) / 20.0f;   // 0.05 steps
+        dirty = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Reset")) { a.uiScale = 1.0f; dirty = true; }
+    ImGui::Spacing();
+    ImGui::TextDisabled(
+        "Everything is sized for a monitor at arm's length. Turn this up when "
+        "the picture is across a room — 1.5× is a good starting point on a TV.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Preview");

@@ -90,10 +90,18 @@ int main(int argc, char* argv[]) {
         }
     }
 #else
-    FILE* logFile = std::freopen("hrtf_log.txt", "w", stderr);
-    if (logFile) {
-        std::setvbuf(stderr, nullptr, _IONBF, 0);
-        std::fprintf(stderr, "=== HRTF Spatializer Log ===\n");
+    // Unlike Windows there is no GUI subsystem hiding the console here, so
+    // stderr already goes somewhere useful: the terminal when launched from
+    // one, the journal when launched from a .desktop file or from Steam.
+    // Hijacking it into a file in the working directory — which is what this
+    // branch used to do unconditionally — only served to hide the logs, and
+    // wrote into whatever directory the launcher happened to pick.  Redirect
+    // solely when asked, honouring the same variable as the Windows path.
+    if (const char* logPath = std::getenv("HRTF_STDERR_FILE")) {
+        if (*logPath && std::freopen(logPath, "w", stderr)) {
+            std::setvbuf(stderr, nullptr, _IONBF, 0);
+            std::fprintf(stderr, "=== HRTF Spatializer Log ===\n");
+        }
     }
 #endif
 

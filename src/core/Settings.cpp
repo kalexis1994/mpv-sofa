@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "platform/Platform.h"
 #include "SharedState.h"
 #include "audio/MpvPlayer.h"
 
@@ -157,6 +158,7 @@ struct Snapshot {
         if (playback.audioDelay != o.playback.audioDelay) return false;
         if (appearance.mode   != o.appearance.mode)   return false;
         if (appearance.accent != o.appearance.accent) return false;
+        if (appearance.uiScale != o.appearance.uiScale) return false;
         if (window_mode != o.window_mode) return false;
         if (server.enabled  != o.server.enabled)  return false;
         if (server.mediaDir != o.server.mediaDir) return false;
@@ -293,7 +295,11 @@ void ensureIniPath() {
         g_iniPath = full.substr(0, slash + 1) + "mpv-sofa.ini";
     }
 #else
-    g_iniPath = "mpv-sofa.ini";
+    // Linux has no portable-install convention and the binary may well sit in
+    // a read-only prefix, so settings go to the XDG config directory rather
+    // than next to the executable (which is what the bare relative name here
+    // used to mean: whatever directory the launcher happened to pick).
+    g_iniPath = plat::configDir() + "mpv-sofa.ini";
 #endif
 }
 
@@ -465,6 +471,7 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             g_appearance.mode   = getI(kv, "mode",   g_appearance.mode);
             g_appearance.accent = getI(kv, "accent", g_appearance.accent);
+            g_appearance.uiScale = getF(kv, "ui_scale", g_appearance.uiScale);
         }
         if (auto it = ini.find("window"); it != ini.end()) {
             const KV& kv = it->second;
@@ -624,8 +631,9 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "\n");
 
     fprintf(f, "[appearance]\n");
-    fprintf(f, "mode=%d\n",   g_appearance.mode);
-    fprintf(f, "accent=%d\n", g_appearance.accent);
+    fprintf(f, "mode=%d\n",     g_appearance.mode);
+    fprintf(f, "accent=%d\n",   g_appearance.accent);
+    fprintf(f, "ui_scale=%.3f\n", g_appearance.uiScale);
     fprintf(f, "\n");
 
     fprintf(f, "[playback]\n");
@@ -853,7 +861,11 @@ void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {
     // vo=libmpv pipeline; baking the constants into the source via
     // #define is the next-best mechanism and matches what most user-
     // shader collections do for tunable params.
-    const std::string templatePath = baseDir + "assets/shaders/cinema_grain.glsl";
+    // The template is a read-only asset while the generated shader is scratch
+    // that has to land somewhere writable.  On Windows both resolve next to
+    // the executable as before; on Linux the assets can sit in a read-only
+    // prefix while the output follows the ini into the config directory.
+    const std::string templatePath = plat::assetsDir() + "shaders/cinema_grain.glsl";
     const std::string runtimePath  = baseDir + "cinema_grain_runtime.glsl";
 
     std::string source;

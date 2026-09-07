@@ -17,48 +17,50 @@
 
 #include <cstdint>
 
+#include "IHdrPresenter.h"
+
 struct GLFWwindow;
 
-class Direct3DHdrPresenter {
+class Direct3DHdrPresenter final : public IHdrPresenter {
 public:
     Direct3DHdrPresenter();
-    ~Direct3DHdrPresenter();
+    ~Direct3DHdrPresenter() override;
 
     // Set up D3D11 + the interop swapchain for a GLFW window's HWND.
     // Returns false (and leaves available() false) on any failure.
-    bool init(GLFWwindow* window, int width, int height);
-    void shutdown();
+    bool init(GLFWwindow* window, int width, int height) override;
+    void shutdown() override;
 
-    bool available() const { return m_available; }
+    bool available() const override { return m_available; }
 
     // Whether Windows HDR is currently ON for the output display (DXGI
     // reports the PQ/BT.2020 colour space). Cheap to re-check via refresh().
-    bool displayIsHdr() const { return m_displayHdr; }
-    float displayMaxNits() const { return m_displayMaxNits; }
+    bool displayIsHdr() const override { return m_displayHdr; }
+    float displayMaxNits() const override { return m_displayMaxNits; }
 
     // Windows' per-display "SDR content brightness" setting in nits — the
     // system-calibrated brightness for SDR white on this display. The UI is
     // scaled to this so it matches every other window. Falls back to 200.
-    float sdrWhiteNits() const { return m_sdrWhiteNits; }
+    float sdrWhiteNits() const override { return m_sdrWhiteNits; }
 
     // Re-query the display's current HDR state (call periodically so
     // toggling Windows HDR while the app runs takes effect).
-    void refreshDisplayHdr() { if (m_device) queryDisplayHdr(); }
+    void refreshDisplayHdr() override { if (m_device) queryDisplayHdr(); }
 
     // Recreate swapchain buffers after a window resize.
-    void resize(int width, int height);
+    void resize(int width, int height) override;
 
     // Begin a frame: locks the D3D backbuffer for GL and returns the GL
     // framebuffer object to composite the final image into. Returns 0 if
     // unavailable (caller falls back to the default framebuffer).
-    unsigned int beginFrame();
+    unsigned int beginFrame() override;
 
     // Unlock the shared buffer and present through DXGI. No-op if the
     // matching beginFrame() returned 0.
-    void present();
+    void present() override;
 
-    int width() const { return m_width; }
-    int height() const { return m_height; }
+    int width() const override { return m_width; }
+    int height() const override { return m_height; }
 
 private:
     bool createDevice();

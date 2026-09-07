@@ -317,6 +317,6 @@ void TransportBar::renderContent() {
             if (m_controlsCb) m_controlsCb();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Toggle Controls drawer (F3)");
+            ImGui::SetTooltip("Spatial settings");
     }
 }

@@ -46,6 +46,8 @@ std::string findServerScript() {
 
 } // namespace
 
+bool MediaServer::supported() { return true; }
+
 MediaServer::~MediaServer() {
     stop();
 }

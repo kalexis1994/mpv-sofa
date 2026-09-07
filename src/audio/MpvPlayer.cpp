@@ -1,4 +1,5 @@
 #include "MpvPlayer.h"
+#include "platform/Platform.h"
 
 #ifdef HAVE_MPV
 #include <mpv/client.h>
@@ -108,7 +109,8 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
 
     if (m_verboseMpvLogs) {
         // Log mpv messages to file for decoder debug analysis
-        mpv_set_option_string(m_mpv, "log-file", "mpv_debug.log");
+        const std::string logPath = plat::cacheDir() + "mpv_debug.log";
+        mpv_set_option_string(m_mpv, "log-file", logPath.c_str());
     }
 
     // Experiment hook: HRTF_MPV_OPTS="key=value;key2=value2" applies raw
@@ -134,13 +136,18 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
 
     // Enable our HRTF audio filter
     // Pass the shared state pointer so the filter can communicate with the UI
-    char af_opt[256];
-    snprintf(af_opt, sizeof(af_opt),
-             "hrtf=sofa=assets/hrtf/default.sofa:shared-state=%" PRId64,
-             (int64_t)(intptr_t)m_sharedState);
-    fprintf(stderr, "[MpvPlayer] af option: %s\n", af_opt);
+    // The SOFA path is embedded in mpv's filter-option syntax, where ':' and
+    // ',' are separators — a bare path containing one truncates the chain
+    // silently.  mpv's %<len>%<string> form takes the next len bytes
+    // verbatim, so any path survives, Windows drive letters included.
+    const std::string sofaPath = plat::assetsDir() + "hrtf/default.sofa";
+    char shared[32];
+    snprintf(shared, sizeof(shared), "%" PRId64, (int64_t)(intptr_t)m_sharedState);
+    const std::string af_opt = "hrtf=sofa=%" + std::to_string(sofaPath.size()) +
+                               "%" + sofaPath + ":shared-state=" + shared;
+    fprintf(stderr, "[MpvPlayer] af option: %s\n", af_opt.c_str());
     m_afChain = af_opt;   // remembered so external-binaural can restore it
-    int af_err = mpv_set_option_string(m_mpv, "af", af_opt);
+    int af_err = mpv_set_option_string(m_mpv, "af", af_opt.c_str());
     fprintf(stderr, "[MpvPlayer] af set result: %d (%s)\n", af_err,
             af_err < 0 ? mpv_error_string(af_err) : "ok");
 
@@ -197,7 +204,7 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     mpv_observe_property(m_mpv, 0, "chapter-list/count", MPV_FORMAT_INT64);
 
     // Generate silence WAV for test tone (af_hrtf needs audio frames to process)
-    m_silencePath = "silence_testtone.wav";
+    m_silencePath = plat::cacheDir() + "silence_testtone.wav";
     if (createSilenceWav(m_silencePath.c_str())) {
         fprintf(stderr, "[MpvPlayer] Created silence WAV: %s\n", m_silencePath.c_str());
     } else {
