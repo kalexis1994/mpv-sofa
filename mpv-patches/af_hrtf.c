@@ -44,17 +44,49 @@ static int hrtf_dbg_count = 0;
 #include <mysofa.h>
 #include "pffft.h"
 
-/* Spatial extension coefficient export from lossless HD decoder (libavcodec).
- * The global lives in avcodec-62.dll; we resolve it at runtime
- * via GetProcAddress to avoid import library issues. */
+/* Spatial extension coefficient export from the lossless HD decoder, which
+ * lives in libavcodec.  It is resolved at run time rather than linked: the
+ * filter is built into libmpv and must keep loading against an unpatched
+ * avcodec, where these symbols simply don't exist. */
 #include "spatial_ext_coeff.h"
 #include "objcoding_qmf.h"
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 static SpatialExtCoeff *g_spatial_coeff_ptr = NULL;
 static SpatialExtObjMeta *g_spatial_objmeta_ptr = NULL;
 static ObjCodingMixData *g_objcoding_data_ptr = NULL;
+
+/* Look one exported global up in the already-loaded avcodec.  Returns NULL
+ * when avcodec isn't the patched build, which is a supported configuration —
+ * every caller checks, and the spatial paths just stay switched off. */
+static void *resolve_avcodec_symbol(const char *name)
+{
+#ifdef _WIN32
+    HMODULE h = GetModuleHandleA("avcodec-62.dll");
+    return h ? (void *)GetProcAddress(h, name) : NULL;
+#else
+    /* libmpv links libavcodec directly, so its symbols are already in the
+     * global scope and no handle is needed.  Note this only finds them
+     * because the Linux build adds the three names to libavcodec.v — the
+     * version script's "local: *" hides everything else from dlsym. */
+    void *sym = dlsym(RTLD_DEFAULT, name);
+    if (sym)
+        return sym;
+
+    /* Fallback for the case where avcodec came in with RTLD_LOCAL, e.g. via
+     * some other plugin's dlopen.  RTLD_NOLOAD means this never loads a
+     * second copy — it only gets a handle if it is already mapped. */
+    void *h = dlopen("libavcodec.so.62", RTLD_NOLOAD | RTLD_LAZY);
+    if (!h)
+        return NULL;
+    sym = dlsym(h, name);
+    dlclose(h);
+    return sym;
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2283,34 +2315,32 @@ static int init_hrtf(struct priv *p, int sample_rate, int num_channels) {
     for (int i = 0; i < HRTF_MAX_CHANNELS; i++)
         p->height_mat_idx[i] = -1;
 
-    // Resolve spatial coefficient global from avcodec DLL at runtime
-#ifdef _WIN32
+    // Resolve the spatial coefficient globals out of avcodec at runtime.
     if (!g_spatial_coeff_ptr) {
-        HMODULE hAvcodec = GetModuleHandleA("avcodec-62.dll");
-        if (hAvcodec) {
-            g_spatial_coeff_ptr = (SpatialExtCoeff *)GetProcAddress(hAvcodec, "g_spatial_ext_coeff");
-            if (g_spatial_coeff_ptr)
-                HRTF_DBG("init_hrtf: resolved g_spatial_ext_coeff from avcodec-62.dll\n");
-            else
-                HRTF_DBG("init_hrtf: GetProcAddress failed for g_spatial_ext_coeff\n");
-
-            g_spatial_objmeta_ptr = (SpatialExtObjMeta *)GetProcAddress(hAvcodec, "g_spatial_ext_objmeta");
-            if (g_spatial_objmeta_ptr)
-                HRTF_DBG("init_hrtf: resolved g_spatial_ext_objmeta from avcodec-62.dll\n");
-            else
-                HRTF_DBG("init_hrtf: GetProcAddress failed for g_spatial_ext_objmeta\n");
-
-            g_objcoding_data_ptr = (ObjCodingMixData *)GetProcAddress(hAvcodec, "g_objcoding_data");
-            if (g_objcoding_data_ptr)
-                HRTF_DBG("init_hrtf: resolved g_objcoding_data from avcodec-62.dll\n");
-            else
-                HRTF_DBG("init_hrtf: GetProcAddress failed for g_objcoding_data\n");
-
-        } else {
-            HRTF_DBG("init_hrtf: avcodec-62.dll not loaded\n");
+        static const char *const kSpatialNames[3] = {
+            "g_spatial_ext_coeff",
+            "g_spatial_ext_objmeta",
+            "g_objcoding_data",
+        };
+        void *syms[3] = {NULL, NULL, NULL};
+        int resolved = 0;
+        for (int i = 0; i < 3; i++) {
+            syms[i] = resolve_avcodec_symbol(kSpatialNames[i]);
+            if (syms[i]) {
+                resolved++;
+                HRTF_DBG("init_hrtf: resolved %s\n", kSpatialNames[i]);
+            } else {
+                HRTF_DBG("init_hrtf: could not resolve %s\n", kSpatialNames[i]);
+            }
         }
+        g_spatial_coeff_ptr   = (SpatialExtCoeff *)syms[0];
+        g_spatial_objmeta_ptr = (SpatialExtObjMeta *)syms[1];
+        g_objcoding_data_ptr  = (ObjCodingMixData *)syms[2];
+
+        if (resolved == 0)
+            HRTF_DBG("init_hrtf: avcodec has no spatial exports — "
+                     "object/JOC paths disabled\n");
     }
-#endif
 
     // Determine bed vs object channels.
     // Standard lossless HD spatial: 8-channel 7.1 bed + up to 8 object channels.
