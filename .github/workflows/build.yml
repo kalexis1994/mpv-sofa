@@ -367,3 +367,92 @@ jobs:
             --title $env:GITHUB_REF_NAME `
             --generate-notes `
             "${{ steps.zip.outputs.path }}"
+
+  # ─────────────────────────────────────────────────────────────
+  # Linux build.
+  #
+  # Debian 13 rather than a newer distro on purpose: the artifact has to run
+  # on SteamOS 3.8, which carries glibc 2.41.  Anything built against a newer
+  # one fails to load there with "GLIBC_2.43 not found", and that only shows
+  # up on the device, never in CI.  Debian 13 is 2.41 exactly.
+  #
+  # libplacebo is built from source at the version SteamOS ships so the
+  # soname matches (Debian has .349, SteamOS .351); it is a build-time
+  # dependency only — the host's own copy is what loads at run time, which
+  # is what keeps its shaderc coming from the system too.
+  build-linux:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential git cmake ninja-build meson pkg-config nasm \
+            python3 python3-jsonschema ca-certificates patchelf \
+            libass-dev liblcms2-dev libjpeg-dev libshaderc-dev libvulkan-dev \
+            spirv-tools libva-dev libglfw3-dev libglm-dev libmysofa-dev \
+            zlib1g-dev libpulse-dev libasound2-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libgl1-mesa-dev libunwind-dev libxxhash-dev
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # The stack takes far longer than the app, and only changes when the
+      # patches do.
+      - name: Cache FFmpeg + mpv
+        id: cache-stack
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffmpeg-build
+            mpv-src
+            ~/sofa-deps
+          key: linux-stack-${{ hashFiles('ffmpeg-patches/**', 'mpv-patches/**', 'tools/build_linux_stack.sh') }}
+
+      - name: Build libplacebo matching the SteamOS soname
+        if: steps.cache-stack.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v7.351.0 --recursive \
+            https://code.videolan.org/videolan/libplacebo.git /tmp/libplacebo
+          cd /tmp/libplacebo
+          meson setup build --prefix="$HOME/sofa-deps" --buildtype=release \
+            -Ddemos=false -Dtests=false
+          meson compile -C build
+          meson install -C build
+
+      - name: Build patched FFmpeg + mpv
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sofa-deps/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+          ./tools/build_linux_stack.sh all
+
+      - name: Build the app
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sofa-deps/lib/x86_64-linux-gnu/pkgconfig:$PWD/ffmpeg-build/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          cmake -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_SYSTEM_GLFW=ON -DUSE_SYSTEM_GLM=ON \
+            -DMPV_INCLUDE_DIR="$PWD/mpv-src/include" \
+            -DMPV_LIBRARY="$PWD/mpv-src/build/libmpv.so.2"
+          cmake --build build-linux
+
+      # Catches the two failure modes that are invisible until the app runs on
+      # a real device: the spatial globals silently not being exported, and
+      # mpv quietly building without an audio backend.
+      - name: Verify the spatial plumbing
+        run: ./tools/verify_linux_spatial.sh
+
+      - name: Package
+        run: ./tools/package_linux.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpv-sofa-linux-x64
+          path: dist-linux/
+          retention-days: 30
