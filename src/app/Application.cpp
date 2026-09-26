@@ -153,7 +153,7 @@ bool Application::init(int argc, char* argv[]) {
 
     // Create window
     m_window = std::make_unique<Window>();
-    if (!m_window->init("HRTF Spatial Audio Virtualizer", 1600, 900,
+    if (!m_window->init("MPV Sofa", 1600, 900,
                          initialMode)) {
         fprintf(stderr, "Failed to create window\n");
         return false;
@@ -1658,12 +1658,12 @@ void Application::renderHomeScreen() {
         ImGui::Image((ImTextureID)(intptr_t)m_logoTex, ImVec2(w, logoH));
     }
 
-    // Wordmark — "mpv" in the accent, "-sofa" in plain ink, centred as one
+    // Wordmark — "MPV" in the accent, " Sofa" in plain ink, centred as one
     // unit.  Same split the style lab uses for the brand.
     const float wordmarkY = yStart + logoH + logoGap;
     {
-        const char* head = "mpv";
-        const char* tail = "-sofa";
+        const char* head = "MPV";
+        const char* tail = " Sofa";
         ImGui::PushFont(ImGuiLayer::fonts().display,
                         ImGui::GetFontSize() * titleScale);
         const ImVec2 hs = ImGui::CalcTextSize(head);

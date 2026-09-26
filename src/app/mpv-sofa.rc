@@ -26,11 +26,11 @@ BEGIN
   BEGIN
     BLOCK "080904b0"          // English (UK), Unicode — matches Translation
     BEGIN
-      VALUE "FileDescription", "mpv-sofa"
+      VALUE "FileDescription", "MPV Sofa"
       VALUE "FileVersion",     MPV_SOFA_VER_STR
       VALUE "InternalName",    "mpv-sofa"
       VALUE "OriginalFilename","mpv-sofa.exe"
-      VALUE "ProductName",     "mpv-sofa"
+      VALUE "ProductName",     "MPV Sofa"
       VALUE "ProductVersion",  MPV_SOFA_VER_STR
       VALUE "Comments",        "Spatial audio cinema for headphones"
     END
