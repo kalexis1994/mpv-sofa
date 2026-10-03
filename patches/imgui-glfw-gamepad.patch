@@ -1,0 +1,43 @@
+diff --git a/backends/imgui_impl_glfw.cpp b/backends/imgui_impl_glfw.cpp
+index 6f68bf4d2..631317351 100644
+--- a/backends/imgui_impl_glfw.cpp
++++ b/backends/imgui_impl_glfw.cpp
+@@ -1027,14 +1027,35 @@ static void ImGui_ImplGlfw_UpdateGamepads()
+     io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+ #if GLFW_HAS_GAMEPAD_API && !defined(EMSCRIPTEN_USE_EMBEDDED_GLFW3)
+     GLFWgamepadstate gamepad;
+-    if (!glfwGetGamepadState(GLFW_JOYSTICK_1, &gamepad))
++    // Upstream polls only GLFW_JOYSTICK_1.  Handheld controls, Bluetooth
++    // pads and Steam Input virtual devices frequently occupy another slot,
++    // so select the first connected device with a valid gamepad mapping.
++    int gamepad_jid = -1;
++    for (int jid = GLFW_JOYSTICK_1; jid <= GLFW_JOYSTICK_LAST; ++jid)
++    {
++        if (glfwJoystickIsGamepad(jid) && glfwGetGamepadState(jid, &gamepad))
++        {
++            gamepad_jid = jid;
++            break;
++        }
++    }
++    if (gamepad_jid < 0)
+         return;
+     #define MAP_BUTTON(KEY_NO, BUTTON_NO, _UNUSED)          do { io.AddKeyEvent(KEY_NO, gamepad.buttons[BUTTON_NO] != 0); } while (0)
+     #define MAP_ANALOG(KEY_NO, AXIS_NO, _UNUSED, V0, V1)    do { float v = gamepad.axes[AXIS_NO]; v = (v - V0) / (V1 - V0); io.AddKeyAnalogEvent(KEY_NO, v > 0.10f, Saturate(v)); } while (0)
+ #else
+     int axes_count = 0, buttons_count = 0;
+-    const float* axes = glfwGetJoystickAxes(GLFW_JOYSTICK_1, &axes_count);
+-    const unsigned char* buttons = glfwGetJoystickButtons(GLFW_JOYSTICK_1, &buttons_count);
++    const float* axes = NULL;
++    const unsigned char* buttons = NULL;
++    for (int jid = GLFW_JOYSTICK_1; jid <= GLFW_JOYSTICK_LAST; ++jid)
++    {
++        if (!glfwJoystickPresent(jid))
++            continue;
++        axes = glfwGetJoystickAxes(jid, &axes_count);
++        buttons = glfwGetJoystickButtons(jid, &buttons_count);
++        if (axes_count > 0 && buttons_count > 0)
++            break;
++    }
+     if (axes_count == 0 || buttons_count == 0)
+         return;
+     #define MAP_BUTTON(KEY_NO, _UNUSED, BUTTON_NO)          do { io.AddKeyEvent(KEY_NO, (buttons_count > BUTTON_NO && buttons[BUTTON_NO] == GLFW_PRESS)); } while (0)

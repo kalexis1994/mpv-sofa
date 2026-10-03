@@ -15,8 +15,10 @@
 
 #include <memory>
 #include <string>
+#include "core/ResumeStore.h"
 
 struct HrtfSharedState;
+namespace IGFD { class FileInfos; }
 
 class Application {
 public:
@@ -39,10 +41,47 @@ private:
     void renderHomeScreen();
     bool homeButton(const char* icon, const char* label, float size);
     void openFileDialog();          // shared between menu, hotkey and home
+    void renderMediaFileStatus(const IGFD::FileInfos* info);
+    bool mediaFileVisible(const IGFD::FileInfos* info);
+    bool renderMediaFileToolbar();
+    void renderMediaDetailsPopup();
+    void renderMediaDetails();
+    std::string m_mediaDialogRequestedPath;
+    bool m_mediaDialogRequestedStartOver = false;
+    bool m_mediaDialogRequestedAutoResume = false;
+    std::string m_mediaDetailsPath;
+    bool m_pendingStartOver = false;
+    bool m_pendingAutoResume = false;
+    bool m_autoResumeOnLoad = false;
+    bool m_mediaInlineDetails = false;
+    bool m_showMediaDetailsPopup = false;
+    int m_mediaFileFilter = 0;
+
+    // ImGuiFileDialog keeps Places only in memory. Mirror its serialized
+    // bookmark state to a crash-safe per-user file whenever it changes.
+    void persistFileDialogBookmarks();
+    std::string m_fileDialogBookmarksSnapshot;
+    double m_bookmarkSaveRetryAfter = 0.0;
 
     // Recent-files modal opened from the home screen.
     bool m_showRecentDialog = false;
     void renderRecentDialog();
+
+    // Crash-tolerant playback resume.  The prompt deliberately waits behind
+    // the initial track picker so two modal dialogs never compete for focus.
+    void renderResumeDialog();
+    void checkpointCurrentPlayback();
+    std::string m_currentMediaPath;
+    ResumeStore::Entry m_resumeEntry;
+    bool   m_resumePromptPending = false;
+    bool   m_resumePopupOpen = false;
+    bool   m_resumeTrackingReady = false;
+    float  m_resumeCheckpointElapsed = 0.0f;
+    double m_resumeLastPosition = 0.0;
+    bool   m_resumeLastPaused = true;
+    int    m_resumeLastAudioTrack = -1;
+    int    m_resumeLastSubtitleTrack = -1;
+    bool   m_resumeLastSubtitlesVisible = true;
 
     // Logo shown above the wordmark on the home screen.  Stays 0 when the
     // asset is missing, and the layout then closes the gap.
@@ -66,7 +105,7 @@ private:
     bool m_playbackMenuPausedUs      = false;
     bool m_playbackMenuFreshlyShown  = true;
     void openPlaybackMenu();
-    void closePlaybackMenu();
+    void closePlaybackMenu(bool forcePlay = false);
     // Transport bindings; must be called after ImGui::NewFrame().
     void handlePlaybackShortcuts(bool prefsOpen, bool anyPopup);
     void renderPlaybackMenu();
@@ -159,15 +198,7 @@ private:
     // Preferences page (Spatial / Headphone EQ tabs).
     bool m_showControlPanel = false;
 
-    // Left-stick edge tracking — used by processInput()'s LStick →
-    // arrow-key forwarder so the analog stick can drive ImGui nav the
-    // same way the d-pad does.  Edge-detection avoids spamming events
-    // every frame; ImGui's own repeat timing handles the held case.
     int  m_activePad = -1;   // GLFW joystick slot in use, -1 = none
-    bool m_lstickLeft  = false;
-    bool m_lstickRight = false;
-    bool m_lstickUp    = false;
-    bool m_lstickDown  = false;
 
     // File-dialog gamepad shortcuts.  When ImGuiFileDialog is open we
     // forward Y → Enter (confirm / open folder) and X → Backspace

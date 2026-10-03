@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -65,7 +66,14 @@ public:
     void useExternalBinaural(const std::string& pcmPath);
     void revertInternalAudio();
     bool usingExternalBinaural() const { return m_externalBinaural; }
+
+    // Switch between the patched HRTF filter and mpv's ordinary audio
+    // output.  This is a live filter-chain reconfiguration; no restart is
+    // required.  The shared flag is updated only when the switch succeeds.
+    bool setSpatialAudioEnabled(bool enabled);
+    bool spatialAudioEnabled() const { return m_spatialAudioEnabled; }
     void setSubtitleTrack(int id);
+    void setSubtitlesVisible(bool visible);
     void toggleSubtitles();
     void loadSubtitleFile(const std::string& path);
     void adjustSubDelay(double deltaSec);
@@ -105,11 +113,18 @@ public:
 
     void update();
     void renderToFBO(unsigned int fbo, int width, int height);
-    bool needsRender() const { return m_renderRequested; }
+    // Call immediately after the app has presented/swapped the frame.  This
+    // lets libmpv correlate its target times with the compositor's clock.
+    void reportSwap();
+    bool needsRender() const { return m_renderRequested.load(); }
 
     // Returns true once after a fresh load completes; the flag self-clears
     // so the host app can use it as a one-shot "show track picker" trigger.
     bool consumeFreshFileLoaded();
+
+    // True once when playback naturally reaches EOF. Stops caused by
+    // loading another file or shutting down are deliberately excluded.
+    bool consumeReachedEnd();
 
     bool hasVideo() const { return m_hasVideo; }
     bool isPaused() const { return m_paused; }
@@ -118,6 +133,10 @@ public:
     std::string getFilename() const { return m_filename; }
     const std::vector<AudioTrack>& getAudioTracks() const { return m_audioTracks; }
     int getCurrentAudioTrackId() const { return m_currentAudioTrack; }
+    int getResumeAudioTrackId() const {
+        return (m_externalBinaural && m_internalAid > 0)
+            ? m_internalAid : m_currentAudioTrack;
+    }
     const std::vector<SubtitleTrack>& getSubtitleTracks() const { return m_subtitleTracks; }
     int getCurrentSubtitleTrackId() const { return m_currentSubtitleTrack; }
     bool areSubtitlesVisible() const { return m_subtitlesVisible; }
@@ -134,12 +153,13 @@ private:
 
     HrtfSharedState* m_sharedState = nullptr;
     bool m_hasVideo = false;
-    bool m_renderRequested = false;
+    std::atomic_bool m_renderRequested{false};
     bool m_paused = true;
     double m_position = 0.0;
     double m_duration = 0.0;
     std::string m_filename;
     std::string m_afChain;               // saved HRTF filter option
+    bool        m_spatialAudioEnabled = true;
     bool        m_externalBinaural = false;
     int         m_internalAid = -1;      // track to return to on revert
     std::vector<AudioTrack> m_audioTracks;
@@ -153,10 +173,30 @@ private:
     bool m_verboseMpvLogs = false;
     std::string m_silencePath;
 
+    // Debug-only, event-driven sync telemetry.  These values are populated
+    // by observed mpv properties, avoiding synchronous property reads on the
+    // render thread while advanced render control is active.
+    int64_t m_audioInputRate = 0;
+    int64_t m_audioOutputRate = 0;
+    std::string m_audioOutputFormat;
+    std::string m_audioOutputChannels;
+    std::string m_audioDevice;
+    std::string m_currentAudioOutput;
+    int64_t m_voDropFrames = 0;
+    int64_t m_mistimedFrames = 0;
+    double m_avSync = 0.0;
+    double m_totalAvSyncChange = 0.0;
+    double m_displayFps = 0.0;
+    double m_estimatedDisplayFps = 0.0;
+    double m_audioSpeedCorrection = 1.0;
+    double m_videoSpeedCorrection = 1.0;
+    double m_nextSyncLogPosition = 0.0;
+
     double m_volume = 100.0;
     bool   m_muted  = false;
     double m_speed  = 1.0;
     std::vector<Chapter> m_chapters;
 
     bool m_freshFileLoaded = false;
+    bool m_reachedEnd = false;
 };

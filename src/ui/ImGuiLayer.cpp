@@ -9,6 +9,8 @@
 
 #include "core/Settings.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 ImGuiLayer::ImGuiLayer() = default;
@@ -74,6 +76,22 @@ constexpr int kAccentCount = (int)(sizeof(kAccents) / sizeof(kAccents[0]));
 
 ImVec4 g_accent = hex(0xFF2E4D);
 ImGuiLayer::Fonts g_fonts;
+float g_automaticScale = 1.0f;
+float g_effectiveScale = 1.0f;
+
+// 1280x800 is the smallest first-class TV/handheld canvas.  Scaling from
+// both axes (and taking the smaller) keeps 16:9, 16:10 and ultrawide layouts
+// equally usable: 1080p resolves to 1.35x and 4K to 2.70x.
+float resolutionScale(GLFWwindow* window) {
+    if (!window) return 1.0f;
+    int width = 0, height = 0;
+    glfwGetWindowSize(window, &width, &height);
+    if (width <= 0 || height <= 0) return 1.0f;
+    const float fit = std::min(width / 1280.0f, height / 800.0f);
+    // Quantise to stop tiny compositor resize fluctuations from rebuilding
+    // the style on consecutive frames.
+    return std::round(std::clamp(fit, 1.0f, 2.75f) * 20.0f) / 20.0f;
+}
 
 }  // namespace
 
@@ -89,6 +107,8 @@ ImVec4 ImGuiLayer::accentPreview(int index, int mode) {
 }
 
 const ImGuiLayer::Fonts& ImGuiLayer::fonts() { return g_fonts; }
+float ImGuiLayer::automaticScale() { return g_automaticScale; }
+float ImGuiLayer::effectiveScale() { return g_effectiveScale; }
 
 void ImGuiLayer::applyTheme() {
     const Settings::AppearanceConfig& a = Settings::appearanceConfig();
@@ -223,7 +243,9 @@ void ImGuiLayer::applyTheme() {
     // scaled would compound; this way the scale is always relative to the
     // freshly-built base, and Preferences can call applyTheme() on every
     // slider tick without drift.
-    const float scale = (a.uiScale > 0.5f && a.uiScale < 4.0f) ? a.uiScale : 1.0f;
+    const float userScale = std::clamp(a.uiScale, 0.85f, 1.35f);
+    const float scale = std::clamp(g_automaticScale * userScale, 1.0f, 3.25f);
+    g_effectiveScale = scale;
     if (scale != 1.0f)
         s.ScaleAllSizes(scale);
     // Fonts scale separately: ScaleAllSizes only touches geometry, and the
@@ -382,8 +404,14 @@ void ImGuiLayer::init(GLFWwindow* window) {
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 410");
 
+    m_window = window;
+    g_automaticScale = resolutionScale(window);
     setupFonts();
     applyTheme();
+
+    fprintf(stderr, "[UI] TV scale: automatic=%.2f user=%.2f effective=%.2f\n",
+            g_automaticScale, Settings::appearanceConfig().uiScale,
+            g_effectiveScale);
 
     m_initialized = true;
 }
@@ -391,6 +419,16 @@ void ImGuiLayer::init(GLFWwindow* window) {
 void ImGuiLayer::beginFrame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+
+    // Fullscreen/borderless switches and Gamescope resolution changes can
+    // happen after startup.  Follow them live instead of requiring a restart.
+    const float automatic = resolutionScale(m_window);
+    if (std::fabs(automatic - g_automaticScale) >= 0.01f) {
+        g_automaticScale = automatic;
+        applyTheme();
+        fprintf(stderr, "[UI] TV scale changed: automatic=%.2f effective=%.2f\n",
+                g_automaticScale, g_effectiveScale);
+    }
     ImGui::NewFrame();
 }
 
@@ -407,4 +445,5 @@ void ImGuiLayer::shutdown() {
     ImGui::DestroyContext();
 
     m_initialized = false;
+    m_window = nullptr;
 }

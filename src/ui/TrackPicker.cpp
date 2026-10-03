@@ -581,8 +581,9 @@ void TrackPicker::render() {
     if (!m_isOpen) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 size(std::min(1200.0f, vp->Size.x * 0.9f),
-                 std::min(680.0f,  vp->Size.y * 0.85f));
+    const float tv = ImGuiLayer::effectiveScale();
+    ImVec2 size(std::min(1200.0f * tv, vp->Size.x * 0.9f),
+                 std::min(680.0f * tv,  vp->Size.y * 0.85f));
     ImVec2 pos(vp->Pos.x + (vp->Size.x - size.x) * 0.5f,
                 vp->Pos.y + (vp->Size.y - size.y) * 0.5f);
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
@@ -605,7 +606,8 @@ void TrackPicker::render() {
     ImGui::Text("%s", title);
     std::string fname = m_player->getFilename();
     if (!fname.empty()) {
-        ImGui::SameLine();
+        // Filenames are unbounded user data. Give them their own clipped
+        // line instead of letting them collide with the modal title.
         ImGui::TextDisabled("\xc2\xb7  %s", fname.c_str());
     }
     ImGui::Separator();
@@ -624,9 +626,10 @@ void TrackPicker::render() {
             ImGui::BeginChild("##cards", ImVec2(0, -footerH), false);
             ImGui::PopStyleVar();
 
-            const float cardH = 170.0f;
+            const float cardH = 170.0f * tv;
             const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
-                                        style.ItemSpacing.x, 240.0f, 340.0f);
+                                        style.ItemSpacing.x,
+                                        240.0f * tv, 340.0f * tv);
 
             // Render order: language match first, then most channels,
             // then by track ID for stability.  Keeps the user's preferred
@@ -657,7 +660,7 @@ void TrackPicker::render() {
             ImGui::TextDisabled(m_isAutoLoad
                 ? "Click a track to start playback."
                 : "Click a track to switch.");
-            const float btnW = 100.0f;
+            const float btnW = 100.0f * tv;
             ImGui::SameLine(ImGui::GetContentRegionAvail().x +
                              ImGui::GetCursorPosX() - btnW);
             if (ImGui::Button("Cancel", ImVec2(btnW, 0))) {
@@ -679,7 +682,9 @@ void TrackPicker::render() {
 
         // Footer here is two rows: a strip with visibility / delay /
         // load-file controls, separator, then the Text + Cancel button.
-        const float strip1H = ImGui::GetFrameHeightWithSpacing();
+        const bool wrapFooter = ImGui::GetContentRegionAvail().x < 760.0f * tv;
+        const float strip1H = ImGui::GetFrameHeightWithSpacing() *
+                              (wrapFooter ? 2.0f : 1.0f);
         const float strip2H = ImGui::GetFrameHeightWithSpacing();
         const float footerH = strip1H + strip2H +
                                style.ItemSpacing.y * 4.0f + 4.0f;
@@ -688,9 +693,10 @@ void TrackPicker::render() {
         ImGui::BeginChild("##subcards", ImVec2(0, -footerH), false);
         ImGui::PopStyleVar();
 
-        const float cardH = 130.0f;     // shorter — sub cards carry less
+        const float cardH = 130.0f * tv; // shorter — sub cards carry less
         const auto g = computeGrid(ImGui::GetContentRegionAvail().x,
-                                    style.ItemSpacing.x, 220.0f, 320.0f);
+                                    style.ItemSpacing.x,
+                                    220.0f * tv, 320.0f * tv);
 
         // Sort subs by preferred-language match first, then by id.
         const std::string& prefSub = Settings::preferredSubLang();
@@ -725,13 +731,13 @@ void TrackPicker::render() {
         ImGui::TextDisabled("Sync");
         ImGui::SameLine();
         float delay = (float)m_player->getSubDelay();
-        ImGui::SetNextItemWidth(220.0f);
+        ImGui::SetNextItemWidth(220.0f * tv);
         if (ImGui::SliderFloat("##subdelay", &delay, -10.0f, 10.0f, "%+.2f s"))
             m_player->adjustSubDelay(delay - (float)m_player->getSubDelay());
         ImGui::SameLine();
         if (ImGui::SmallButton("Reset"))
             m_player->resetSubDelay();
-        ImGui::SameLine(0, style.ItemSpacing.x * 2);
+        if (!wrapFooter) ImGui::SameLine(0, style.ItemSpacing.x * 2);
 
         if (ImGui::Button(ICON_LC_FILE_PLUS "  Load file...")) {
             // Reuse the "open_subtitle" dialog the File menu already opens —
@@ -740,7 +746,7 @@ void TrackPicker::render() {
             // The native Win32 picker this replaces was also unusable with a
             // gamepad, which is the whole point of the sofa build.
             IGFD::FileDialogConfig cfg;
-            cfg.path  = ".";
+            cfg.path  = Settings::fileDialogStartDirectory();
             cfg.flags = ImGuiFileDialogFlags_Modal |
                         ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
             ImGuiFileDialog::Instance()->OpenDialog(
@@ -753,7 +759,7 @@ void TrackPicker::render() {
         ImGui::Separator();
 
         ImGui::TextDisabled("Click a card to switch the active subtitle.");
-        const float btnW = 100.0f;
+        const float btnW = 100.0f * tv;
         ImGui::SameLine(ImGui::GetContentRegionAvail().x +
                          ImGui::GetCursorPosX() - btnW);
         if (ImGui::Button("Close", ImVec2(btnW, 0))) {

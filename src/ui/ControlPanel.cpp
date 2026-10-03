@@ -599,12 +599,52 @@ void ControlPanel::renderSpatialContent() {
     if (!m_profilesScanned)
         scanProfiles();
 
-    // HRTF master toggle + master volume share the top "essentials" row
-    // — the things you reach for most often live above any header.
-    bool enabled = atomic_load(&m_state->hrtf_enabled) != 0;
-    if (ImGui::Checkbox("HRTF Enabled", &enabled)) {
-        atomic_store(&m_state->hrtf_enabled, enabled ? 1 : 0);
+    // Explicit, mutually-exclusive output mode.  The old checkbox only
+    // changed a stored flag while the HRTF filter kept running, so its visual
+    // state did not describe the audio path.  These choices call the player
+    // and reconfigure mpv's filter chain live.
+    bool spatial = atomic_load(&m_state->hrtf_enabled) != 0;
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float choiceW = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+
+    auto modeChoice = [&](const char* label, bool active) {
+        if (active) {
+            ImVec4 bg = accent; bg.w = 0.36f;
+            ImVec4 hover = accent; hover.w = 0.52f;
+            ImGui::PushStyleColor(ImGuiCol_Button, bg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, accent);
+            ImGui::PushStyleColor(ImGuiCol_Border, accent);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+        }
+        bool clicked = ImGui::Button(label, ImVec2(choiceW, 44.0f));
+        if (active) {
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(4);
+        }
+        return clicked;
+    };
+
+    bool requested = spatial;
+    if (modeChoice("Spatial Audio", spatial)) requested = true;
+    ImGui::SameLine(0.0f, gap);
+    if (modeChoice("Stereo", !spatial)) requested = false;
+
+    if (requested != spatial) {
+        if (m_player) {
+            m_player->setSpatialAudioEnabled(requested);
+        } else {
+            atomic_store(&m_state->hrtf_enabled, requested ? 1 : 0);
+        }
+        spatial = atomic_load(&m_state->hrtf_enabled) != 0;
     }
+    ImGui::TextDisabled("%s",
+        spatial ? "HRTF virtualization is active."
+                : "Ordinary mpv stereo output; HRTF is removed.");
+
+    // Master volume stays immediately below the mode selector — these are
+    // the two output controls users should not have to hunt for.
     {
         float vol = atomic_load(&m_state->master_volume);
         if (ImGui::SliderFloat("Master Volume", &vol, 0.0f, 1.5f, "%.2f"))

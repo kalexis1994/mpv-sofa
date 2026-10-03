@@ -65,19 +65,20 @@ struct DisplayConfig {
 struct AppearanceConfig {
     int mode   = 0;   // 0 = dark ("darkroom"), 1 = light ("daylight")
     int accent = 0;   // 0=red 1=orange 2=yellow 3=green 4=blue 5=magenta
-    // Global UI scale.  Every size in the theme is a hand-picked pixel
-    // constant tuned for a desktop monitor at arm's length; on a TV across
-    // a room the same layout is unreadable.  1.0 keeps the desktop look,
-    // ~1.5 is the useful setting for a couch.
+    // Fine-tuning multiplier on top of automatic resolution-aware TV scale.
+    // 1.0 is the intended couch size; 0.85..1.35 lets the user compensate
+    // for viewing distance without making 4K fall back to desktop sizing.
     float uiScale = 1.0f;
 };
 
-// Playback / sync settings (audio offset for BT lip-sync etc.).
+// Playback / sync settings (fixed user offset only; device clock/rate
+// synchronization is handled dynamically by mpv).
 // Sub-delay lives in the subtitle picker because it's typically per-
 // file metadata; audio-delay is set-once-per-headphone so it gets a
 // permanent home in Preferences instead.
 struct PlaybackConfig {
     float audioDelay = 0.0f;   // seconds; negative = audio earlier
+    int watchedThresholdPercent = 90;
 };
 
 // Real-time 35mm release-print projection grain emulation, applied
@@ -199,5 +200,10 @@ void                setServerConfig(const ServerConfig& c);
 const std::vector<std::string>& recentFiles();
 void  pushRecent(const std::string& fullPath);
 void  clearRecents();
+
+// File explorer continuity. Returns the last valid directory, falling back
+// to the user's home directory (and finally "." on unusual environments).
+std::string fileDialogStartDirectory();
+void setLastBrowseDirectory(const std::string& directory);
 
 } // namespace Settings

@@ -57,7 +57,8 @@ typedef struct HrtfSharedState {
     // Master volume
     HRTF_ATOMIC(float)    master_volume;                         // 0.0 - 1.0
 
-    // Enable/disable HRTF processing
+    // Output mode persisted as the legacy hrtf_enabled key:
+    // 1 = Spatial Audio (HRTF filter), 0 = Stereo (empty filter chain).
     HRTF_ATOMIC(int32_t)  hrtf_enabled;
 
     // Room reverb parameters (set by UI, read by filter)

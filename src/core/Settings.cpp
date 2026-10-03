@@ -4,8 +4,11 @@
 #include "audio/MpvPlayer.h"
 
 #include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 
@@ -24,6 +27,7 @@ struct Snapshot {
     // UI
     bool show_controls = false;
     bool show_3d_viz   = false;
+    std::string last_browse_dir;
 
     // Output
     std::string sofa_path;
@@ -96,6 +100,7 @@ struct Snapshot {
     bool operator==(const Snapshot& o) const {
         if (show_controls != o.show_controls) return false;
         if (show_3d_viz   != o.show_3d_viz)   return false;
+        if (last_browse_dir != o.last_browse_dir) return false;
         if (sofa_path != o.sofa_path) return false;
         if (master_volume != o.master_volume) return false;
         if (hrtf_enabled  != o.hrtf_enabled)  return false;
@@ -156,6 +161,7 @@ struct Snapshot {
         if (display.gamutMode != o.display.gamutMode) return false;
         if (display.panscan   != o.display.panscan)   return false;
         if (playback.audioDelay != o.playback.audioDelay) return false;
+        if (playback.watchedThresholdPercent != o.playback.watchedThresholdPercent) return false;
         if (appearance.mode   != o.appearance.mode)   return false;
         if (appearance.accent != o.appearance.accent) return false;
         if (appearance.uiScale != o.appearance.uiScale) return false;
@@ -174,6 +180,7 @@ std::string g_iniPath;
 // without dragging the full snapshot around.
 std::string g_prefAudioLang;
 std::string g_prefSubLang;
+std::string g_lastBrowseDir;
 int         g_roomPreset = 1;   // 0=studio, 1=home, 2=cinema, 3=concert
 Settings::SubtitleStyle  g_subStyle;
 Settings::CinemaGrain    g_grain;
@@ -224,6 +231,7 @@ Snapshot capture(const HrtfSharedState* s, bool showCtrl, bool showViz) {
     Snapshot snap;
     snap.show_controls = showCtrl;
     snap.show_3d_viz   = showViz;
+    snap.last_browse_dir = g_lastBrowseDir;
 
     snap.sofa_path     = s->sofa_path;
     snap.master_volume = atomic_load(&s->master_volume);
@@ -390,6 +398,7 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
             const KV& kv = it->second;
             if (showControls) *showControls = getI(kv, "show_controls", *showControls) != 0;
             if (show3DViz)    *show3DViz    = getI(kv, "show_3d_viz",   *show3DViz)    != 0;
+            g_lastBrowseDir = getS(kv, "last_browse_dir", "");
         }
         if (auto it = ini.find("output"); it != ini.end()) {
             const KV& kv = it->second;
@@ -466,12 +475,22 @@ void Settings::load(HrtfSharedState* state, bool* showControls, bool* show3DViz)
         if (auto it = ini.find("playback"); it != ini.end()) {
             const KV& kv = it->second;
             g_playback.audioDelay = getF(kv, "audio_delay", g_playback.audioDelay);
+            g_playback.watchedThresholdPercent = std::clamp(
+                getI(kv, "watched_threshold_percent", 90), 70, 99);
         }
         if (auto it = ini.find("appearance"); it != ini.end()) {
             const KV& kv = it->second;
             g_appearance.mode   = getI(kv, "mode",   g_appearance.mode);
             g_appearance.accent = getI(kv, "accent", g_appearance.accent);
             g_appearance.uiScale = getF(kv, "ui_scale", g_appearance.uiScale);
+            // 0 was written by an older build before the scale control was
+            // initialised. Treat it as neutral, then migrate the former
+            // 1..2 manual range into the narrower automatic-TV fine tuning.
+            if (!std::isfinite(g_appearance.uiScale) ||
+                g_appearance.uiScale < 0.5f)
+                g_appearance.uiScale = 1.0f;
+            g_appearance.uiScale = std::clamp(g_appearance.uiScale,
+                                               0.85f, 1.35f);
         }
         if (auto it = ini.find("window"); it != ini.end()) {
             const KV& kv = it->second;
@@ -558,6 +577,7 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
     fprintf(f, "[ui]\n");
     fprintf(f, "show_controls=%d\n", showControls ? 1 : 0);
     fprintf(f, "show_3d_viz=%d\n",   show3DViz    ? 1 : 0);
+    fprintf(f, "last_browse_dir=%s\n", g_lastBrowseDir.c_str());
     fprintf(f, "\n");
 
     fprintf(f, "[output]\n");
@@ -638,6 +658,7 @@ bool Settings::save(const HrtfSharedState* state, bool showControls, bool show3D
 
     fprintf(f, "[playback]\n");
     fprintf(f, "audio_delay=%g\n", g_playback.audioDelay);
+    fprintf(f, "watched_threshold_percent=%d\n", g_playback.watchedThresholdPercent);
     fprintf(f, "\n");
 
     fprintf(f, "[window]\n");
@@ -731,6 +752,7 @@ void Settings::resetToDefaults(HrtfSharedState* state, bool* showControls, bool*
 
     g_prefAudioLang.clear();
     g_prefSubLang.clear();
+    g_lastBrowseDir.clear();
     g_roomPreset = 1;
     g_subStyle = SubtitleStyle{};
     g_grain    = CinemaGrain{};
@@ -761,7 +783,11 @@ const Settings::DisplayConfig& Settings::displayConfig() { return g_display; }
 void Settings::setDisplayConfig(const DisplayConfig& c)  { g_display = c; }
 
 const Settings::AppearanceConfig& Settings::appearanceConfig() { return g_appearance; }
-void Settings::setAppearanceConfig(const AppearanceConfig& c)  { g_appearance = c; }
+void Settings::setAppearanceConfig(const AppearanceConfig& c)  {
+    g_appearance = c;
+    if (!std::isfinite(g_appearance.uiScale)) g_appearance.uiScale = 1.0f;
+    g_appearance.uiScale = std::clamp(g_appearance.uiScale, 0.85f, 1.35f);
+}
 
 void Settings::applyDisplayConfigToPlayer(MpvPlayer* p) {
     if (!p) return;
@@ -837,6 +863,34 @@ void Settings::pushRecent(const std::string& fullPath) {
 
 void Settings::clearRecents() {
     g_recents.clear();
+}
+
+std::string Settings::fileDialogStartDirectory() {
+    auto validDirectory = [](const std::string& value) {
+        if (value.empty()) return false;
+        std::error_code ec;
+        return std::filesystem::is_directory(
+            std::filesystem::u8path(value), ec) && !ec;
+    };
+
+    if (validDirectory(g_lastBrowseDir)) return g_lastBrowseDir;
+
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+#else
+    const char* home = std::getenv("HOME");
+#endif
+    if (home && validDirectory(home)) return home;
+    return ".";
+}
+
+void Settings::setLastBrowseDirectory(const std::string& directory) {
+    if (directory.empty()) return;
+    std::error_code ec;
+    const auto path = std::filesystem::u8path(directory);
+    if (!std::filesystem::is_directory(path, ec) || ec) return;
+    const auto canonical = std::filesystem::weakly_canonical(path, ec);
+    g_lastBrowseDir = ec ? directory : canonical.u8string();
 }
 
 void Settings::applyCinemaGrainToPlayer(MpvPlayer* p) {

@@ -1,9 +1,11 @@
 #include "TransportBar.h"
 #include "audio/MpvPlayer.h"
+#include "ui/ImGuiLayer.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <IconsLucide.h>
 #include <cstdio>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -30,6 +32,23 @@ void TransportBar::render() {
 
 namespace {
 
+std::string Ellipsize(const std::string& text, float maxWidth) {
+    if (maxWidth <= 0.0f || ImGui::CalcTextSize(text.c_str()).x <= maxWidth)
+        return text;
+    static const char* suffix = "...";
+    const float suffixW = ImGui::CalcTextSize(suffix).x;
+    if (suffixW >= maxWidth) return suffix;
+
+    size_t lo = 0, hi = text.size();
+    while (lo < hi) {
+        const size_t mid = (lo + hi + 1) / 2;
+        std::string candidate = text.substr(0, mid) + suffix;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) lo = mid;
+        else hi = mid - 1;
+    }
+    return text.substr(0, lo) + suffix;
+}
+
 // Custom timeline.  Returns true and writes the new position to
 // `*outPosSec` when the user clicks/drags to seek, so the caller can issue
 // the actual seek.  Renders progress fill, chapter ticks, and a hover
@@ -40,7 +59,8 @@ bool DrawTimeline(double position, double duration,
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 pos = ImGui::GetCursorScreenPos();
     float  w   = ImGui::GetContentRegionAvail().x;
-    float  h   = 14.0f;
+    const float tv = ImGuiLayer::effectiveScale();
+    float  h   = 14.0f * tv;
     if (w < 16.0f) w = 16.0f;
 
     ImGui::InvisibleButton("##timeline", ImVec2(w, h));
@@ -54,15 +74,15 @@ bool DrawTimeline(double position, double duration,
     ImU32 colHover    = ImGui::GetColorU32(ImGuiCol_Text, 0.75f);
     ImU32 colBorder   = ImGui::GetColorU32(ImGuiCol_Border);
 
-    float trackTop    = pos.y + (h - 8.0f) * 0.5f;
-    float trackBot    = trackTop + 8.0f;
-    float rounding    = 3.0f;
+    float trackTop    = pos.y + (h - 8.0f * tv) * 0.5f;
+    float trackBot    = trackTop + 8.0f * tv;
+    float rounding    = 3.0f * tv;
 
     // Track background.
     dl->AddRectFilled(ImVec2(pos.x, trackTop),
                       ImVec2(pos.x + w, trackBot), colTrack, rounding);
     dl->AddRect(ImVec2(pos.x, trackTop),
-                ImVec2(pos.x + w, trackBot), colBorder, rounding, 0, 1.0f);
+                ImVec2(pos.x + w, trackBot), colBorder, rounding, 0, 1.0f * tv);
 
     // Fill up to current position.
     if (duration > 0) {
@@ -81,7 +101,7 @@ bool DrawTimeline(double position, double duration,
             if (frac <= 0 || frac >= 1) continue;
             float x = pos.x + frac * w;
             dl->AddLine(ImVec2(x, pos.y),
-                        ImVec2(x, pos.y + h), colChapter, 1.0f);
+                        ImVec2(x, pos.y + h), colChapter, 1.0f * tv);
         }
     }
 
@@ -92,8 +112,8 @@ bool DrawTimeline(double position, double duration,
         if (frac > 1) frac = 1;
         float cx = pos.x + frac * w;
         float cy = (trackTop + trackBot) * 0.5f;
-        dl->AddCircleFilled(ImVec2(cx, cy), 5.0f, colFill);
-        dl->AddCircle      (ImVec2(cx, cy), 5.0f, colBorder, 0, 1.0f);
+        dl->AddCircleFilled(ImVec2(cx, cy), 5.0f * tv, colFill);
+        dl->AddCircle      (ImVec2(cx, cy), 5.0f * tv, colBorder, 0, 1.0f * tv);
     }
 
     // Hover indicator + tooltip with time at x.
@@ -105,7 +125,7 @@ bool DrawTimeline(double position, double duration,
         float vx = pos.x + frac * w;
 
         dl->AddLine(ImVec2(vx, pos.y),
-                    ImVec2(vx, pos.y + h), colHover, 1.5f);
+                    ImVec2(vx, pos.y + h), colHover, 1.5f * tv);
 
         double tHover = frac * duration;
         char buf[32];
@@ -148,8 +168,9 @@ void TransportBar::renderContent() {
     {
         std::string filename = m_player->getFilename();
         if (!filename.empty()) {
-            ImGui::TextDisabled("%s", filename.c_str());
             const auto& chapters = m_player->getChapters();
+            const float rowStart = ImGui::GetCursorPosX();
+            const float avail = ImGui::GetContentRegionAvail().x;
             if (!chapters.empty()) {
                 int cur = m_player->getCurrentChapterIndex();
                 char info[128];
@@ -164,9 +185,24 @@ void TransportBar::renderContent() {
                              chapters.size());
                 }
                 float infoW = ImGui::CalcTextSize(info).x;
-                ImGui::SameLine(ImGui::GetContentRegionAvail().x +
-                                 ImGui::GetCursorPosX() - infoW);
-                ImGui::TextDisabled("%s", info);
+                const float gap = style.ItemSpacing.x;
+                // Keep metadata on the same row only when both fields retain
+                // useful room.  Otherwise it becomes a second row rather
+                // than painting over the filename.
+                if (infoW + gap < avail * 0.55f) {
+                    const std::string shown = Ellipsize(filename,
+                                                        avail - infoW - gap);
+                    ImGui::TextDisabled("%s", shown.c_str());
+                    ImGui::SameLine(rowStart + avail - infoW);
+                    ImGui::TextDisabled("%s", info);
+                } else {
+                    const std::string shown = Ellipsize(filename, avail);
+                    ImGui::TextDisabled("%s", shown.c_str());
+                    ImGui::TextDisabled("%s", info);
+                }
+            } else {
+                const std::string shown = Ellipsize(filename, avail);
+                ImGui::TextDisabled("%s", shown.c_str());
             }
         }
     }
@@ -194,8 +230,17 @@ void TransportBar::renderContent() {
     ImGui::Spacing();
 
     // ---------- Row 3: controls ----------
-    const float btnW    = 32.0f;
-    const float spacing = 4.0f;
+    const float tv      = ImGuiLayer::effectiveScale();
+    // A fixed 32 px box was smaller than the scaled icon plus horizontal
+    // padding.  Derive a TV-sized minimum that always contains its glyph.
+    const float btnW    = std::max(44.0f * tv,
+        ImGui::CalcTextSize(ICON_LC_SLIDERS).x + style.FramePadding.x * 2.0f);
+    const float spacing = 4.0f * tv;
+    const float volW    = 120.0f * tv;
+    const float speedW  = 60.0f * tv;
+    const float controlsAvail = ImGui::GetContentRegionAvail().x;
+    const float fullRowW = btnW * 11.0f + volW + speedW + spacing * 19.0f;
+    const bool wrapControls = fullRowW > controlsAvail;
 
     // Previous chapter
     bool hasChapters = !m_player->getChapters().empty();
@@ -214,8 +259,23 @@ void TransportBar::renderContent() {
 
     // Play / Pause
     const char* playLbl = m_player->isPaused() ? ICON_LC_PLAY : ICON_LC_PAUSE;
-    if (ImGui::Button(playLbl, ImVec2(btnW, 0)))
+    // The visible glyph changes with playback state, but the widget identity
+    // must not. With the icon alone as its label, ImGui generated a different
+    // ID after mpv acknowledged pause/play and dropped the nav focus because
+    // the previously-focused item had disappeared. "###" keeps the suffix as
+    // the stable ID while rendering only the current icon.
+    const std::string playPauseLabel =
+        std::string(playLbl) + "###transport_play_pause";
+    if (ImGui::Button(playPauseLabel.c_str(), ImVec2(btnW, 0)))
         m_player->togglePause();
+    if (m_focusPlayPauseRequested) {
+        // FocusItem is deliberately stronger than SetItemDefaultFocus: this
+        // request happens in an already-visible window after a shortcut or
+        // gamepad action, so there is no first-appearance default to apply.
+        ImGui::FocusItem();
+        ImGui::SetNavCursorVisible(true);
+        m_focusPlayPauseRequested = false;
+    }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(m_player->isPaused() ? "Play (Space)" : "Pause (Space)");
     ImGui::SameLine(0, spacing);
@@ -232,7 +292,7 @@ void TransportBar::renderContent() {
         m_player->nextChapter();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Next chapter");
     ImGui::EndDisabled();
-    ImGui::SameLine(0, spacing * 4);
+    if (!wrapControls) ImGui::SameLine(0, spacing * 4);
 
     // Volume — mute toggle + slider
     {
@@ -248,7 +308,7 @@ void TransportBar::renderContent() {
         ImGui::SameLine(0, spacing);
 
         float volPct = (float)m_player->getVolume();
-        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SetNextItemWidth(volW);
         if (ImGui::SliderFloat("##vol", &volPct, 0.0f, 100.0f, "%.0f%%")) {
             m_player->setVolume(volPct);
         }
@@ -260,7 +320,7 @@ void TransportBar::renderContent() {
         static const float speeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f};
         char speedLbl[32];
         snprintf(speedLbl, sizeof(speedLbl), "%.2gx", m_player->getSpeed());
-        ImGui::SetNextItemWidth(60.0f);
+        ImGui::SetNextItemWidth(speedW);
         if (ImGui::BeginCombo("##speed", speedLbl)) {
             for (float s : speeds) {
                 char itemLbl[16];

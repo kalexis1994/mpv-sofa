@@ -1,6 +1,9 @@
 #include "Application.h"
 #include "core/SharedState.h"
 #include "core/Settings.h"
+#include "core/ResumeStore.h"
+#include "core/WatchHistoryStore.h"
+#include "core/BookmarkStore.h"
 #include "platform/Platform.h"
 #include "renderer/Picking.h"
 #include "ui/ImageTexture.h"
@@ -18,6 +21,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <filesystem>
+#include <ctime>
 
 // Note: gamepad input is fed into ImGui by imgui_impl_glfw's built-in
 // ImGui_ImplGlfw_UpdateGamepads(), which is invoked from NewFrame.  An
@@ -36,6 +41,8 @@ static bool isSubtitleFile(const std::string& path) {
     return ext == ".srt" || ext == ".ass" || ext == ".ssa" ||
            ext == ".sub" || ext == ".vtt" || ext == ".idx";
 }
+
+static std::string resumeTimeLabel(double seconds);
 
 // Draw-list callback used immediately before an mpv video image. The texture
 // is already linear scRGB, unlike normal ImGui colors/textures which are sRGB
@@ -127,6 +134,8 @@ bool Application::init(int argc, char* argv[]) {
     installCrashHandler();
 #endif
     fprintf(stderr, "[App] init() starting\n");
+    ResumeStore::init();
+    WatchHistoryStore::init();
 
     // Parse command line
     for (int i = 1; i < argc; i++) {
@@ -288,6 +297,14 @@ bool Application::init(int argc, char* argv[]) {
         const ImVec4 dim (0.824f, 0.757f, 0.714f, 0.78f);
         auto* d = ImGuiFileDialog::Instance();
 
+        // Places groups used to be created lazily by OpenDialog().  That
+        // meant DeserializePlaces() below had no target on application
+        // startup and silently ignored every saved bookmark.  Create the
+        // editable group first; the library's lazy initialization is now
+        // idempotent and will preserve it on every later opening.
+        if (d->GetPlacesGroupPtr("Bookmarks") == nullptr)
+            d->AddPlacesGroup("Bookmarks", 0, true, true);
+
         // Pre-populate the left-hand "Bookmarks" group with common user
         // folders.  The "Devices" group is filled automatically by the
         // library with every mounted volume (C:, D:, F:, ... on Windows,
@@ -316,6 +333,14 @@ bool Application::init(int argc, char* argv[]) {
             }
         }
 
+        // ImGuiFileDialog deliberately leaves persistence to its host. Load
+        // user-created Places after the non-serializable built-ins so both
+        // sets coexist without duplicating Home/Videos on every launch.
+        std::string savedBookmarks;
+        if (BookmarkStore::load(&savedBookmarks))
+            d->DeserializePlaces(savedBookmarks);
+        m_fileDialogBookmarksSnapshot = d->SerializePlaces();
+
         d->SetFileStyle(IGFD_FileStyleByTypeDir,  "", sand, ICON_LC_FOLDER);
         d->SetFileStyle(IGFD_FileStyleByTypeLink, "", dim,  ICON_LC_FOLDER);
         // Video
@@ -336,6 +361,7 @@ bool Application::init(int argc, char* argv[]) {
 
     // Load file if specified
     if (!m_pendingFile.empty()) {
+        m_currentMediaPath = m_pendingFile;
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
         Settings::pushRecent(m_pendingFile);
@@ -506,6 +532,12 @@ void Application::run() {
         } else {
             m_window->swapBuffers();
         }
+        // Advanced libmpv render control needs the time of the actual
+        // presentation, not the earlier render-to-FBO call.  Gamescope and
+        // output devices can run from different clocks; reporting each swap
+        // gives mpv the feedback required to keep video timed to audio.
+        if (m_player)
+            m_player->reportSwap();
 
         frameCount++;
     }
@@ -624,7 +656,21 @@ void Application::renderAtmosObjectsUi() {
 
 // Per-frame: when a render finishes, swap mpv's audio to the sidecar.
 void Application::updateBinaural() {
-    if (!m_binauralArmed || !m_player) return;
+    if (!m_player) return;
+
+    // A pre-rendered binaural sidecar is spatial audio as well.  Stereo mode
+    // must not allow a pending render to switch it back in on a later frame.
+    if (!atomic_load(&m_sharedState->hrtf_enabled)) {
+        if (m_player->usingExternalBinaural())
+            m_player->revertInternalAudio();
+        if (m_binauralArmed) {
+            m_binauralArmed = false;
+            m_binaural.cancel();
+        }
+        return;
+    }
+
+    if (!m_binauralArmed) return;
 
     const auto st = m_binaural.state();
     const double pos      = m_player->getPosition();
@@ -689,6 +735,21 @@ void Application::processInput() {
             fprintf(dbg, "loadFile dispatch: '%s'\n", m_pendingFile.c_str());
             fclose(dbg);
         }
+        checkpointCurrentPlayback();
+        if (m_pendingStartOver) ResumeStore::clear(m_pendingFile);
+        m_autoResumeOnLoad = m_pendingAutoResume;
+        m_pendingStartOver = false;
+        m_pendingAutoResume = false;
+        m_currentMediaPath = m_pendingFile;
+        m_resumePromptPending = false;
+        m_resumePopupOpen = false;
+        m_resumeTrackingReady = false;
+        m_resumeCheckpointElapsed = 0.0f;
+        m_resumeLastPosition = 0.0;
+        m_resumeLastPaused = true;
+        m_resumeLastAudioTrack = -1;
+        m_resumeLastSubtitleTrack = -1;
+        m_resumeLastSubtitlesVisible = true;
         m_player->loadFile(m_pendingFile);
         m_controlPanel->loadSidecar(m_pendingFile);
         Settings::pushRecent(m_pendingFile);
@@ -739,20 +800,11 @@ void Application::processInput() {
     // moved into Preferences (Spatial / Headphone EQ tabs), so the
     // shortcut is gone — Ctrl+, opens the same controls now.
 
-    // Left stick → directional nav.  ImGui's nav system reads the
-    // GamepadDpad* keys for nav-move and uses GamepadLStick* keys for
-    // scrolling instead, so the stick by itself doesn't move the focus
-    // cursor.  Forward the analog state into the keyboard arrow keys
-    // (which ImGui *does* use for nav when NavEnableKeyboard is set)
-    // so a TV-mode user can drive the UI with either input.  We pick
-    // arrows over GamepadDpad* on purpose: imgui_impl_glfw's own gamepad
-    // poll continuously writes the real DPad button state into those
-    // keys, so an injection there would be overwritten on the same
-    // frame.  Arrow keys aren't touched by the backend, leaving us as
-    // the sole writer.
-    // Scan every slot rather than only the first: on a handheld the built-in
-    // controller is not always joystick 0, and plugging anything in ahead of
-    // it shifts the indices.  First one GLFW recognises as a gamepad wins.
+    // The patched GLFW backend feeds every standard gamepad key (D-pad,
+    // sticks, face buttons, shoulders and triggers) from this same selected
+    // device. Keep selection/logging here for diagnostics and for the file
+    // dialog's TV-specific Y/X shortcuts; do not synthesize arrow keys on top
+    // of ImGui navigation, which used to produce double or skipped moves.
     int pad = -1;
     for (int j = GLFW_JOYSTICK_1; j <= GLFW_JOYSTICK_LAST; j++) {
         if (glfwJoystickPresent(j) && glfwJoystickIsGamepad(j)) { pad = j; break; }
@@ -770,26 +822,7 @@ void Application::processInput() {
     if (pad >= 0) {
         GLFWgamepadstate gp;
         if (glfwGetGamepadState(pad, &gp)) {
-            const float dz = 0.45f;   // generous; avoids ghost moves on resting sticks
-            const float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X];
-            const float ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
-
-            const bool curLeft  = lx < -dz;
-            const bool curRight = lx >  dz;
-            const bool curUp    = ly < -dz;
-            const bool curDown  = ly >  dz;
-
             ImGuiIO& io = ImGui::GetIO();
-            if (curLeft  != m_lstickLeft)  io.AddKeyEvent(ImGuiKey_LeftArrow,  curLeft);
-            if (curRight != m_lstickRight) io.AddKeyEvent(ImGuiKey_RightArrow, curRight);
-            if (curUp    != m_lstickUp)    io.AddKeyEvent(ImGuiKey_UpArrow,    curUp);
-            if (curDown  != m_lstickDown)  io.AddKeyEvent(ImGuiKey_DownArrow,  curDown);
-
-            m_lstickLeft  = curLeft;
-            m_lstickRight = curRight;
-            m_lstickUp    = curUp;
-            m_lstickDown  = curDown;
-
             // File-dialog convenience bindings — only active while the
             // ImGuiFileDialog popup is up so they don't pollute the
             // rest of the UI.  Y forwards to Enter, mirroring the
@@ -821,6 +854,44 @@ void Application::processInput() {
 void Application::update(float dt) {
     if (m_player)
         m_player->update();
+
+    // Checkpoint frequently enough to survive a compositor/process kill,
+    // plus immediately at semantic boundaries. The atomic ResumeStore write
+    // means a power loss can lose at most the newest checkpoint, never the
+    // previous valid database.
+    if (m_player && !m_currentMediaPath.empty()) {
+        if (m_player->consumeReachedEnd()) {
+            WatchHistoryStore::finish(m_currentMediaPath, m_player->getDuration());
+            ResumeStore::clear(m_currentMediaPath);
+            m_resumePromptPending = false;
+            m_resumePopupOpen = false;
+        } else if (m_resumeTrackingReady && !m_resumePromptPending &&
+                   m_player->hasVideo()) {
+            const double pos = m_player->getPosition();
+            const bool paused = m_player->isPaused();
+            const int audioTrack = m_player->getResumeAudioTrackId();
+            const int subtitleTrack = m_player->getCurrentSubtitleTrackId();
+            const bool subtitlesVisible = m_player->areSubtitlesVisible();
+            m_resumeCheckpointElapsed += dt;
+            const double plausibleAdvance = std::max(2.0, (double)dt * 5.0);
+            const bool seeked = std::fabs(pos - m_resumeLastPosition) > plausibleAdvance;
+            const bool pauseChanged = paused != m_resumeLastPaused;
+            const bool trackChanged =
+                audioTrack != m_resumeLastAudioTrack ||
+                subtitleTrack != m_resumeLastSubtitleTrack ||
+                subtitlesVisible != m_resumeLastSubtitlesVisible;
+            if (m_resumeCheckpointElapsed >= 5.0f || seeked || pauseChanged ||
+                trackChanged) {
+                checkpointCurrentPlayback();
+                m_resumeCheckpointElapsed = 0.0f;
+            }
+            m_resumeLastPosition = pos;
+            m_resumeLastPaused = paused;
+            m_resumeLastAudioTrack = audioTrack;
+            m_resumeLastSubtitleTrack = subtitleTrack;
+            m_resumeLastSubtitlesVisible = subtitlesVisible;
+        }
+    }
 
     m_transportBar->setFullscreenState(m_videoFullscreen);
 
@@ -874,35 +945,79 @@ void Application::update(float dt) {
     // Open the audio-track picker the first frame after a fresh load.
     // mpv has been kept paused so we can take our time before the first
     // audible frame.
-    if (m_player && m_trackPicker &&
-        m_player->consumeFreshFileLoaded() &&
-        !m_player->getAudioTracks().empty()) {
-        // Apply language preferences: pick the first track whose lang
-        // matches Settings::preferredAudio/SubLang.  The user can still
-        // override from the picker that opens right after.
-        const std::string& prefAud = Settings::preferredAudioLang();
-        if (!prefAud.empty()) {
-            for (const auto& t : m_player->getAudioTracks())
-                if (Settings::langMatches(t.lang, prefAud)) {
+    if (m_player && m_trackPicker && m_player->consumeFreshFileLoaded()) {
+        m_resumePromptPending =
+            ResumeStore::find(m_currentMediaPath, &m_resumeEntry);
+
+        // A per-file resume choice is more specific than the global language
+        // preference. Restore only IDs that still exist in this exact file;
+        // ResumeStore's size+mtime fingerprint already guards replacements.
+        bool restoredAudio = false;
+        if (m_resumePromptPending && m_resumeEntry.audioTrackId >= 0) {
+            for (const auto& t : m_player->getAudioTracks()) {
+                if (!t.isExternal && t.id == m_resumeEntry.audioTrackId) {
                     m_player->setAudioTrack(t.id);
+                    restoredAudio = true;
                     break;
                 }
+            }
         }
-        const std::string& prefSub = Settings::preferredSubLang();
-        if (!prefSub.empty()) {
-            for (const auto& s : m_player->getSubtitleTracks())
-                if (Settings::langMatches(s.lang, prefSub)) {
+        if (!restoredAudio) {
+            const std::string& prefAud = Settings::preferredAudioLang();
+            if (!prefAud.empty()) {
+                for (const auto& t : m_player->getAudioTracks())
+                    if (Settings::langMatches(t.lang, prefAud)) {
+                        m_player->setAudioTrack(t.id);
+                        break;
+                    }
+            }
+        }
+
+        bool restoredSubtitle = false;
+        if (m_resumePromptPending && m_resumeEntry.subtitleTrackId == 0) {
+            m_player->setSubtitleTrack(0);
+            restoredSubtitle = true;
+        } else if (m_resumePromptPending &&
+                   m_resumeEntry.subtitleTrackId > 0) {
+            for (const auto& s : m_player->getSubtitleTracks()) {
+                if (s.id == m_resumeEntry.subtitleTrackId) {
                     m_player->setSubtitleTrack(s.id);
+                    m_player->setSubtitlesVisible(
+                        m_resumeEntry.subtitlesVisible);
+                    restoredSubtitle = true;
                     break;
                 }
+            }
+        }
+        if (!restoredSubtitle) {
+            const std::string& prefSub = Settings::preferredSubLang();
+            if (!prefSub.empty()) {
+                for (const auto& s : m_player->getSubtitleTracks())
+                    if (Settings::langMatches(s.lang, prefSub)) {
+                        m_player->setSubtitleTrack(s.id);
+                        break;
+                    }
+            }
         }
         // HRTF_UI_OPEN=subs opens the subtitle side instead — a hook for
         // screenshotting the picker without driving the UI by hand.
         const char* uiOpen = std::getenv("HRTF_UI_OPEN");
         const bool wantSubs = uiOpen && strcmp(uiOpen, "subs") == 0;
-        m_trackPicker->open(wantSubs ? TrackPicker::Mode::Subtitle
-                                     : TrackPicker::Mode::Audio,
-                            /*isAutoLoad=*/true);
+        m_resumeTrackingReady = true;
+        m_resumeLastPosition = m_player->getPosition();
+        m_resumeLastPaused = m_player->isPaused();
+        m_resumeLastAudioTrack = m_player->getResumeAudioTrackId();
+        m_resumeLastSubtitleTrack = m_player->getCurrentSubtitleTrackId();
+        m_resumeLastSubtitlesVisible = m_player->areSubtitlesVisible();
+
+        if (!m_player->getAudioTracks().empty()) {
+            m_trackPicker->open(wantSubs ? TrackPicker::Mode::Subtitle
+                                         : TrackPicker::Mode::Audio,
+                                /*isAutoLoad=*/!m_resumePromptPending);
+        } else if (!m_resumePromptPending) {
+            // Audio-less or unusual media has no picker to resume it.
+            m_player->play();
+        }
 
         // HRTF_AUTO_OBJECTS=1 arms the object render on load, as if the
         // user had pressed "Render Atmos objects" — automation hook.
@@ -1005,6 +1120,21 @@ void Application::renderUI() {
 
     // --- Video fullscreen mode ---
     if (m_videoFullscreen) {
+        // The docked path has its own routing block below, but fullscreen
+        // returns before reaching it. Route the same controller actions here
+        // so Start/B, Play, seeking, volume and track selection don't vanish
+        // when cinema mode is active.
+        const bool prefsOpenNow = m_prefsDialog && m_prefsDialog->isOpen();
+        const bool anyPopupNow = ImGui::IsPopupOpen(nullptr,
+            ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        const bool startEdge = ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false);
+        const bool bEdge = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false);
+        if ((startEdge || bEdge) && !prefsOpenNow && !anyPopupNow) {
+            if (m_playbackMenuOpen) closePlaybackMenu();
+            else                    openPlaybackMenu();
+        }
+        handlePlaybackShortcuts(prefsOpenNow, anyPopupNow);
+
         ImGuiViewport* vp = ImGui::GetMainViewport();
         ImVec2 vpSize = vp->Size;
 
@@ -1113,14 +1243,20 @@ void Application::renderUI() {
             // popups in Preferences / dropdowns close first.  (In video
             // fullscreen Esc exits fullscreen instead — that path returns
             // before reaching here.)
-            if (startEdge ||
+            bool consumedPlay = false;
+            if (m_playbackMenuOpen && !prefsOpenNow && !anyPopupNow &&
+                ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+                closePlaybackMenu(/*forcePlay=*/true);
+                consumedPlay = true;
+            } else if (startEdge ||
                 ((bEdge || escEdge) && !prefsOpenNow && !anyPopupNow)) {
                 if (m_playbackMenuOpen) closePlaybackMenu();
                 else                    openPlaybackMenu();
             }
             if (altEdge) m_menuBarVisible = !m_menuBarVisible;
 
-            handlePlaybackShortcuts(prefsOpenNow, anyPopupNow);
+            if (!consumedPlay)
+                handlePlaybackShortcuts(prefsOpenNow, anyPopupNow);
         } else {
             // Home / Preferences context — keep the original menu-bar
             // muscle memory.
@@ -1144,7 +1280,7 @@ void Application::renderUI() {
                                  nullptr, false,
                                  m_player && m_player->hasVideo())) {
                 IGFD::FileDialogConfig cfg;
-                cfg.path = ".";
+                cfg.path = Settings::fileDialogStartDirectory();
                 cfg.flags = ImGuiFileDialogFlags_Modal |
                             ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
                 ImGuiFileDialog::Instance()->OpenDialog(
@@ -1179,6 +1315,11 @@ void Application::renderUI() {
             if (ImGui::MenuItem(ICON_LC_ROTATE_CCW "  Reset to Defaults")) {
                 Settings::resetToDefaults(m_sharedState,
                                            &m_showControlPanel, &m_show3DViz);
+                // Reset changes the persisted output-mode flag; apply the
+                // matching filter chain immediately as the mode buttons do.
+                if (m_player)
+                    m_player->setSpatialAudioEnabled(
+                        atomic_load(&m_sharedState->hrtf_enabled) != 0);
             }
             ImGui::Separator();
             ImGui::TextDisabled("File:");
@@ -1268,7 +1409,10 @@ void Application::renderUI() {
             // transport hosts three rows of content (header,
             // full-width timeline, controls), so a fixed pixel height
             // converted to a ratio is more honest than a flat ratio.
-            const float transportPx = 150.0f;
+            // Reserve enough height for the responsive toolbar's second row.
+            // On wide canvases this is simply breathing room; on narrower
+            // panes it prevents wrapped controls from being clipped.
+            const float transportPx = 190.0f * ImGuiLayer::effectiveScale();
             const float dockPx      = ImGui::GetMainViewport()->Size.y -
                                        ImGui::GetFrameHeight();
             float transportRatio = transportPx / dockPx;
@@ -1535,11 +1679,16 @@ void Application::renderUI() {
  * audio/subtitle pickers) silently did nothing.
  */
 void Application::renderModalLayers() {
-    // File dialogs — sized so they're roomy enough to navigate but not
-    // full-screen.
-    ImVec2 vpSize = ImGui::GetMainViewport()->Size;
-    ImVec2 dlgMin(640, 420);
-    ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
+    // The file explorer is a primary TV screen, not a small desktop popup.
+    // Open it near full-screen by default while retaining resize handles and
+    // a small safe margin. Users can grow it to virtually the whole work area.
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 vpSize = viewport->WorkSize;
+    const float tv = ImGuiLayer::effectiveScale();
+    ImVec2 dlgMin(std::min(720.0f * tv, vpSize.x * 0.80f),
+                  std::min(480.0f * tv, vpSize.y * 0.78f));
+    ImVec2 dlgDefault(vpSize.x * 0.94f, vpSize.y * 0.92f);
+    ImVec2 dlgMax(vpSize.x * 0.99f, vpSize.y * 0.98f);
     // NOTE: GetFilePathName() is the SAVE-dialog accessor — it recomposes
     // the name through extension logic that collapses consecutive dots
     // ("2004..2160p" became "2004.2160p"), silently producing a path that
@@ -1551,7 +1700,10 @@ void Application::renderModalLayers() {
         return ImGuiFileDialog::Instance()->GetFilePathName(
             IGFD_ResultMode_KeepInputFile);
     };
-    if (ImGuiFileDialog::Instance()->Display("open_media", 0, dlgMin, dlgMax)) {
+    auto* fileDialog = ImGuiFileDialog::Instance();
+    if (fileDialog->IsOpened("open_media"))
+        ImGui::SetNextWindowSize(dlgDefault, ImGuiCond_Appearing);
+    if (fileDialog->Display("open_media", ImGuiWindowFlags_NoCollapse, dlgMin, dlgMax)) {
         if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
             m_pendingFile = pickedPath();
         }
@@ -1559,17 +1711,32 @@ void Application::renderModalLayers() {
         // does nothing" reports without a console attached.
         if (FILE* dbg = fopen((plat::cacheDir() + "app_debug.log").c_str(), "a")) {
             fprintf(dbg, "open_media closed: ok=%d path='%s'\n",
-                    ImGuiFileDialog::Instance()->IsOk() ? 1 : 0,
+                    fileDialog->IsOk() ? 1 : 0,
                     m_pendingFile.c_str());
             fclose(dbg);
         }
-        ImGuiFileDialog::Instance()->Close();
+        Settings::setLastBrowseDirectory(fileDialog->GetCurrentPath());
+        fileDialog->Close();
     }
-    if (ImGuiFileDialog::Instance()->Display("open_subtitle", 0, dlgMin, dlgMax)) {
-        if (ImGuiFileDialog::Instance()->IsOk() && m_player) {
+    if (!m_mediaDialogRequestedPath.empty()) {
+        m_pendingFile = m_mediaDialogRequestedPath;
+        m_pendingStartOver = m_mediaDialogRequestedStartOver;
+        m_pendingAutoResume = m_mediaDialogRequestedAutoResume;
+        Settings::setLastBrowseDirectory(fileDialog->GetCurrentPath());
+        fileDialog->Close();
+        m_mediaDialogRequestedPath.clear();
+        m_mediaDialogRequestedStartOver = false;
+        m_mediaDialogRequestedAutoResume = false;
+        m_showMediaDetailsPopup = false;
+    }
+    if (fileDialog->IsOpened("open_subtitle"))
+        ImGui::SetNextWindowSize(dlgDefault, ImGuiCond_Appearing);
+    if (fileDialog->Display("open_subtitle", ImGuiWindowFlags_NoCollapse, dlgMin, dlgMax)) {
+        if (fileDialog->IsOk() && m_player) {
             m_player->loadSubtitleFile(pickedPath());
         }
-        ImGuiFileDialog::Instance()->Close();
+        Settings::setLastBrowseDirectory(fileDialog->GetCurrentPath());
+        fileDialog->Close();
     }
 
     if (m_playbackMenuOpen)
@@ -1580,6 +1747,8 @@ void Application::renderModalLayers() {
     if (m_trackPicker)
         m_trackPicker->render();
 
+    renderResumeDialog();
+
     // Preferences modal (Settings > Preferences / Ctrl+,)
     if (m_prefsDialog)
         m_prefsDialog->render();
@@ -1587,20 +1756,257 @@ void Application::renderModalLayers() {
     // Recent-files modal opened from the home screen.
     if (m_showRecentDialog)
         renderRecentDialog();
+
+    // Add/remove/rename actions happen inside ImGuiFileDialog::Display().
+    // Comparing its opaque serialization here catches all of them in the
+    // same frame, including a dialog that was just closed.
+    persistFileDialogBookmarks();
+}
+
+void Application::persistFileDialogBookmarks() {
+    auto* dialog = ImGuiFileDialog::Instance();
+    const std::string current = dialog->SerializePlaces();
+    if (current == m_fileDialogBookmarksSnapshot) return;
+
+    const double now = glfwGetTime();
+    if (now < m_bookmarkSaveRetryAfter) return;
+    if (BookmarkStore::save(current)) {
+        m_fileDialogBookmarksSnapshot = current;
+        m_bookmarkSaveRetryAfter = 0.0;
+    } else {
+        // A transient filesystem problem should not lose the in-memory edit,
+        // but also should not produce a write/log storm every render frame.
+        m_bookmarkSaveRetryAfter = now + 2.0;
+    }
 }
 
 // Shared by the menu, the Ctrl+O hotkey and the home-screen "Open"
 // button so all three paths land on the same ImGuiFileDialog.
+void Application::renderMediaFileStatus(const IGFD::FileInfos* info) {
+    if (!info || !info->fileType.isFile()) return;
+    const std::string path = info->filePath +
+        std::filesystem::path::preferred_separator + info->fileNameExt;
+    WatchHistoryStore::Entry history;
+    const bool hasHistory = WatchHistoryStore::find(path, &history);
+    const float fraction = hasHistory && history.duration > 0.0
+        ? static_cast<float>(std::clamp(history.furthestPosition /
+                                        history.duration, 0.0, 1.0)) : 0.0f;
+    const bool started = hasHistory && history.furthestPosition >= 60.0 &&
+                         fraction >= 0.02f;
+    if (!hasHistory || (!history.watched && !started)) return;
+    char label[32];
+    if (history.watched) std::snprintf(label, sizeof(label), "Watched");
+    else std::snprintf(label, sizeof(label), "%.0f%%", fraction * 100.0f);
+    if (history.watched)
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram,
+                              ImVec4(0.28f, 0.70f, 0.46f, 1.0f));
+    ImGui::ProgressBar(history.watched ? 1.0f : fraction,
+                       ImVec2(-1.0f, ImGui::GetTextLineHeight()), label);
+    if (history.watched) ImGui::PopStyleColor();
+}
+
+bool Application::mediaFileVisible(const IGFD::FileInfos* info) {
+    if (m_mediaFileFilter == 0 || !info || !info->fileType.isFile()) return true;
+    const std::string path = info->filePath +
+        std::filesystem::path::preferred_separator + info->fileNameExt;
+    WatchHistoryStore::Entry history;
+    const bool hasHistory = WatchHistoryStore::find(path, &history);
+    const double fraction = hasHistory && history.duration > 0.0
+        ? history.furthestPosition / history.duration : 0.0;
+    const bool started = hasHistory && history.furthestPosition >= 60.0 &&
+                         fraction >= 0.02;
+    if (m_mediaFileFilter == 1) return !hasHistory || (!started && !history.watched);
+    if (m_mediaFileFilter == 2) return started && !history.watched;
+    return hasHistory && history.watched;
+}
+
+bool Application::renderMediaFileToolbar() {
+    static const char* views[] = {"All files", "Unwatched", "In progress", "Watched"};
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Show");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(std::min(230.0f * ImGuiLayer::effectiveScale(),
+                                     ImGui::GetContentRegionAvail().x));
+    const bool changed = ImGui::Combo("##watch_filter", &m_mediaFileFilter, views, 4);
+    if (!m_mediaInlineDetails) {
+        ImGui::SameLine();
+        const bool requested = ImGui::Button("Details  [R1]") ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadR1) ||
+            (ImGui::IsKeyPressed(ImGuiKey_I) && !ImGui::GetIO().WantTextInput);
+        if (requested) {
+            auto* dialog = ImGuiFileDialog::Instance();
+            const std::string highlighted = dialog->GetHighlightedFilePath();
+            if (!highlighted.empty()) m_mediaDetailsPath = highlighted;
+            else {
+                const auto selection = dialog->GetSelection();
+                if (!selection.empty()) m_mediaDetailsPath = selection.begin()->second;
+            }
+            if (!m_mediaDetailsPath.empty() &&
+                std::filesystem::u8path(m_mediaDetailsPath).parent_path() !=
+                    std::filesystem::u8path(dialog->GetCurrentPath()))
+                m_mediaDetailsPath.clear();
+            if (!m_mediaDetailsPath.empty()) m_showMediaDetailsPopup = true;
+        }
+    }
+    return changed;
+}
+
+void Application::renderMediaDetailsPopup() {
+    if (!m_showMediaDetailsPopup) return;
+    ImGui::OpenPopup("File details##media");
+    const ImVec2 viewport = ImGui::GetMainViewport()->WorkSize;
+    const float tv = ImGuiLayer::effectiveScale();
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(540.0f * tv, viewport.x * 0.86f),
+               std::min(600.0f * tv, viewport.y * 0.84f)), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("File details##media", nullptr,
+                               ImGuiWindowFlags_NoCollapse)) {
+        renderMediaDetails();
+        if (ImGui::Button("Back", ImVec2(-1.0f, 42.0f * tv)) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight)) {
+            m_showMediaDetailsPopup = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void Application::renderMediaDetails() {
+    auto* dialog = ImGuiFileDialog::Instance();
+    if (!m_showMediaDetailsPopup) {
+        const std::string highlighted = dialog->GetHighlightedFilePath();
+        if (!highlighted.empty()) m_mediaDetailsPath = highlighted;
+        else {
+            const auto selection = dialog->GetSelection();
+            if (!selection.empty()) m_mediaDetailsPath = selection.begin()->second;
+        }
+        const std::string directory = dialog->GetCurrentPath();
+        if (!m_mediaDetailsPath.empty() &&
+            std::filesystem::u8path(m_mediaDetailsPath).parent_path() !=
+                std::filesystem::u8path(directory))
+            m_mediaDetailsPath.clear();
+    }
+
+    ImGui::TextUnformatted("DETAILS");
+    ImGui::Separator();
+    if (m_mediaDetailsPath.empty()) {
+        ImGui::TextWrapped("Select a file to see its playback history.");
+        return;
+    }
+
+    const std::string name =
+        std::filesystem::u8path(m_mediaDetailsPath).filename().u8string();
+    ImGui::TextWrapped("%s", name.c_str());
+    ImGui::Spacing();
+    WatchHistoryStore::Entry history;
+    const bool hasHistory = WatchHistoryStore::find(m_mediaDetailsPath, &history);
+    const double duration = hasHistory ? history.duration : 0.0;
+    const double fraction = duration > 0.0
+        ? std::clamp(history.furthestPosition / duration, 0.0, 1.0) : 0.0;
+    const bool started = hasHistory && history.furthestPosition >= 60.0 &&
+                         fraction >= 0.02;
+    ImGui::TextUnformatted(!hasHistory || (!started && !history.watched)
+        ? "Not watched" : history.watched ? "Watched" : "In progress");
+    if (hasHistory && (started || history.watched)) {
+        char label[40];
+        if (duration > 0.0) {
+            std::snprintf(label, sizeof(label), "%d%% reached",
+                          static_cast<int>(std::lround(fraction * 100.0)));
+            ImGui::ProgressBar(static_cast<float>(fraction),
+                               ImVec2(-1.0f, ImGui::GetTextLineHeight() * 1.3f), label);
+        } else if (history.manuallyWatched) {
+            ImGui::TextDisabled("Marked as watched manually");
+        }
+        if (duration > 0.0) {
+            ImGui::Text("Last position: %s / %s",
+                        resumeTimeLabel(history.position).c_str(),
+                        resumeTimeLabel(duration).c_str());
+            ImGui::Text("Remaining: %s",
+                        resumeTimeLabel(std::max(0.0, duration - history.position)).c_str());
+        }
+    }
+    if (hasHistory && history.lastPlayedAt > 0) {
+        const auto timestamp = static_cast<std::time_t>(history.lastPlayedAt);
+        char date[64] = {};
+        if (const std::tm* local = std::localtime(&timestamp))
+            std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", local);
+        ImGui::Text("Last played: %s", date);
+    }
+    const std::uint64_t bytes = plat::fileSize(m_mediaDetailsPath);
+    if (bytes > 0) {
+        const char* unit = "B";
+        double amount = static_cast<double>(bytes);
+        for (const char* next : {"KB", "MB", "GB", "TB"}) {
+            if (amount < 1000.0) break;
+            amount /= 1000.0;
+            unit = next;
+        }
+        ImGui::Text("Size: %.2f %s", amount, unit);
+    }
+    ImGui::TextWrapped("%s", m_mediaDetailsPath.c_str());
+    ImGui::Separator();
+
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = 42.0f * ImGuiLayer::effectiveScale();
+    ResumeStore::Entry resume;
+    const bool canResume = ResumeStore::find(m_mediaDetailsPath, &resume);
+    if (canResume && ImGui::Button("Resume playback", ImVec2(width, height))) {
+        m_mediaDialogRequestedPath = m_mediaDetailsPath;
+        m_mediaDialogRequestedAutoResume = true;
+    }
+    if (ImGui::Button("Play from beginning", ImVec2(width, height))) {
+        m_mediaDialogRequestedPath = m_mediaDetailsPath;
+        m_mediaDialogRequestedStartOver = true;
+    }
+    ImGui::Spacing();
+    if (ImGui::Button(hasHistory && history.watched ? "Mark as unwatched" :
+                      "Mark as watched", ImVec2(width, height))) {
+        const bool watched = !(hasHistory && history.watched);
+        if (WatchHistoryStore::setWatched(m_mediaDetailsPath, watched)) {
+            ResumeStore::clear(m_mediaDetailsPath);
+            if (m_mediaFileFilter != 0) dialog->RefreshFileFilter();
+        }
+    }
+}
+
 void Application::openFileDialog() {
+    m_mediaDetailsPath.clear();
+    m_showMediaDetailsPopup = false;
+    m_mediaFileFilter = 0;
     IGFD::FileDialogConfig cfg;
-    cfg.path  = ".";
+    cfg.path  = Settings::fileDialogStartDirectory();
     // CaseInsensitiveExtentionFiltering is critical: without it the
     // dialog drops files whose on-disk extension casing differs from
     // the filter (e.g. "Movie.MKV" doesn't match ".mkv").  That
     // accounts for the missing-files reports on Windows where capture
     // tools and rippers tend to emit uppercase extensions.
     cfg.flags = ImGuiFileDialogFlags_Modal |
-                ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering;
+                ImGuiFileDialogFlags_CaseInsensitiveExtentionFiltering |
+                ImGuiFileDialogFlags_HideColumnType |
+                ImGuiFileDialogFlags_HideColumnDate;
+    cfg.userDatas = this;
+    cfg.fileStatus = [](const IGFD::FileInfos* info, IGFD::UserDatas user) {
+        static_cast<Application*>(user)->renderMediaFileStatus(info);
+    };
+    cfg.fileFilter = [](const IGFD::FileInfos* info, IGFD::UserDatas user) {
+        return static_cast<Application*>(user)->mediaFileVisible(info);
+    };
+    cfg.fileToolbar = [](IGFD::UserDatas user) {
+        return static_cast<Application*>(user)->renderMediaFileToolbar();
+    };
+    cfg.filePopup = [](IGFD::UserDatas user) {
+        static_cast<Application*>(user)->renderMediaDetailsPopup();
+    };
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    const float tv = ImGuiLayer::effectiveScale();
+    m_mediaInlineDetails = work.x >= 900.0f * tv;
+    if (m_mediaInlineDetails) {
+        cfg.sidePaneWidth = std::clamp(work.x * 0.26f,
+                                       220.0f * tv, 500.0f * tv);
+        cfg.sidePane = [](const char*, IGFD::UserDatas user, bool*) {
+            static_cast<Application*>(user)->renderMediaDetails();
+        };
+    }
     ImGuiFileDialog::Instance()->OpenDialog(
         "open_media",
         "Open media file",
@@ -1639,16 +2045,30 @@ void Application::renderHomeScreen() {
     // Block geometry: logo + title + subtitle + 4 big buttons.  Centred
     // both axes so the layout stays tidy on whatever viewport size the host
     // window happens to be.
-    const float btnSize    = 180.0f;
-    const float btnGap     = 24.0f;
+    const float tv         = ImGuiLayer::effectiveScale();
+    const float desiredBtn = 180.0f * tv;
+    const float btnGap     = 24.0f * tv;
     const float titleScale = 2.4f;
     const float subScale   = 1.1f;
 
-    const float logoH     = m_logoTex ? 208.0f : 0.0f;
-    const float logoGap   = m_logoTex ? 10.0f  : 0.0f;
+    const float logoH     = m_logoTex ? 208.0f * tv : 0.0f;
+    const float logoGap   = m_logoTex ? 10.0f  * tv : 0.0f;
     const float titleH    = ImGui::GetFontSize() * titleScale;
     const float subH      = ImGui::GetFontSize() * subScale;
-    const float blockH    = logoH + logoGap + titleH + 12.0f + subH + 36.0f + btnSize;
+    // Tiles use a responsive grid.  Four columns are preferred, but at a
+    // narrow aspect ratio (or a very high Comfort setting) they become a
+    // 2x2 grid before they can leave the viewport.
+    const float sideMargin = 32.0f * tv;
+    const float fourColMax = (size.x - sideMargin * 2.0f - btnGap * 3.0f) / 4.0f;
+    const int columns = fourColMax >= desiredBtn * 0.72f ? 4 : 2;
+    const int rows = 4 / columns;
+    const float widthLimited = (size.x - sideMargin * 2.0f -
+                                btnGap * (columns - 1)) / columns;
+    const float btnSize = std::max(1.0f,
+                                   std::min(desiredBtn, widthLimited));
+    const float tilesH = btnSize * rows + btnGap * (rows - 1);
+    const float blockH = logoH + logoGap + titleH + 12.0f * tv + subH +
+                         36.0f * tv + tilesH;
     const float yStart    = (size.y - blockH) * 0.5f;
 
     // Logo, above the wordmark.
@@ -1665,7 +2085,7 @@ void Application::renderHomeScreen() {
         const char* head = "MPV";
         const char* tail = " Sofa";
         ImGui::PushFont(ImGuiLayer::fonts().display,
-                        ImGui::GetFontSize() * titleScale);
+                        ImGui::GetStyle().FontSizeBase * titleScale);
         const ImVec2 hs = ImGui::CalcTextSize(head);
         const ImVec2 ts = ImGui::CalcTextSize(tail);
         ImGui::SetCursorPos(ImVec2((size.x - (hs.x + ts.x)) * 0.5f, wordmarkY));
@@ -1678,10 +2098,10 @@ void Application::renderHomeScreen() {
     // Subtitle
     {
         const char* sub = "Spatial audio cinema for headphones";
-        ImGui::PushFont(nullptr, ImGui::GetFontSize() * subScale);
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * subScale);
         ImVec2 ts = ImGui::CalcTextSize(sub);
         ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f,
-                                    wordmarkY + titleH + 12.0f));
+                                    wordmarkY + titleH + 12.0f * tv));
         ImGui::TextDisabled("%s", sub);
         ImGui::PopFont();
 
@@ -1689,16 +2109,17 @@ void Application::renderHomeScreen() {
         // blue→red like the film packaging; the active accent is the one
         // segment at full height so the theme choice is visible at a glance.
         const int   segs = 6;
-        const float stripeW = 200.0f, segW = stripeW / segs;
+        const float stripeW = 200.0f * tv, segW = stripeW / segs;
         const float sx = pos.x + (size.x - stripeW) * 0.5f;
-        const float sy = pos.y + wordmarkY + titleH + 12.0f + subH + 12.0f;
+        const float sy = pos.y + wordmarkY + titleH + 12.0f * tv + subH +
+                         12.0f * tv;
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const int active = Settings::appearanceConfig().accent;
         for (int i = 0; i < segs; i++) {
             const int idx = segs - 1 - i;            // blue … red
             ImVec4 col = ImGuiLayer::accentPreview(idx,
                                                    Settings::appearanceConfig().mode);
-            const float h = (idx == active) ? 5.0f : 3.0f;
+            const float h = ((idx == active) ? 5.0f : 3.0f) * tv;
             if (idx != active) col.w = 0.55f;
             dl->AddRectFilled(ImVec2(sx + segW * i, sy),
                               ImVec2(sx + segW * (i + 1), sy + h),
@@ -1708,9 +2129,10 @@ void Application::renderHomeScreen() {
 
     // 4 buttons
     {
-        const float totalW = btnSize * 4 + btnGap * 3;
+        const float totalW = btnSize * columns + btnGap * (columns - 1);
         const float xStart = (size.x - totalW) * 0.5f;
-        const float yButtons = wordmarkY + titleH + 12.0f + subH + 36.0f;
+        const float yButtons = wordmarkY + titleH + 12.0f * tv + subH +
+                               36.0f * tv;
 
         ImGui::SetCursorPos(ImVec2(xStart, yButtons));
 
@@ -1726,10 +2148,14 @@ void Application::renderHomeScreen() {
         // onto, the d-pad moved focus around inside the menu bar where
         // nothing was visible, and the home buttons looked unresponsive.
         if (m_homeFreshlyShown) ImGui::FocusItem();
-        ImGui::SameLine(0.0f, btnGap);
+        if (columns > 1) ImGui::SameLine(0.0f, btnGap);
         if (homeButton(ICON_LC_HISTORY,     "Recent", btnSize))
             m_showRecentDialog = true;
-        ImGui::SameLine(0.0f, btnGap);
+        if (columns == 2) {
+            ImGui::SetCursorPos(ImVec2(xStart, yButtons + btnSize + btnGap));
+        } else {
+            ImGui::SameLine(0.0f, btnGap);
+        }
         if (homeButton(ICON_LC_SETTINGS,    "Settings", btnSize)) {
             if (m_prefsDialog) m_prefsDialog->open();
         }
@@ -1763,11 +2189,13 @@ void Application::openPlaybackMenu() {
     }
 }
 
-void Application::closePlaybackMenu() {
+void Application::closePlaybackMenu(bool forcePlay) {
     if (!m_playbackMenuOpen) return;
     m_playbackMenuOpen = false;
-    if (m_playbackMenuPausedUs && m_player) {
-        m_player->play();          // resume only if we were the ones who paused
+    if ((forcePlay || m_playbackMenuPausedUs) && m_player) {
+        // Resume explicitly.  forcePlay is used by the visible Resume action
+        // and Space; Esc/B preserve a pause that existed before the menu.
+        m_player->play();
     }
     m_playbackMenuPausedUs = false;
 }
@@ -1791,10 +2219,31 @@ void Application::handlePlaybackShortcuts(bool prefsOpen, bool anyPopup) {
     // left the transport unreachable for a gamepad-only user.
     auto poke = [this]() { m_fullscreenCursorTimer = 3.0f; };
 
-    const bool play =
+    // When visible UI owns the nav cursor, A/Space belongs exclusively to
+    // the focused widget. Previously the same A press both activated a
+    // ±10-second button and fired this global play/pause shortcut, changing
+    // playback state and stealing focus for the central control.
+    const ImGuiContext* imgui = ImGui::GetCurrentContext();
+    const bool controlsVisible = m_videoFullscreen
+        ? m_fullscreenCursorTimer > 0.0f
+        : m_transportVisible;
+    const bool focusedWidgetOwnsActivate =
+        controlsVisible && imgui && imgui->NavId != 0;
+    const bool play = !focusedWidgetOwnsActivate && (
         ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||   // A
-        ImGui::IsKeyPressed(ImGuiKey_Space,           false);
-    if (play) { m_player->togglePause(); poke(); }
+        ImGui::IsKeyPressed(ImGuiKey_Space,           false));
+    if (play) {
+        const bool pausing = !m_player->isPaused();
+        m_player->togglePause();
+        poke();
+        if (pausing && m_transportBar) {
+            // Make the state change visually obvious to a gamepad user and
+            // leave the next A/Enter press on the central transport control.
+            m_transportVisible = true;
+            m_transportIdleTimer = 0.0f;
+            m_transportBar->requestPlayPauseFocus();
+        }
+    }
 
     // Seek: triggers for the coarse jump, d-pad left/right for the fine one.
     // Repeat is allowed on the triggers so holding one scrubs.
@@ -1860,47 +2309,71 @@ void Application::renderPlaybackMenu() {
                  ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleVar(2);
 
-    const float btnSize    = 180.0f;
-    const float btnGap     = 24.0f;
+    const float tv         = ImGuiLayer::effectiveScale();
+    const float desiredBtn = 180.0f * tv;
+    const float btnGap     = 24.0f * tv;
     const float titleScale = 1.6f;
+    constexpr int tileCount = 5;
 
     const float titleH    = ImGui::GetFontSize() * titleScale;
-    const float blockH    = titleH + 36.0f + btnSize;
+    const float sideMargin = 32.0f * tv;
+    const float usableW = std::max(1.0f, size.x - sideMargin * 2.0f);
+    const int columns = std::clamp(
+        (int)((usableW + btnGap) / (desiredBtn * 0.72f + btnGap)),
+        1, tileCount);
+    const int rows = (tileCount + columns - 1) / columns;
+    const float widthLimited = (size.x - sideMargin * 2.0f -
+                                btnGap * (columns - 1)) / columns;
+    const float btnSize = std::max(1.0f,
+                                   std::min(desiredBtn, widthLimited));
+    const float tilesH = btnSize * rows + btnGap * (rows - 1);
+    const float blockH = titleH + 36.0f * tv + tilesH;
     const float yStart    = (size.y - blockH) * 0.5f;
 
     // Subtitle hint at the top of the block.
     {
-        const char* hint = "Paused — pick an action or press Esc to resume";
-        ImGui::PushFont(nullptr, ImGui::GetFontSize() * titleScale);
+        const char* hint = "Paused — choose Resume or press Esc";
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * titleScale);
         ImVec2 ts = ImGui::CalcTextSize(hint);
         ImGui::SetCursorPos(ImVec2((size.x - ts.x) * 0.5f, yStart));
         ImGui::TextDisabled("%s", hint);
         ImGui::PopFont();
     }
 
-    // 4 tiles centred horizontally — same set as the home screen.
-    const float totalW   = btnSize * 4 + btnGap * 3;
+    // Responsive action grid.  Resume is a real first-class action rather
+    // than relying on the hidden transport beneath this overlay.
+    const float totalW   = btnSize * columns + btnGap * (columns - 1);
     const float xStart   = (size.x - totalW) * 0.5f;
-    const float yButtons = yStart + titleH + 36.0f;
+    const float yButtons = yStart + titleH + 36.0f * tv;
 
-    ImGui::SetCursorPos(ImVec2(xStart, yButtons));
+    const char* icons[tileCount] = {
+        ICON_LC_PLAY, ICON_LC_FOLDER_OPEN, ICON_LC_HISTORY,
+        ICON_LC_SETTINGS, ICON_LC_DOOR_OPEN
+    };
+    const char* labels[tileCount] = {
+        "Resume", "Open", "Recent", "Settings", "Exit"
+    };
+    for (int i = 0; i < tileCount; ++i) {
+        const int row = i / columns;
+        const int col = i % columns;
+        const int rowBegin = row * columns;
+        const int rowCount = std::min(columns, tileCount - rowBegin);
+        const float rowW = btnSize * rowCount + btnGap * (rowCount - 1);
+        const float rowX = (size.x - rowW) * 0.5f;
+        ImGui::SetCursorPos(ImVec2(rowX + col * (btnSize + btnGap),
+                                  yButtons + row * (btnSize + btnGap)));
+        const bool clicked = homeButton(icons[i], labels[i], btnSize);
+        if (m_playbackMenuFreshlyShown && i == 0) ImGui::FocusItem();
+        if (!clicked) continue;
 
-    if (homeButton(ICON_LC_FOLDER_OPEN, "Open", btnSize)) {
-        closePlaybackMenu();
-        openFileDialog();
-    }
-    if (m_playbackMenuFreshlyShown) ImGui::FocusItem();
-    ImGui::SameLine(0.0f, btnGap);
-    if (homeButton(ICON_LC_HISTORY, "Recent", btnSize)) {
-        m_showRecentDialog = true;
-    }
-    ImGui::SameLine(0.0f, btnGap);
-    if (homeButton(ICON_LC_SETTINGS, "Settings", btnSize)) {
-        if (m_prefsDialog) m_prefsDialog->open();
-    }
-    ImGui::SameLine(0.0f, btnGap);
-    if (homeButton(ICON_LC_DOOR_OPEN, "Exit", btnSize)) {
-        m_running = false;
+        switch (i) {
+            case 0: closePlaybackMenu(/*forcePlay=*/true); break;
+            case 1: closePlaybackMenu(); openFileDialog(); break;
+            case 2: m_showRecentDialog = true; break;
+            case 3: if (m_prefsDialog) m_prefsDialog->open(); break;
+            case 4: m_running = false; break;
+            default: break;
+        }
     }
 
     m_playbackMenuFreshlyShown = false;
@@ -1930,6 +2403,7 @@ bool Application::homeButton(const char* icon, const char* label, float size) {
     const bool focused = ImGui::IsItemFocused();
     const bool active  = ImGui::IsItemActivated();
     const bool emph    = hovered || focused;
+    const float tv = ImGuiLayer::effectiveScale();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec4 accent = ImGuiLayer::accentColor();
@@ -1945,16 +2419,22 @@ bool Application::homeButton(const char* icon, const char* label, float size) {
     if (emph) {
         ImVec4 glow = accent;
         glow.w = 0.20f;
-        dl->AddRect(ImVec2(origin.x - 5.0f, origin.y - 5.0f),
-                    ImVec2(pmax.x + 5.0f, pmax.y + 5.0f),
-                    ImGui::GetColorU32(glow), 15.0f, 0, 7.0f);
+        dl->AddRect(ImVec2(origin.x - 5.0f * tv, origin.y - 5.0f * tv),
+                    ImVec2(pmax.x + 5.0f * tv, pmax.y + 5.0f * tv),
+                    ImGui::GetColorU32(glow), 15.0f * tv, 0, 7.0f * tv);
     }
-    dl->AddRectFilled(origin, pmax, bg, 12.0f);
-    dl->AddRect(origin, pmax, border, 12.0f, 0, emph ? 2.5f : 1.0f);
+    dl->AddRectFilled(origin, pmax, bg, 12.0f * tv);
+    dl->AddRect(origin, pmax, border, 12.0f * tv, 0,
+                (emph ? 2.5f : 1.0f) * tv);
 
-    // Big icon (3.5× the body font) centred in the upper portion.
-    const float iconScale = 3.5f;
-    ImGui::PushFont(nullptr, ImGui::GetFontSize() * iconScale);
+    // PushFont takes an *unscaled* base size; passing GetFontSize() here used
+    // to apply the 4K factor twice (explicitly forbidden by ImGui 1.92) and
+    // made the glyph nearly as tall as the tile.  Keep it at a restrained
+    // 2.2x body size and cap the final rendered height to 28% of the tile.
+    const float globalScale = std::max(0.01f, ImGuiLayer::effectiveScale());
+    const float iconBase = std::min(ImGui::GetStyle().FontSizeBase * 2.2f,
+                                    size * 0.28f / globalScale);
+    ImGui::PushFont(nullptr, iconBase);
     ImVec2 iconSz = ImGui::CalcTextSize(icon);
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                 ImVec2(origin.x + (size - iconSz.x) * 0.5f,
@@ -1978,8 +2458,9 @@ void Application::renderRecentDialog() {
     ImGui::OpenPopup("##recent_dialog");
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImVec2 sz(std::min(800.0f, vp->Size.x * 0.8f),
-              std::min(600.0f, vp->Size.y * 0.8f));
+    const float tv = ImGuiLayer::effectiveScale();
+    ImVec2 sz(std::min(800.0f * tv, vp->Size.x * 0.8f),
+              std::min(600.0f * tv, vp->Size.y * 0.8f));
     ImVec2 p(vp->Pos.x + (vp->Size.x - sz.x) * 0.5f,
              vp->Pos.y + (vp->Size.y - sz.y) * 0.5f);
     ImGui::SetNextWindowPos(p, ImGuiCond_Always);
@@ -2020,7 +2501,25 @@ void Application::renderRecentDialog() {
             // The full path under the filename, truncated by clip rect.
             ImGui::Dummy(ImVec2(0, 0));  // restore cursor
             ImGui::SetCursorPosX(ImGui::GetStyle().ItemSpacing.x);
-            ImGui::TextDisabled("%s", path.c_str());
+            ResumeStore::Entry resume;
+            WatchHistoryStore::Entry history;
+            const bool resumable = ResumeStore::find(path, &resume);
+            const bool known = WatchHistoryStore::find(path, &history);
+            if (known && history.watched && resumable) {
+                ImGui::TextDisabled("%s  |  Watched  |  Resume replay at %s",
+                    path.c_str(), resumeTimeLabel(resume.position).c_str());
+            } else if (known && history.watched) {
+                ImGui::TextDisabled("%s  |  Watched", path.c_str());
+            } else if (resumable) {
+                const int percent = resume.duration > 0.0
+                    ? static_cast<int>(std::clamp(
+                        resume.position * 100.0 / resume.duration, 0.0, 100.0))
+                    : 0;
+                ImGui::TextDisabled("%s  |  Continue at %s (%d%%)",
+                    path.c_str(), resumeTimeLabel(resume.position).c_str(), percent);
+            } else {
+                ImGui::TextDisabled("%s", path.c_str());
+            }
             ImGui::PopID();
         }
         ImGui::EndChild();
@@ -2032,23 +2531,121 @@ void Application::renderRecentDialog() {
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Clear list")) {
-        Settings::clearRecents();
-    }
-    ImGui::SameLine();
-    const float btnW = 100.0f;
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x +
-                     ImGui::GetCursorPosX() - btnW);
-    if (ImGui::Button("Close", ImVec2(btnW, 0))) {
-        m_showRecentDialog = false;
-        ImGui::CloseCurrentPopup();
+    const float btnW = 100.0f * tv;
+    if (ImGui::BeginTable("##recent_footer", 2,
+                          ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableNextColumn();
+        if (ImGui::Button("Clear list")) Settings::clearRecents();
+        ImGui::TableNextColumn();
+        const float closeX = ImGui::GetCursorPosX() +
+                             ImGui::GetContentRegionAvail().x - btnW;
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), closeX));
+        if (ImGui::Button("Close", ImVec2(btnW, 0))) {
+            m_showRecentDialog = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndTable();
     }
 
     ImGui::EndPopup();
     if (!open) m_showRecentDialog = false;
 }
 
+void Application::checkpointCurrentPlayback() {
+    if (!m_player || !m_resumeTrackingReady || m_resumePromptPending ||
+        m_currentMediaPath.empty()) return;
+    ResumeStore::checkpoint(m_currentMediaPath,
+                            m_player->getPosition(),
+                            m_player->getDuration(),
+                            m_player->getResumeAudioTrackId(),
+                            m_player->getCurrentSubtitleTrackId(),
+                            m_player->areSubtitlesVisible());
+    if (m_player->hasVideo())
+        WatchHistoryStore::checkpoint(m_currentMediaPath,
+                                      m_player->getPosition(),
+                                      m_player->getDuration(),
+                                      Settings::playbackConfig().watchedThresholdPercent);
+}
+
+static std::string resumeTimeLabel(double seconds) {
+    const int total = std::max(0, (int)std::llround(seconds));
+    const int h = total / 3600;
+    const int m = (total / 60) % 60;
+    const int s = total % 60;
+    char out[32];
+    if (h > 0) snprintf(out, sizeof(out), "%d:%02d:%02d", h, m, s);
+    else       snprintf(out, sizeof(out), "%d:%02d", m, s);
+    return out;
+}
+
+void Application::renderResumeDialog() {
+    if (!m_resumePromptPending || !m_player) return;
+    if (m_trackPicker && m_trackPicker->isOpen()) return;
+
+    if (m_autoResumeOnLoad) {
+        m_player->seek(std::max(0.0, m_resumeEntry.position - 3.0));
+        m_player->play();
+        m_resumePromptPending = false;
+        m_autoResumeOnLoad = false;
+        return;
+    }
+
+    if (!m_resumePopupOpen) {
+        m_player->pause();
+        ImGui::OpenPopup("##resume_dialog");
+        m_resumePopupOpen = true;
+    }
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float tv = ImGuiLayer::effectiveScale();
+    const ImVec2 sz(std::min(560.0f * tv, vp->Size.x * 0.86f),
+                    std::min(220.0f * tv, vp->Size.y * 0.60f));
+    ImGui::SetNextWindowPos(
+        ImVec2(vp->Pos.x + (vp->Size.x - sz.x) * 0.5f,
+               vp->Pos.y + (vp->Size.y - sz.y) * 0.5f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(sz, ImGuiCond_Always);
+
+    if (ImGui::BeginPopupModal("##resume_dialog", nullptr,
+                               ImGuiWindowFlags_NoTitleBar |
+                               ImGuiWindowFlags_NoMove |
+                               ImGuiWindowFlags_NoResize)) {
+        ImGui::Text(ICON_LC_HISTORY "  Continue watching?");
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextWrapped("You stopped at %s.",
+                           resumeTimeLabel(m_resumeEntry.position).c_str());
+        ImGui::Spacing();
+
+        const float gap = ImGui::GetStyle().ItemSpacing.x;
+        const float w = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        if (ImGui::Button("Continue", ImVec2(w, 52.0f * tv))) {
+            // A short rewind restores conversational context and avoids
+            // resuming in the middle of a word.
+            m_player->seek(std::max(0.0, m_resumeEntry.position - 3.0));
+            m_player->play();
+            m_resumePromptPending = false;
+            m_resumePopupOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Start over", ImVec2(w, 52.0f * tv))) {
+            ResumeStore::clear(m_currentMediaPath);
+            m_player->seek(0.0);
+            m_player->play();
+            m_resumePromptPending = false;
+            m_resumePopupOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void Application::shutdown() {
+    checkpointCurrentPlayback();
+    persistFileDialogBookmarks();
+    if (ImGuiFileDialog::Instance()->IsOpened())
+        Settings::setLastBrowseDirectory(
+            ImGuiFileDialog::Instance()->GetCurrentPath());
     // Persist settings on clean exit if the user has touched anything.
     if (m_sharedState &&
         Settings::isDirty(m_sharedState, m_showControlPanel, m_show3DViz)) {

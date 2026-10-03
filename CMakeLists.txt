@@ -12,6 +12,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/dist)
 # Options
 option(USE_SYSTEM_GLFW "Use system-installed GLFW" OFF)
 option(USE_SYSTEM_GLM "Use system-installed GLM" OFF)
+option(MPV_SOFA_BUILD_TESTS "Build focused non-UI tests" OFF)
 
 # ---- Dependencies ----
 
@@ -43,7 +44,10 @@ set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/external/imgui)
 set(IMGUI_PATCHED_ROOT ${CMAKE_BINARY_DIR}/generated/imgui)
 set(IMGUI_PATCHED_BACKEND_DIR ${IMGUI_PATCHED_ROOT}/backends)
 set(IMGUI_HDR_PATCH ${CMAKE_SOURCE_DIR}/patches/imgui-opengl3-hdr.patch)
+set(IMGUI_GAMEPAD_PATCH ${CMAKE_SOURCE_DIR}/patches/imgui-glfw-gamepad.patch)
 file(MAKE_DIRECTORY ${IMGUI_PATCHED_BACKEND_DIR})
+configure_file(${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+               ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_glfw.cpp COPYONLY)
 configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
                ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.cpp COPYONLY)
 configure_file(${IMGUI_DIR}/backends/imgui_impl_opengl3.h
@@ -114,14 +118,38 @@ if(IMGUI_HDR_MARKER EQUAL -1)
             "directory and re-run CMake.")
 endif()
 unset(IMGUI_PATCHED_HEADER)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${IMGUI_HDR_PATCH})
+execute_process(
+    COMMAND ${IMGUI_GIT_APPLY} --reverse --check ${IMGUI_GAMEPAD_PATCH}
+    WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
+    RESULT_VARIABLE IMGUI_GAMEPAD_ALREADY
+    OUTPUT_QUIET ERROR_QUIET
+)
+if(NOT IMGUI_GAMEPAD_ALREADY EQUAL 0)
+    execute_process(
+        COMMAND ${IMGUI_GIT_APPLY} ${IMGUI_GAMEPAD_PATCH}
+        WORKING_DIRECTORY ${IMGUI_PATCHED_ROOT}
+        RESULT_VARIABLE IMGUI_GAMEPAD_PATCH_RESULT
+        ERROR_VARIABLE IMGUI_GAMEPAD_PATCH_ERROR
+    )
+    if(NOT IMGUI_GAMEPAD_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to apply ImGui gamepad patch: ${IMGUI_GAMEPAD_PATCH_ERROR}")
+    endif()
+endif()
+file(READ ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_glfw.cpp IMGUI_PATCHED_GAMEPAD)
+string(FIND "${IMGUI_PATCHED_GAMEPAD}" "gamepad_jid" IMGUI_GAMEPAD_MARKER)
+if(IMGUI_GAMEPAD_MARKER EQUAL -1)
+    message(FATAL_ERROR "ImGui gamepad backend patch is missing")
+endif()
+unset(IMGUI_PATCHED_GAMEPAD)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${IMGUI_HDR_PATCH} ${IMGUI_GAMEPAD_PATCH})
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_glfw.cpp
     ${IMGUI_PATCHED_BACKEND_DIR}/imgui_impl_opengl3.cpp
 )
 target_include_directories(imgui PUBLIC
@@ -133,15 +161,89 @@ target_link_libraries(imgui PUBLIC glfw)
 
 # ImGuiFileDialog (in-app file browser, Blender/Godot-style)
 set(IFD_DIR ${CMAKE_SOURCE_DIR}/external/ImGuiFileDialog)
-add_library(imguifiledialog STATIC
-    ${IFD_DIR}/ImGuiFileDialog.cpp
+set(IFD_PATCHED_DIR ${CMAKE_BINARY_DIR}/generated/ImGuiFileDialog)
+set(IFD_PATCH ${CMAKE_SOURCE_DIR}/external/ImGuiFileDialog.patch)
+file(MAKE_DIRECTORY ${IFD_PATCHED_DIR})
+configure_file(${IFD_DIR}/ImGuiFileDialog.cpp
+               ${IFD_PATCHED_DIR}/ImGuiFileDialog.cpp COPYONLY)
+configure_file(${IFD_DIR}/ImGuiFileDialog.h
+               ${IFD_PATCHED_DIR}/ImGuiFileDialog.h COPYONLY)
+if(NOT EXISTS ${IFD_PATCHED_DIR}/.git)
+    execute_process(COMMAND ${GIT_EXECUTABLE} init -q
+                    WORKING_DIRECTORY ${IFD_PATCHED_DIR}
+                    RESULT_VARIABLE IFD_GIT_INIT_RESULT
+                    OUTPUT_QUIET ERROR_QUIET)
+    if(NOT IFD_GIT_INIT_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not stage the ImGuiFileDialog patch tree")
+    endif()
+endif()
+execute_process(
+    COMMAND ${IMGUI_GIT_APPLY} --reverse --check ${IFD_PATCH}
+    WORKING_DIRECTORY ${IFD_PATCHED_DIR}
+    RESULT_VARIABLE IFD_PATCH_ALREADY
+    OUTPUT_QUIET ERROR_QUIET
 )
-target_include_directories(imguifiledialog PUBLIC ${IFD_DIR})
+if(NOT IFD_PATCH_ALREADY EQUAL 0)
+    execute_process(
+        COMMAND ${IMGUI_GIT_APPLY} ${IFD_PATCH}
+        WORKING_DIRECTORY ${IFD_PATCHED_DIR}
+        RESULT_VARIABLE IFD_PATCH_RESULT
+        ERROR_VARIABLE IFD_PATCH_ERROR
+    )
+    if(NOT IFD_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to apply ImGuiFileDialog patch: ${IFD_PATCH_ERROR}")
+    endif()
+endif()
+file(READ ${IFD_PATCHED_DIR}/ImGuiFileDialog.h IFD_PATCHED_HEADER)
+string(FIND "${IFD_PATCHED_HEADER}" "FileStatusFun" IFD_PATCH_MARKER)
+if(IFD_PATCH_MARKER EQUAL -1)
+    message(FATAL_ERROR "ImGuiFileDialog patch is missing")
+endif()
+unset(IFD_PATCHED_HEADER)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${IFD_PATCH})
+add_library(imguifiledialog STATIC
+    ${IFD_PATCHED_DIR}/ImGuiFileDialog.cpp
+)
+target_include_directories(imguifiledialog PUBLIC ${IFD_PATCHED_DIR} ${IFD_DIR})
 # The bundled dirent/ is a Win32 shim for the POSIX API — its header includes
 # windows.h, so putting it on the include path anywhere else breaks the build
 # by shadowing the real <dirent.h>.
 if(WIN32)
     target_include_directories(imguifiledialog PUBLIC ${IFD_DIR}/dirent)
+endif()
+
+if(MPV_SOFA_BUILD_TESTS AND UNIX)
+    enable_testing()
+    add_executable(resume-store-test
+        tests/ResumeStoreTest.cpp
+        src/core/ResumeStore.cpp
+        src/platform/Platform_posix.cpp
+    )
+    target_include_directories(resume-store-test PRIVATE src)
+    add_test(NAME resume-store COMMAND resume-store-test)
+
+    add_executable(watch-history-test
+        tests/WatchHistoryStoreTest.cpp
+        src/core/WatchHistoryStore.cpp
+        src/core/ResumeStore.cpp
+        src/platform/Platform_posix.cpp
+    )
+    target_include_directories(watch-history-test PRIVATE src)
+    add_test(NAME watch-history COMMAND watch-history-test)
+
+    add_executable(bookmark-store-test
+        tests/BookmarkStoreTest.cpp
+        src/core/BookmarkStore.cpp
+        src/platform/Platform_posix.cpp
+    )
+    target_include_directories(bookmark-store-test PRIVATE src)
+    add_test(NAME bookmark-store COMMAND bookmark-store-test)
+
+    add_executable(bookmark-dialog-test
+        tests/BookmarkDialogTest.cpp
+    )
+    target_link_libraries(bookmark-dialog-test PRIVATE imguifiledialog)
+    add_test(NAME bookmark-dialog COMMAND bookmark-dialog-test)
 endif()
 target_link_libraries(imguifiledialog PUBLIC imgui)
 # Enable the Places sidebar (drives + bookmarks).  USE_PLACES_DEVICES makes
@@ -200,6 +302,9 @@ set(APP_SOURCES
     src/audio/BinauralRenderer.cpp
     src/core/SharedState.c
     src/core/Settings.cpp
+    src/core/ResumeStore.cpp
+    src/core/WatchHistoryStore.cpp
+    src/core/BookmarkStore.cpp
 )
 
 # Per-platform sources.  The HDR presenter and the media-server launcher are
