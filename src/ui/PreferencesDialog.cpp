@@ -60,6 +60,15 @@ bool langGetter(void* /*data*/, int idx, const char** out) {
     return true;
 }
 
+float ui(float value) {
+    return value * ImGuiLayer::effectiveScale();
+}
+
+float availableItemWidth(float trailing = 8.0f) {
+    return std::max(1.0f,
+                    ImGui::GetContentRegionAvail().x - ui(trailing));
+}
+
 } // anonymous namespace
 
 PreferencesDialog::PreferencesDialog(MpvPlayer* player,
@@ -108,7 +117,7 @@ void PreferencesDialog::render() {
     ImGui::SetNextWindowSize(vp->WorkSize);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(48, 32));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ui(48), ui(32)));
     ImGui::Begin("##preferences", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoDocking |
@@ -181,15 +190,15 @@ void PreferencesDialog::render() {
 
 void PreferencesDialog::renderHeader() {
     // Back button (left) + Title (centred to the rest of the header).
-    const float backW = 110.0f;
-    const float titleH = ImGui::GetFontSize() * 1.6f;
+    const float backW = ui(110.0f);
+    const float titleBase = ImGui::GetStyle().FontSizeBase * 1.6f;
 
     ImVec2 headerStart = ImGui::GetCursorPos();
 
     // Back button styled like a pill: rounded, with arrow icon.
     ImGui::PushStyleColor(ImGuiCol_NavCursor, IM_COL32(0, 0, 0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 18.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14, 8));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, ui(18.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ui(14), ui(8)));
     if (ImGui::Button(ICON_LC_ARROW_LEFT "  Back", ImVec2(backW, 0))) {
         m_isOpen = false;
     }
@@ -198,8 +207,8 @@ void PreferencesDialog::renderHeader() {
 
     // Title — same vertical centre as the back button, anchored a bit
     // to the right so it doesn't crowd the button.
-    ImGui::SameLine(0.0f, 24.0f);
-    ImGui::PushFont(nullptr, titleH);
+    ImGui::SameLine(0.0f, ui(24.0f));
+    ImGui::PushFont(nullptr, titleBase);
     ImGui::TextUnformatted(ICON_LC_SETTINGS "  Preferences");
     ImGui::PopFont();
 }
@@ -225,40 +234,39 @@ void PreferencesDialog::renderTabs() {
         return tab != TAB_SERVER || MediaServer::supported();
     };
 
-    // Measure each visible pill, accumulate total width, then draw centred.
-    const float pillPadX = 22.0f;
-    const float pillGap  = 10.0f;
+    // Measure each visible pill.  The old implementation forced every tab
+    // onto one line; large TV text could therefore push the last pills past
+    // the viewport.  Pack them like a responsive flex row instead: when the
+    // next pill no longer fits, start a new row before drawing it.
+    const float pillPadX = ui(22.0f);
+    const float pillGap  = ui(10.0f);
 
     float widths[TAB_COUNT] = {0.0f};
-    float totalW = 0.0f;
-    bool  firstPill = true;
     for (int i = 0; i < TAB_COUNT; i++) {
         if (!tabVisible(i)) continue;
         char buf[128];
         snprintf(buf, sizeof(buf), "%s  %s", kTabs[i].icon, kTabs[i].label);
         widths[i] = ImGui::CalcTextSize(buf).x + pillPadX * 2.0f;
-        if (!firstPill) totalW += pillGap;
-        totalW   += widths[i];
-        firstPill = false;
     }
 
     // Never leave the user parked on a tab that is no longer drawn.
     if (!tabVisible(m_currentTab)) m_currentTab = TAB_APPEARANCE;
 
     const float avail = ImGui::GetContentRegionAvail().x;
-    const float startX = ImGui::GetCursorPosX() +
-                          std::max(0.0f, (avail - totalW) * 0.5f);
-    ImGui::SetCursorPosX(startX);
 
     // Reset before the loop so any pill that takes focus this frame
     // can flip it back on.
     m_focusOnPill = false;
 
-    firstPill = true;
+    float rowUsed = 0.0f;
     for (int i = 0; i < TAB_COUNT; i++) {
         if (!tabVisible(i)) continue;
-        if (!firstPill) ImGui::SameLine(0.0f, pillGap);
-        firstPill = false;
+        const float required = (rowUsed > 0.0f ? pillGap : 0.0f) + widths[i];
+        if (rowUsed > 0.0f && rowUsed + required > avail) {
+            rowUsed = 0.0f; // normal vertical layout starts a fresh row
+        } else if (rowUsed > 0.0f) {
+            ImGui::SameLine(0.0f, pillGap);
+        }
 
         const bool active = (m_currentTab == i);
         if (tabPill(kTabs[i].icon, kTabs[i].label, active)) {
@@ -269,6 +277,7 @@ void PreferencesDialog::renderTabs() {
         // pill (rather than always pill 0) means re-entering the page
         // brings focus straight to whatever the user was last on.
         if (m_freshlyShown && active) ImGui::FocusItem();
+        rowUsed += (rowUsed > 0.0f ? pillGap : 0.0f) + widths[i];
     }
 }
 
@@ -280,8 +289,8 @@ bool PreferencesDialog::tabPill(const char* icon, const char* label, bool active
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
     ImGuiStyle& style = ImGui::GetStyle();
-    const float padX = 22.0f;
-    const float padY = 9.0f;
+    const float padX = ui(22.0f);
+    const float padY = ui(9.0f);
     ImVec2 textSz = ImGui::CalcTextSize(buf);
     ImVec2 size(textSz.x + padX * 2.0f, textSz.y + padY * 2.0f);
 
@@ -336,7 +345,7 @@ void PreferencesDialog::renderAppearance() {
 
     Settings::AppearanceConfig a = Settings::appearanceConfig();
     bool dirty = false;
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
 
     ImGui::SeparatorText("Theme");
     ImGui::TextUnformatted("Mode");
@@ -386,13 +395,13 @@ void PreferencesDialog::renderAppearance() {
 
     ImGui::Spacing();
     ImGui::SeparatorText("Interface size");
-    ImGui::TextUnformatted("Scale");
+    ImGui::TextUnformatted("Comfort");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(260.0f);
-    // Steps rather than a continuous slider: the useful range is a handful of
-    // settings (desk, couch, far couch) and a gamepad can't land on 1.37
-    // meaningfully anyway.
-    if (ImGui::SliderFloat("##ui_scale", &a.uiScale, 1.0f, 2.0f, "%.2f×",
+    ImGui::SetNextItemWidth(ui(260.0f));
+    // Automatic resolution scaling does the heavy lifting. This is only the
+    // viewing-distance adjustment, kept deliberately narrow so 4K can never
+    // accidentally collapse back to desktop-sized controls.
+    if (ImGui::SliderFloat("##ui_scale", &a.uiScale, 0.85f, 1.35f, "%.2f×",
                            ImGuiSliderFlags_NoInput)) {
         a.uiScale = std::round(a.uiScale * 20.0f) / 20.0f;   // 0.05 steps
         dirty = true;
@@ -400,9 +409,12 @@ void PreferencesDialog::renderAppearance() {
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset")) { a.uiScale = 1.0f; dirty = true; }
     ImGui::Spacing();
+    ImGui::TextDisabled("Automatic %.2fx  |  Effective %.2fx",
+                        ImGuiLayer::automaticScale(),
+                        ImGuiLayer::effectiveScale());
     ImGui::TextDisabled(
-        "Everything is sized for a monitor at arm's length. Turn this up when "
-        "the picture is across a room — 1.5× is a good starting point on a TV.");
+        "TV sizing follows the active resolution automatically. Comfort only "
+        "adjusts for how far you sit from the screen.");
 
     ImGui::Spacing();
     ImGui::SeparatorText("Preview");
@@ -411,7 +423,7 @@ void PreferencesDialog::renderAppearance() {
     static bool demoCheck = true;
     ImGui::Checkbox("Binaural", &demoCheck);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(180.0f);
+    ImGui::SetNextItemWidth(ui(180.0f));
     static float demoSlider = 0.62f;
     ImGui::SliderFloat("##demo_slider", &demoSlider, 0.0f, 1.0f, "");
     ImGui::TextDisabled("Typeface: Dosis (SIL Open Font License)");
@@ -423,8 +435,9 @@ void PreferencesDialog::renderAppearance() {
 }
 
 void PreferencesDialog::renderLanguages() {
-    const float labelW = 200.0f;
-    const float comboW = ImGui::GetContentRegionAvail().x - labelW - 12.0f;
+    const float labelW = ui(200.0f);
+    const float comboW = std::max(1.0f,
+        ImGui::GetContentRegionAvail().x - labelW - ui(12.0f));
 
     ImGui::TextUnformatted("Audio language");
     ImGui::SameLine(labelW);
@@ -451,7 +464,7 @@ void PreferencesDialog::renderLanguages() {
 }
 
 void PreferencesDialog::renderSubtitles() {
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
     Settings::SubtitleStyle s = Settings::subtitleStyle();
     bool dirty = false;
 
@@ -459,7 +472,7 @@ void PreferencesDialog::renderSubtitles() {
     strncpy(fontBuf, s.font.c_str(), sizeof(fontBuf) - 1);
     ImGui::TextUnformatted("Font");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 110.0f);
+    ImGui::SetNextItemWidth(availableItemWidth(110.0f));
     if (ImGui::InputText("##sub_font", fontBuf, sizeof(fontBuf))) {
         s.font = fontBuf;
         dirty = true;
@@ -484,7 +497,7 @@ void PreferencesDialog::renderSubtitles() {
 
     ImGui::TextUnformatted("Size");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##sub_size", &s.sizePt, 18.0f, 80.0f, "%.0f pt"))
         dirty = true;
 
@@ -507,7 +520,7 @@ void PreferencesDialog::renderSubtitles() {
                             ImGuiColorEditFlags_NoInputs))
         dirty = true;
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(140.0f);
+    ImGui::SetNextItemWidth(ui(140.0f));
     if (ImGui::SliderFloat("##sub_border_size", &s.borderSize,
                             0.0f, 6.0f, "border %.1f px"))
         dirty = true;
@@ -518,7 +531,7 @@ void PreferencesDialog::renderSubtitles() {
                             ImGuiColorEditFlags_NoInputs))
         dirty = true;
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(140.0f);
+    ImGui::SetNextItemWidth(ui(140.0f));
     if (ImGui::SliderFloat("##sub_shadow_offset", &s.shadowOffset,
                             0.0f, 6.0f, "offset %.1f px"))
         dirty = true;
@@ -535,13 +548,13 @@ void PreferencesDialog::renderSubtitles() {
 
     ImGui::TextUnformatted("Bottom margin");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderInt("##sub_margin", &s.marginY, 0, 120, "%d px"))
         dirty = true;
 
     ImGui::TextUnformatted("Vertical position");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderInt("##sub_pos", &s.pos, 0, 100,
                           "%d (0=top, 100=bottom)"))
         dirty = true;
@@ -567,7 +580,7 @@ void PreferencesDialog::renderDisplay() {
 
     Settings::DisplayConfig d = Settings::displayConfig();
     bool dirty = false;
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
 
     static const char* modeNames[] = {
         "Auto (BT.709 / SDR)",
@@ -576,7 +589,7 @@ void PreferencesDialog::renderDisplay() {
     };
     ImGui::TextUnformatted("Display mode");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::Combo("##disp_mode", &d.mode,
                       modeNames, IM_ARRAYSIZE(modeNames)))
         dirty = true;
@@ -584,7 +597,7 @@ void PreferencesDialog::renderDisplay() {
     ImGui::BeginDisabled(d.mode != 2);
     ImGui::TextUnformatted("Display peak");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##disp_peak", &d.peakNits,
                             100.0f, 4000.0f, "%.0f nits"))
         dirty = true;
@@ -621,7 +634,7 @@ void PreferencesDialog::renderDisplay() {
     }
     ImGui::TextUnformatted("Video SDR white");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##hdr_ref_white", &d.hdrRefWhite,
                            80.0f, 400.0f, "%.0f nits"))
         dirty = true;
@@ -642,7 +655,7 @@ void PreferencesDialog::renderDisplay() {
     };
     ImGui::TextUnformatted("Tone mapping");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::Combo("##disp_tone", &d.toneAlg,
                       toneNames, IM_ARRAYSIZE(toneNames)))
         dirty = true;
@@ -655,7 +668,7 @@ void PreferencesDialog::renderDisplay() {
     };
     ImGui::TextUnformatted("Gamut mapping");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::Combo("##disp_gamut", &d.gamutMode,
                       gamutNames, IM_ARRAYSIZE(gamutNames)))
         dirty = true;
@@ -666,7 +679,7 @@ void PreferencesDialog::renderDisplay() {
 
     ImGui::TextUnformatted("Letterbox crop");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##disp_panscan", &d.panscan, 0.0f, 1.0f,
                             "%.2f  (0=preserve aspect, 1=fill screen)"))
         dirty = true;
@@ -703,7 +716,7 @@ void PreferencesDialog::renderDisplay() {
     int winMode = Settings::windowMode();
     ImGui::TextUnformatted("Mode");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::Combo("##win_mode", &winMode,
                       winModeNames, IM_ARRAYSIZE(winModeNames))) {
         Settings::setWindowMode(winMode);
@@ -725,11 +738,11 @@ void PreferencesDialog::renderAudioSync() {
 
     Settings::PlaybackConfig pc = Settings::playbackConfig();
     bool dirty = false;
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
 
     ImGui::TextUnformatted("Audio delay");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##aud_delay", &pc.audioDelay,
                             -2.0f, 2.0f, "%+.3f s"))
         dirty = true;
@@ -742,6 +755,15 @@ void PreferencesDialog::renderAudioSync() {
         pc.audioDelay = 0.0f;
         dirty = true;
     }
+
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Mark video as watched at");
+    ImGui::SameLine(labelW);
+    ImGui::SetNextItemWidth(availableItemWidth());
+    if (ImGui::SliderInt("##watched_threshold", &pc.watchedThresholdPercent,
+                         70, 99, "%d%%"))
+        dirty = true;
+    ImGui::TextDisabled("    Reaching the end always marks it as watched.");
 
     if (dirty) {
         Settings::setPlaybackConfig(pc);
@@ -759,7 +781,7 @@ void PreferencesDialog::renderCinemaGrain() {
 
     Settings::CinemaGrain g = Settings::cinemaGrain();
     bool dirty = false;
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
 
     if (ImGui::Checkbox("Enable", &g.enabled))
         dirty = true;
@@ -785,7 +807,7 @@ void PreferencesDialog::renderCinemaGrain() {
     };
     ImGui::TextUnformatted("Stock");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::Combo("##grain_stock", &g.stock,
                       stockNames, IM_ARRAYSIZE(stockNames))) {
         if (g.stock >= 0 && g.stock < 3) {
@@ -805,21 +827,21 @@ void PreferencesDialog::renderCinemaGrain() {
 
     ImGui::TextUnformatted("Intensity");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##grain_intensity", &g.intensity,
                             0.0f, 0.30f, "%.3f"))
         sliderTouched();
 
     ImGui::TextUnformatted("Grain size");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##grain_size", &g.grainSize,
                             0.5f, 4.0f, "%.2f px"))
         sliderTouched();
 
     ImGui::TextUnformatted("Tonal adaptive");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##grain_lum", &g.lumAdaptive,
                             0.0f, 1.0f,
                             "%.2f  (0=uniform print, 1=peaks at midtones)"))
@@ -827,7 +849,7 @@ void PreferencesDialog::renderCinemaGrain() {
 
     ImGui::TextUnformatted("Color decorrelation");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    ImGui::SetNextItemWidth(availableItemWidth());
     if (ImGui::SliderFloat("##grain_chroma", &g.chroma,
                             0.0f, 1.0f,
                             "%.2f  (0=mono noise, 1=full RGB)"))
@@ -878,7 +900,7 @@ void PreferencesDialog::renderServer() {
 
     Settings::ServerConfig cfg = Settings::serverConfig();
     bool dirty = false;
-    const float labelW = 200.0f;
+    const float labelW = ui(200.0f);
     const bool running = m_mediaServer->isRunning();
 
     // --- Status line -----------------------------------------------------
@@ -913,8 +935,9 @@ void PreferencesDialog::renderServer() {
     ImGui::TextUnformatted("Media folder");
     ImGui::SameLine(labelW);
     {
-        const float browseW = 130.0f;
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - browseW - 16.0f);
+        const float browseW = ui(130.0f);
+        ImGui::SetNextItemWidth(std::max(1.0f,
+            ImGui::GetContentRegionAvail().x - browseW - ui(16.0f)));
         char buf[1024];
         snprintf(buf, sizeof(buf), "%s", cfg.mediaDir.c_str());
         if (ImGui::InputText("##srv_dir", buf, sizeof(buf))) {
@@ -924,7 +947,8 @@ void PreferencesDialog::renderServer() {
         ImGui::SameLine();
         if (ImGui::Button(ICON_LC_FOLDER "  Browse", ImVec2(browseW, 0))) {
             IGFD::FileDialogConfig fdCfg;
-            fdCfg.path = cfg.mediaDir.empty() ? "." : cfg.mediaDir;
+            fdCfg.path = cfg.mediaDir.empty()
+                ? Settings::fileDialogStartDirectory() : cfg.mediaDir;
             fdCfg.flags = ImGuiFileDialogFlags_Modal;
             ImGuiFileDialog::Instance()->OpenDialog(
                 "choose_media_dir", "Select media folder", nullptr, fdCfg);
@@ -933,7 +957,7 @@ void PreferencesDialog::renderServer() {
 
     ImGui::TextUnformatted("HTTP port");
     ImGui::SameLine(labelW);
-    ImGui::SetNextItemWidth(140.0f);
+    ImGui::SetNextItemWidth(ui(140.0f));
     if (ImGui::InputInt("##srv_port", &cfg.port, 0, 0)) {
         if (cfg.port < 1)     cfg.port = 1;
         if (cfg.port > 65534) cfg.port = 65534;
@@ -950,7 +974,7 @@ void PreferencesDialog::renderServer() {
     // --- Start / Stop ------------------------------------------------------
     if (!running) {
         ImGui::BeginDisabled(cfg.mediaDir.empty());
-        if (ImGui::Button(ICON_LC_SERVER "  Start server", ImVec2(220, 0)))
+        if (ImGui::Button(ICON_LC_SERVER "  Start server", ImVec2(ui(220), 0)))
             m_mediaServer->start(cfg.mediaDir, cfg.port);
         ImGui::EndDisabled();
         if (cfg.mediaDir.empty()) {
@@ -958,15 +982,18 @@ void PreferencesDialog::renderServer() {
             ImGui::TextDisabled("select a media folder first");
         }
     } else {
-        if (ImGui::Button(ICON_LC_SERVER_OFF "  Stop server", ImVec2(220, 0)))
+        if (ImGui::Button(ICON_LC_SERVER_OFF "  Stop server", ImVec2(ui(220), 0)))
             m_mediaServer->stop();
     }
 
     // Folder-picker result.
     ImVec2 vpSize = ImGui::GetMainViewport()->Size;
-    ImVec2 dlgMin(640, 420);
+    ImVec2 dlgMin(std::min(ui(640), vpSize.x * 0.75f),
+                  std::min(ui(420), vpSize.y * 0.70f));
     ImVec2 dlgMax(vpSize.x * 0.9f, vpSize.y * 0.9f);
     if (ImGuiFileDialog::Instance()->Display("choose_media_dir", 0, dlgMin, dlgMax)) {
+        Settings::setLastBrowseDirectory(
+            ImGuiFileDialog::Instance()->GetCurrentPath());
         if (ImGuiFileDialog::Instance()->IsOk()) {
             cfg.mediaDir = ImGuiFileDialog::Instance()->GetCurrentPath();
             dirty = true;

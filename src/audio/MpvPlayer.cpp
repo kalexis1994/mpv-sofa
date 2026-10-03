@@ -98,6 +98,11 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     mpv_set_option_string(m_mpv, "vo", "libmpv");
     mpv_set_option_string(m_mpv, "hwdec", "auto-copy");
     mpv_set_option_string(m_mpv, "keep-open", "yes");
+    // Use the selected audio output as the playback clock.  This lets mpv
+    // follow the clock actually reported by PipeWire/Pulse/ALSA, whether the
+    // current device is Bluetooth, HDMI, USB, or the built-in codec.  Do not
+    // force a sample rate: mpv's normal resampler handles negotiated rates.
+    mpv_set_option_string(m_mpv, "video-sync", "audio");
 
     // Lossless HD spatial object extraction (separate height/object
     // channels, up to 16ch) is a TrueHD-decoder option — but decoder
@@ -111,6 +116,13 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
         // Log mpv messages to file for decoder debug analysis
         const std::string logPath = plat::cacheDir() + "mpv_debug.log";
         mpv_set_option_string(m_mpv, "log-file", logPath.c_str());
+        // Our concise clock summary is separate from mpv's verbose log so it
+        // remains easy to compare between devices and output modes.
+        const std::string syncPath = plat::cacheDir() + "sync_debug.log";
+        if (FILE* f = fopen(syncPath.c_str(), "w")) {
+            fprintf(f, "mpv-sofa sync diagnostics (10 s media-time interval)\n");
+            fclose(f);
+        }
     }
 
     // Experiment hook: HRTF_MPV_OPTS="key=value;key2=value2" applies raw
@@ -147,8 +159,12 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
                                "%" + sofaPath + ":shared-state=" + shared;
     fprintf(stderr, "[MpvPlayer] af option: %s\n", af_opt.c_str());
     m_afChain = af_opt;   // remembered so external-binaural can restore it
-    int af_err = mpv_set_option_string(m_mpv, "af", af_opt.c_str());
-    fprintf(stderr, "[MpvPlayer] af set result: %d (%s)\n", af_err,
+    m_spatialAudioEnabled = !m_sharedState ||
+        atomic_load(&m_sharedState->hrtf_enabled) != 0;
+    const char* initialAf = m_spatialAudioEnabled ? m_afChain.c_str() : "";
+    int af_err = mpv_set_option_string(m_mpv, "af", initialAf);
+    fprintf(stderr, "[MpvPlayer] audio mode: %s; af set result: %d (%s)\n",
+            m_spatialAudioEnabled ? "spatial" : "stereo", af_err,
             af_err < 0 ? mpv_error_string(af_err) : "ok");
 
     if (mpv_initialize(m_mpv) < 0) {
@@ -203,6 +219,26 @@ bool MpvPlayer::init(HrtfSharedState* sharedState) {
     mpv_observe_property(m_mpv, 0, "speed",            MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "chapter-list/count", MPV_FORMAT_INT64);
 
+    if (m_verboseMpvLogs) {
+        // Focused diagnostics for output-device clock/rate problems.  Values
+        // are sampled from property-change events and summarized every ten
+        // seconds of media time; normal runs pay no logging cost.
+        mpv_observe_property(m_mpv, 0, "audio-params/samplerate", MPV_FORMAT_INT64);
+        mpv_observe_property(m_mpv, 0, "audio-out-params/samplerate", MPV_FORMAT_INT64);
+        mpv_observe_property(m_mpv, 0, "audio-out-params/format", MPV_FORMAT_STRING);
+        mpv_observe_property(m_mpv, 0, "audio-out-params/channels", MPV_FORMAT_STRING);
+        mpv_observe_property(m_mpv, 0, "audio-device", MPV_FORMAT_STRING);
+        mpv_observe_property(m_mpv, 0, "current-ao", MPV_FORMAT_STRING);
+        mpv_observe_property(m_mpv, 0, "avsync", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "total-avsync-change", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "display-fps", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "estimated-display-fps", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "audio-speed-correction", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "video-speed-correction", MPV_FORMAT_DOUBLE);
+        mpv_observe_property(m_mpv, 0, "frame-drop-count", MPV_FORMAT_INT64);
+        mpv_observe_property(m_mpv, 0, "mistimed-frame-count", MPV_FORMAT_INT64);
+    }
+
     // Generate silence WAV for test tone (af_hrtf needs audio frames to process)
     m_silencePath = plat::cacheDir() + "silence_testtone.wav";
     if (createSilenceWav(m_silencePath.c_str())) {
@@ -243,7 +279,8 @@ void MpvPlayer::loadFile(const std::string& path) {
     // pre-roll into the new file already paused, so the picker can take
     // its time before the first audible frame is played.
     int paused = 1;
-    mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &paused);
+    if (mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &paused) >= 0)
+        m_paused = true;
 
     fprintf(stderr, "[MpvPlayer] loadFile: %s\n", path.c_str());
     const char* cmd[] = {"loadfile", path.c_str(), nullptr};
@@ -258,11 +295,18 @@ bool MpvPlayer::consumeFreshFileLoaded() {
     return true;
 }
 
+bool MpvPlayer::consumeReachedEnd() {
+    if (!m_reachedEnd) return false;
+    m_reachedEnd = false;
+    return true;
+}
+
 void MpvPlayer::play() {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
     int flag = 0;
-    mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &flag);
+    if (mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &flag) >= 0)
+        m_paused = false;
 #endif
 }
 
@@ -270,15 +314,20 @@ void MpvPlayer::pause() {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
     int flag = 1;
-    mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &flag);
+    if (mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &flag) >= 0)
+        m_paused = true;
 #endif
 }
 
 void MpvPlayer::togglePause() {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
-    const char* cmd[] = {"cycle", "pause", nullptr};
-    mpv_command_async(m_mpv, 0, cmd);
+    // Make the requested state explicit.  `cycle pause` is asynchronous;
+    // when an overlay had just issued play(), a quick Play-button press could
+    // be queued against stale state and pause again.  These setters are
+    // idempotent and update the UI state immediately.
+    if (m_paused) play();
+    else          pause();
 #endif
 }
 
@@ -306,13 +355,14 @@ void MpvPlayer::setAudioTrack(int id) {
 #ifdef HAVE_MPV
     if (!m_mpv) return;
     int64_t aid = id;
-    mpv_set_property(m_mpv, "aid", MPV_FORMAT_INT64, &aid);
+    if (mpv_set_property(m_mpv, "aid", MPV_FORMAT_INT64, &aid) >= 0)
+        m_currentAudioTrack = id;
 #endif
 }
 
 void MpvPlayer::useExternalBinaural(const std::string& pcmPath) {
 #ifdef HAVE_MPV
-    if (!m_mpv) return;
+    if (!m_mpv || !m_spatialAudioEnabled) return;
     // The sidecar is ALREADY binaural (rendered through the full DSP), so
     // bypass the HRTF filter to avoid double-spatialization, then add +
     // select the sidecar.
@@ -358,11 +408,46 @@ void MpvPlayer::revertInternalAudio() {
     }
     mpv_set_property_string(m_mpv, "audio-demuxer", "");
 
-    // Re-arm the HRTF filter chain for the embedded track.
-    if (!m_afChain.empty())
-        mpv_set_property_string(m_mpv, "af", m_afChain.c_str());
-    fprintf(stderr, "[MpvPlayer] reverted to internal audio + HRTF\n");
+    // Restore the filter appropriate to the selected output mode.
+    mpv_set_property_string(m_mpv, "af",
+        m_spatialAudioEnabled ? m_afChain.c_str() : "");
+    fprintf(stderr, "[MpvPlayer] reverted to internal audio (%s)\n",
+            m_spatialAudioEnabled ? "spatial" : "stereo");
 #endif
+}
+
+bool MpvPlayer::setSpatialAudioEnabled(bool enabled) {
+    if (enabled == m_spatialAudioEnabled) {
+        if (m_sharedState)
+            atomic_store(&m_sharedState->hrtf_enabled, enabled ? 1 : 0);
+        return true;
+    }
+
+#ifdef HAVE_MPV
+    if (m_mpv) {
+        // A rendered binaural sidecar is spatial audio too.  Return to the
+        // embedded track before selecting ordinary stereo so it cannot keep
+        // playing after the filter has been removed.
+        if (!enabled && m_externalBinaural)
+            revertInternalAudio();
+
+        const char* chain = enabled ? m_afChain.c_str() : "";
+        int err = mpv_set_property_string(m_mpv, "af", chain);
+        if (err < 0) {
+            fprintf(stderr, "[MpvPlayer] audio mode switch to %s failed: %s\n",
+                    enabled ? "spatial" : "stereo", mpv_error_string(err));
+            return false;
+        }
+    }
+#endif
+
+    m_spatialAudioEnabled = enabled;
+    if (m_sharedState)
+        atomic_store(&m_sharedState->hrtf_enabled, enabled ? 1 : 0);
+    fprintf(stderr, "[MpvPlayer] audio mode switched to %s (af=%s)\n",
+            enabled ? "spatial" : "stereo",
+            enabled ? "hrtf" : "empty");
+    return true;
 }
 
 void MpvPlayer::setSubtitleTrack(int id) {
@@ -370,11 +455,24 @@ void MpvPlayer::setSubtitleTrack(int id) {
     if (!m_mpv) return;
     if (id == 0) {
         // Disable subtitles
-        mpv_set_option_string(m_mpv, "sid", "no");
+        if (mpv_set_property_string(m_mpv, "sid", "no") >= 0)
+            m_currentSubtitleTrack = 0;
     } else {
         int64_t sid = id;
-        mpv_set_property(m_mpv, "sid", MPV_FORMAT_INT64, &sid);
+        if (mpv_set_property(m_mpv, "sid", MPV_FORMAT_INT64, &sid) >= 0)
+            m_currentSubtitleTrack = id;
     }
+#endif
+}
+
+void MpvPlayer::setSubtitlesVisible(bool visible) {
+#ifdef HAVE_MPV
+    if (!m_mpv) return;
+    int flag = visible ? 1 : 0;
+    if (mpv_set_property(m_mpv, "sub-visibility", MPV_FORMAT_FLAG, &flag) >= 0)
+        m_subtitlesVisible = visible;
+#else
+    (void)visible;
 #endif
 }
 
@@ -450,6 +548,7 @@ void MpvPlayer::refreshTrackList() {
     m_audioTracks.clear();
     m_currentAudioTrack = 0;
     m_subtitleTracks.clear();
+    m_currentSubtitleTrack = 0;
 
     mpv_node trackList;
     if (mpv_get_property(m_mpv, "track-list", MPV_FORMAT_NODE, &trackList) < 0)
@@ -725,6 +824,35 @@ void MpvPlayer::update() {
 
             if (strcmp(prop->name, "time-pos") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
                 m_position = *(double*)prop->data;
+                if (m_verboseMpvLogs && m_position >= m_nextSyncLogPosition) {
+                    char line[1024];
+                    snprintf(line, sizeof(line),
+                             "[MpvPlayer/sync] t=%.3f mode=%s af=%s "
+                             "rate=%lld->%lld format=%s channels=%s ao=%s device=%s "
+                             "avsync=%+.6f total-correction=%+.6f display=%.3f/%.3fHz "
+                             "speed(a/v)=%.7f/%.7f drops=%lld mistimed=%lld\n",
+                             m_position,
+                             m_spatialAudioEnabled ? "spatial" : "stereo",
+                             m_spatialAudioEnabled ? "hrtf" : "empty",
+                             (long long)m_audioInputRate,
+                             (long long)m_audioOutputRate,
+                             m_audioOutputFormat.empty() ? "?" : m_audioOutputFormat.c_str(),
+                             m_audioOutputChannels.empty() ? "?" : m_audioOutputChannels.c_str(),
+                             m_currentAudioOutput.empty() ? "?" : m_currentAudioOutput.c_str(),
+                             m_audioDevice.empty() ? "?" : m_audioDevice.c_str(),
+                             m_avSync, m_totalAvSyncChange,
+                             m_displayFps, m_estimatedDisplayFps,
+                             m_audioSpeedCorrection, m_videoSpeedCorrection,
+                             (long long)m_voDropFrames,
+                             (long long)m_mistimedFrames);
+                    fputs(line, stderr);
+                    const std::string path = plat::cacheDir() + "sync_debug.log";
+                    if (FILE* f = fopen(path.c_str(), "a")) {
+                        fputs(line, f);
+                        fclose(f);
+                    }
+                    m_nextSyncLogPosition = m_position + 10.0;
+                }
             }
             else if (strcmp(prop->name, "duration") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
                 m_duration = *(double*)prop->data;
@@ -764,6 +892,76 @@ void MpvPlayer::update() {
             else if (strcmp(prop->name, "chapter-list/count") == 0) {
                 refreshChapterList();
             }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-params/samplerate") == 0 &&
+                     prop->format == MPV_FORMAT_INT64) {
+                m_audioInputRate = *(int64_t*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-out-params/samplerate") == 0 &&
+                     prop->format == MPV_FORMAT_INT64) {
+                m_audioOutputRate = *(int64_t*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-out-params/format") == 0 &&
+                     prop->format == MPV_FORMAT_STRING) {
+                m_audioOutputFormat = *(char**)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-out-params/channels") == 0 &&
+                     prop->format == MPV_FORMAT_STRING) {
+                m_audioOutputChannels = *(char**)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-device") == 0 &&
+                     prop->format == MPV_FORMAT_STRING) {
+                m_audioDevice = *(char**)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "current-ao") == 0 &&
+                     prop->format == MPV_FORMAT_STRING) {
+                m_currentAudioOutput = *(char**)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "avsync") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_avSync = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "total-avsync-change") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_totalAvSyncChange = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "display-fps") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_displayFps = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "estimated-display-fps") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_estimatedDisplayFps = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "audio-speed-correction") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_audioSpeedCorrection = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "video-speed-correction") == 0 &&
+                     prop->format == MPV_FORMAT_DOUBLE) {
+                m_videoSpeedCorrection = *(double*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "frame-drop-count") == 0 &&
+                     prop->format == MPV_FORMAT_INT64) {
+                m_voDropFrames = *(int64_t*)prop->data;
+            }
+            else if (m_verboseMpvLogs && prop->data &&
+                     strcmp(prop->name, "mistimed-frame-count") == 0 &&
+                     prop->format == MPV_FORMAT_INT64) {
+                m_mistimedFrames = *(int64_t*)prop->data;
+            }
         }
         else if (event->event_id == MPV_EVENT_HOOK) {
             // on_preloaded: demuxer is open (tracks known) but decoders
@@ -795,9 +993,11 @@ void MpvPlayer::update() {
         else if (event->event_id == MPV_EVENT_FILE_LOADED) {
             fprintf(stderr, "[MpvPlayer] FILE_LOADED event received\n");
             m_hasVideo = true;
+            m_nextSyncLogPosition = 0.0;
             refreshTrackList();
             refreshChapterList();
             m_freshFileLoaded = true;
+            m_reachedEnd = false;
         }
         else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
             fprintf(stderr, "[MpvPlayer] PLAYBACK_RESTART event, hasVideo=%d\n", m_hasVideo);
@@ -810,6 +1010,8 @@ void MpvPlayer::update() {
             mpv_event_end_file* ef = (mpv_event_end_file*)event->data;
             fprintf(stderr, "[MpvPlayer] END_FILE reason=%d error=%d\n",
                     ef->reason, ef->error);
+            if (ef->reason == MPV_END_FILE_REASON_EOF)
+                m_reachedEnd = true;
             m_hasVideo = false;
             m_audioTracks.clear();
         }
@@ -844,6 +1046,11 @@ void MpvPlayer::renderToFBO(unsigned int fbo, int width, int height) {
 #ifdef HAVE_MPV
     if (!m_renderCtx) return;
 
+    // Clear the callback edge before consuming mpv's update flags.  If a new
+    // callback arrives during or after update/render it remains set for the
+    // next frame instead of being overwritten at the end of this one.
+    m_renderRequested.store(false);
+
     // Check if mpv has a new frame (also resets mpv's internal update flag)
     uint64_t flags = mpv_render_context_update(m_renderCtx);
     if (!(flags & MPV_RENDER_UPDATE_FRAME))
@@ -869,8 +1076,14 @@ void MpvPlayer::renderToFBO(unsigned int fbo, int width, int height) {
     };
 
     mpv_render_context_render(m_renderCtx, params);
-    m_renderRequested = false;
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#endif
+}
+
+void MpvPlayer::reportSwap() {
+#ifdef HAVE_MPV
+    if (m_renderCtx)
+        mpv_render_context_report_swap(m_renderCtx);
 #endif
 }

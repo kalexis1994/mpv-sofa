@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
      role="img" aria-labelledby="title">
-  <title id="title">mpv-sofa</title>
+  <title id="title">MPV Sofa</title>
 
   <!-- Application-icon cut of assets/icons/mpv-sofa.svg: no tilt and less
        margin, because the OS adds its own padding and a 3-degree rotation

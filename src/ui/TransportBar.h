@@ -9,6 +9,7 @@ public:
     TransportBar(MpvPlayer* player);
     void render();
     void renderContent();  // render controls without Begin/End wrapper
+    void requestPlayPauseFocus() { m_focusPlayPauseRequested = true; }
 
     using FullscreenCallback = std::function<void()>;
     void setFullscreenCallback(FullscreenCallback cb) { m_fullscreenCb = cb; }
@@ -34,6 +35,7 @@ private:
     PickerCallback m_subPickerCb;
     MenuCallback m_menuCb;
     bool m_isFullscreen = false;
+    bool m_focusPlayPauseRequested = false;
 
     void formatTime(double seconds, char* buf, int bufSize);
 };

@@ -28,6 +28,12 @@ public:
     // without touching the live style — for drawing the swatch picker.
     static ImVec4 accentPreview(int index, int mode);
 
+    // Resolution-aware TV scale.  The automatic component keeps controls
+    // physically prominent from 800p handhelds through 4K televisions; the
+    // effective value also includes the user's fine-tuning preference.
+    static float automaticScale();
+    static float effectiveScale();
+
     // Dosis, loaded from assets/fonts.  `text` is ImGui's default font and
     // is the only one with the Lucide icons merged in — push the others
     // only around plain text.
@@ -41,4 +47,5 @@ public:
 
 private:
     bool m_initialized = false;
+    GLFWwindow* m_window = nullptr;
 };

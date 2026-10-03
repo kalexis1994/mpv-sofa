@@ -1,8 +1,64 @@
 diff --git a/ImGuiFileDialog.cpp b/ImGuiFileDialog.cpp
-index 6cfa67e..bd985f7 100644
+index 6cfa67e..2326cdd 100644
 --- a/ImGuiFileDialog.cpp
 +++ b/ImGuiFileDialog.cpp
-@@ -3267,14 +3267,15 @@ bool IGFD::PlacesFeature::m_DrawPlacesPane(FileDialogInternal& vFileDialogIntern
+@@ -2285,6 +2285,11 @@ void IGFD::FileManager::m_ApplyFilteringOnFileList(const FileDialogInternal& vFi
+         if (!file->SearchForTag(vFileDialogInternal.searchManager.searchTag))  // if search tag
+             show = false;
+         if (dLGDirectoryMode && !file->fileType.isDir()) show = false;
++        if (show && vFileDialogInternal.getDialogConfig().fileFilter &&
++            !file->fileType.isDir() &&
++            !vFileDialogInternal.getDialogConfig().fileFilter(
++                file.get(), vFileDialogInternal.getDialogConfig().userDatas))
++            show = false;
+         if (show) vFileInfosFilteredList.push_back(file);
+     }
+ }
+@@ -3169,7 +3174,9 @@ void IGFD::ThumbnailFeature::ManageGPUThumbnails() {
+ 
+ IGFD::PlacesFeature::PlacesFeature() {
+ #ifdef USE_PLACES_FEATURE
+-    m_PlacesPaneWidth = defaultPlacePaneWith;
++    // Resolve the initial width from the actual dialog on first render.
++    // A fixed pixel value becomes unusably narrow with a 4K/TV font scale.
++    m_PlacesPaneWidth = 0.0f;
+     m_PlacesPaneShown = PLACES_PANE_DEFAULT_SHOWN;
+ #endif  // USE_PLACES_FEATURE
+ }
+@@ -3178,17 +3185,24 @@ IGFD::PlacesFeature::PlacesFeature() {
+ void IGFD::PlacesFeature::m_InitPlaces(FileDialogInternal& vFileDialogInternal) {
+ #ifdef USE_PLACES_BOOKMARKS
+     (void)vFileDialogInternal;  // for disable compiler warning about unused var
+-    AddPlacesGroup(placesBookmarksGroupName, placesBookmarksDisplayOrder, true, PLACES_BOOKMARK_DEFAULT_OPEPEND);
++    // OpenDialog() calls m_InitPlaces() on every opening. Replacing an
++    // existing group here discarded all user bookmarks that the host had
++    // deserialized (and made the host persist the newly-empty group).
++    // Groups are instance state, so create each one only once.
++    if (GetPlacesGroupPtr(placesBookmarksGroupName) == nullptr) {
++        AddPlacesGroup(placesBookmarksGroupName, placesBookmarksDisplayOrder, true, PLACES_BOOKMARK_DEFAULT_OPEPEND);
++    }
+ #endif  // USE_PLACES_BOOKMARK
+ #ifdef USE_PLACES_DEVICES
+-    AddPlacesGroup(placesDevicesGroupName, placesDevicesDisplayOrder, false, PLACES_DEVICES_DEFAULT_OPEPEND);
+-    auto devices_ptr = GetPlacesGroupPtr(placesDevicesGroupName);
+-    if (devices_ptr != nullptr && vFileDialogInternal.fileManager.GetFileSystemInstance() != nullptr) {
+-        const auto& devices = vFileDialogInternal.fileManager.GetFileSystemInstance()->GetDevicesList();
+-        for (const auto& device : devices) {
+-            devices_ptr->AddPlace(device.first + " " + device.second, device.first + IGFD::Utils::GetPathSeparator(), false);
++    if (GetPlacesGroupPtr(placesDevicesGroupName) == nullptr) {
++        AddPlacesGroup(placesDevicesGroupName, placesDevicesDisplayOrder, false, PLACES_DEVICES_DEFAULT_OPEPEND);
++        auto devices_ptr = GetPlacesGroupPtr(placesDevicesGroupName);
++        if (devices_ptr != nullptr && vFileDialogInternal.fileManager.GetFileSystemInstance() != nullptr) {
++            const auto& devices = vFileDialogInternal.fileManager.GetFileSystemInstance()->GetDevicesList();
++            for (const auto& device : devices) {
++                devices_ptr->AddPlace(device.first + " " + device.second, device.first + IGFD::Utils::GetPathSeparator(), false);
++            }
+         }
+-        devices_ptr = nullptr;
+     }
+ #endif  // USE_PLACES_DEVICES
+ }
+@@ -3267,14 +3281,17 @@ bool IGFD::PlacesFeature::m_DrawPlacesPane(FileDialogInternal& vFileDialogIntern
                                      ImGui::PopStyleColor();
                                      ImGui::SameLine();
                                  }
@@ -14,15 +70,203 @@ index 6cfa67e..bd985f7 100644
 -                                        vFileDialogInternal.fileManager.OpenCurrentPath(vFileDialogInternal);
 -                                        res = true;
 -                                    }
-+                                // mpv-sofa patch: single-click to navigate
-+                                // (upstream uses double-click).
-+                                if (ImGui::Selectable(place_name.c_str(),
-+                                        current_path == place.path
-+                                        || group_ptr->selectedPlaceForEdition == i)) {
-+                                    group_ptr->selectedPlaceForEdition = -1;
++                                // A Place is a navigation shortcut, not a file
++                                // selection. Activate it on the Selectable's
++                                // normal press so mouse click, Enter and the
++                                // gamepad A button all open the directory.
++                                // Requiring IsMouseDoubleClicked() made every
++                                // keyboard/gamepad activation a silent no-op.
++                                if (ImGui::Selectable(place_name.c_str(), current_path == place.path || group_ptr->selectedPlaceForEdition == i)) {
++                                    group_ptr->selectedPlaceForEdition = -1;  // stop edition
 +                                    vFileDialogInternal.fileManager.SetCurrentPath(place.path);
 +                                    vFileDialogInternal.fileManager.OpenCurrentPath(vFileDialogInternal);
 +                                    res = true;
                                  }
                                  ImGui::PopID();
                                  if (ImGui::IsItemHovered()) {
+@@ -3990,14 +4007,38 @@ void IGFD::FileDialog::m_DrawHeader() {
+ }
+ 
+ void IGFD::FileDialog::m_DrawContent() {
++    if (m_FileDialogInternal.getDialogConfig().fileToolbar) {
++        if (m_FileDialogInternal.getDialogConfig().fileToolbar(
++                m_FileDialogInternal.getDialogConfig().userDatas))
++            m_FileDialogInternal.fileManager.ApplyFilteringOnFileList(m_FileDialogInternal);
++        ImGui::Separator();
++    }
+     ImVec2 size = ImGui::GetContentRegionAvail() - ImVec2(0.0f, m_FileDialogInternal.footerHeight);
+ 
+ #ifdef USE_PLACES_FEATURE
+     if (!(m_FileDialogInternal.getDialogConfig().flags & ImGuiFileDialogFlags_DisablePlaceMode)) {
+         if (m_PlacesPaneShown) {
++            if (m_PlacesPaneWidth <= 0.0f) {
++                // Give Places/Bookmarks enough room for TV-sized labels:
++                // enough for TV labels while preserving file and detail space,
++                // floor and a cap that always leaves room for the file list.
++                const float share = m_FileDialogInternal.getDialogConfig().sidePane
++                    ? 0.23f : 0.30f;
++                const float desired = std::max(size.x * share,
++                                               ImGui::GetFontSize() * 12.0f);
++                m_PlacesPaneWidth = std::min(desired, size.x * 0.36f);
++            }
++            m_PlacesPaneWidth = std::min(m_PlacesPaneWidth, size.x * 0.36f);
+             float otherWidth = size.x - m_PlacesPaneWidth;
++            const float placesMin = std::min(ImGui::GetFontSize() * 10.0f,
++                                             size.x * 0.40f);
++            const float filesMin = std::min(ImGui::GetFontSize() * 12.0f,
++                                            size.x * 0.45f);
+             ImGui::PushID("splitterplaces");
+-            IGFD::Utils::ImSplitter(true, 4.0f, &m_PlacesPaneWidth, &otherWidth, 10.0f, 10.0f + m_FileDialogInternal.getDialogConfig().sidePaneWidth, size.y);
++            IGFD::Utils::ImSplitter(true, 4.0f, &m_PlacesPaneWidth, &otherWidth,
++                                    placesMin,
++                                    filesMin + m_FileDialogInternal.getDialogConfig().sidePaneWidth,
++                                    size.y);
+             ImGui::PopID();
+             size.x -= otherWidth;
+             m_DrawPlacesPane(m_FileDialogInternal, size);
+@@ -4032,6 +4073,10 @@ void IGFD::FileDialog::m_DrawContent() {
+         m_DrawSidePane(size.y);
+     }
+ 
++    if (m_FileDialogInternal.getDialogConfig().filePopup)
++        m_FileDialogInternal.getDialogConfig().filePopup(
++            m_FileDialogInternal.getDialogConfig().userDatas);
++
+     if (!(m_FileDialogInternal.getDialogConfig().flags & ImGuiFileDialogFlags_DisableQuickPathSelection)) {
+         m_DisplayPathPopup(size);
+     }
+@@ -4316,6 +4361,8 @@ void IGFD::FileDialog::m_rightAlignText(const char* text, const char* maxWidthTe
+ 
+ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+     auto& fdi = m_FileDialogInternal.fileManager;
++    m_HighlightedFilePath.clear();
++    const bool showStatus = static_cast<bool>(m_FileDialogInternal.getDialogConfig().fileStatus);
+ 
+     ImGui::PushID(this);
+ 
+@@ -4325,7 +4372,7 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+ #endif  // USE_CUSTOM_SORTING_ICON
+         ;
+     const auto listViewID = ImGui::GetID("FileTable");
+-    if (ImGui::BeginTableEx("FileTable", listViewID, 4, flags, vSize, 0.0f)) {
++    if (ImGui::BeginTableEx("FileTable", listViewID, showStatus ? 5 : 4, flags, vSize, 0.0f)) {
+         ImGui::TableSetupScrollFreeze(0, 1);  // Make header always visible
+         ImGui::TableSetupColumn(fdi.headerFileName.c_str(), ImGuiTableColumnFlags_WidthStretch | (defaultSortOrderFilename ? ImGuiTableColumnFlags_PreferSortAscending : ImGuiTableColumnFlags_PreferSortDescending), -1, 0);
+         ImGui::TableSetupColumn(fdi.headerFileType.c_str(),
+@@ -4340,6 +4387,9 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+                                 ImGuiTableColumnFlags_WidthFixed | (defaultSortOrderDate ? ImGuiTableColumnFlags_PreferSortAscending : ImGuiTableColumnFlags_PreferSortDescending) |
+                                     ((m_FileDialogInternal.getDialogConfig().flags & ImGuiFileDialogFlags_HideColumnDate) ? ImGuiTableColumnFlags_DefaultHide : 0),
+                                 -1, 3);
++        if (showStatus)
++            ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed |
++                                    ImGuiTableColumnFlags_NoSort, ImGui::GetFontSize() * 7.0f, 4);
+ 
+ #ifndef USE_CUSTOM_SORTING_ICON
+         // Sort our data if sort specs have been changed!
+@@ -4359,7 +4409,7 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+                     fdi.sortingField        = IGFD::FileManager::SortingFieldEnum::FIELD_SIZE;
+                     fdi.sortingDirection[2] = direction;
+                     fdi.SortFields(m_FileDialogInternal);
+-                } else  // if (sorts_specs->Specs->ColumnUserID == 3) => alwayd true for the moment, to uncomment if we
++                } else if (sorts_specs->Specs->ColumnUserID == 3)
+                         // add a fourth column
+                 {
+                     fdi.sortingField        = IGFD::FileManager::SortingFieldEnum::FIELD_DATE;
+@@ -4374,7 +4424,7 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+         ImGui::TableHeadersRow();
+ #else   // USE_CUSTOM_SORTING_ICON
+         ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+-        for (int column = 0; column < 4; column++)  //-V112
++        for (int column = 0; column < (showStatus ? 5 : 4); column++)  //-V112
+         {
+             ImGui::TableSetColumnIndex(column);
+             const char* column_name = ImGui::TableGetColumnName(column);  // Retrieve name passed to TableSetupColumn()
+@@ -4403,7 +4453,7 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+                         fdi.sortingField = IGFD::FileManager::SortingFieldEnum::FIELD_SIZE;
+ 
+                     fdi.SortFields(m_FileDialogInternal);
+-                } else  // if (column == 3) => alwayd true for the moment, to uncomment if we add a fourth column
++                } else if (column == 3)
+                 {
+                     if (fdi.sortingField == IGFD::FileManager::SortingFieldEnum::FIELD_DATE)
+                         fdi.sortingDirection[3] = !fdi.sortingDirection[3];
+@@ -4448,6 +4498,8 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+                         }
+                         m_SelectableItem(i, pInfos, selected, _str.c_str());
+                         _rowHovered = ImGui::IsItemHovered();
++                        if ((_rowHovered || ImGui::IsItemFocused()) && pInfos->fileType.isFile())
++                            m_HighlightedFilePath = pInfos->filePath + IGFD::Utils::GetPathSeparator() + pInfos->fileNameExt;
+                         m_DisplayFileInfosTooltip(i, column_id, pInfos);
+                     }
+                     column_id++;                     // some columns can be hidden, but the id must keep good
+@@ -4471,6 +4523,12 @@ void IGFD::FileDialog::m_DrawFileListView(ImVec2 vSize) {
+                         m_drawColumnText(column_id, "%s", pInfos->fileModifDate.c_str(), selected, _rowHovered);
+                         m_DisplayFileInfosTooltip(i, column_id, pInfos);
+                     }
++                    if (showStatus && ImGui::TableNextColumn()) {
++                        ImGui::PushID(i);
++                        m_FileDialogInternal.getDialogConfig().fileStatus(pInfos.get(),
++                            m_FileDialogInternal.getDialogConfig().userDatas);
++                        ImGui::PopID();
++                    }
+                     m_EndFileColorIconStyle(_showColor, _font);
+                 }
+             }
+@@ -4762,6 +4820,14 @@ std::string IGFD::FileDialog::GetCurrentPath() {
+     return m_FileDialogInternal.fileManager.GetResultingPath();
+ }
+ 
++std::string IGFD::FileDialog::GetHighlightedFilePath() const {
++    return m_HighlightedFilePath;
++}
++
++void IGFD::FileDialog::RefreshFileFilter() {
++    m_FileDialogInternal.fileManager.ApplyFilteringOnFileList(m_FileDialogInternal);
++}
++
+ std::string IGFD::FileDialog::GetCurrentFileName(IGFD_ResultMode vFlag) {
+     return m_FileDialogInternal.fileManager.GetResultingFileName(m_FileDialogInternal, vFlag);
+ }
+diff --git a/ImGuiFileDialog.h b/ImGuiFileDialog.h
+index 54d67e5..f2bd24a 100644
+--- a/ImGuiFileDialog.h
++++ b/ImGuiFileDialog.h
+@@ -667,6 +667,10 @@ public:
+ typedef void* UserDatas;
+ typedef std::function<void(const char*, UserDatas, bool*)> PaneFun;        // side pane function binding
+ typedef std::function<bool(FileInfos*, UserDatas)> UserFileAttributesFun;  // custom file Attributes call back, reject file if false
++typedef std::function<void(const FileInfos*, UserDatas)> FileStatusFun;
++typedef std::function<bool(const FileInfos*, UserDatas)> FileFilterFun;
++typedef std::function<bool(UserDatas)> FileToolbarFun;
++typedef std::function<void(UserDatas)> FilePopupFun;
+ 
+ struct IGFD_API FileDialogConfig {
+     std::string path;                                        // path
+@@ -678,6 +682,10 @@ struct IGFD_API FileDialogConfig {
+     PaneFun sidePane;                                        // side pane callback
+     float sidePaneWidth = 250.0f;                            // side pane width
+     UserFileAttributesFun userFileAttributes;                // user file Attibutes callback
++    FileStatusFun fileStatus;                                 // optional compact status column
++    FileFilterFun fileFilter;                                 // optional live file filter
++    FileToolbarFun fileToolbar;                               // returns true when filter changed
++    FilePopupFun filePopup;                                   // child popup owned by the dialog
+ };
+ 
+ class IGFD_API FileDialogInternal {
+@@ -885,6 +893,7 @@ protected:
+     ImGuiListClipper m_PathListClipper;
+     float prOkCancelButtonWidth = 0.0f;
+     ImGuiWindowFlags m_CurrentDisplayedFlags;
++    std::string m_HighlightedFilePath;
+ 
+ public:
+ #ifndef NEW_SINGLETON
+@@ -958,6 +967,8 @@ public:
+     std::string GetFilePathName(IGFD_ResultMode vFlag = IGFD_ResultMode_AddIfNoFileExt);                     // Save File behavior : will return the current file path name
+     std::string GetCurrentFileName(IGFD_ResultMode vFlag = IGFD_ResultMode_AddIfNoFileExt);                  // Save File behavior : will return the content file name
+     std::string GetCurrentPath();                                                                            // will return current file path
++    std::string GetHighlightedFilePath() const;                                                              // focused/hovered file, for a live details pane
++    void RefreshFileFilter();                                                                                 // reapply an app-supplied live filter
+     std::string GetCurrentFilter();                                                                          // will return current filter
+     UserDatas GetUserDatas() const;                                                                          // will return user datas send with Open Dialog
+ 
